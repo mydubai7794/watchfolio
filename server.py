@@ -403,6 +403,9 @@ async def _monitor_loop():
                     "futures_index": code_to_futures.get(etf["code"], ""),
                     "futures_change": etf.get("futures_change"),
                     "iopv_source": etf.get("iopv_source", "N/A"),
+                    "weibi": etf.get("weibi", 0),
+                    "outer_vol": etf.get("outer_vol", 0),
+                    "inner_vol": etf.get("inner_vol", 0),
                 })
 
             await _broadcast("snapshot", {

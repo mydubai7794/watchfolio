@@ -339,8 +339,8 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
             <th>当前价</th>
             <th>涨幅%</th>
             <th>溢价%</th>
-            <th>买一量(手)</th>
-            <th>卖一量(手)</th>
+            <th>委比%</th>
+            <th>外盘(手)</th>
             <th>买/卖比</th>
             <th>期指走势</th>
           </tr>
@@ -486,8 +486,8 @@ function renderSnapshot(data) {
     const score = item.score || 0;
     const changePct = item.change_pct || 0;
     const premiumPct = item.premium_pct || 0;
-    const buy1Vol = Math.round((item.buy1_vol || 0) / 100);
-    const sell1Vol = Math.round((item.sell1_vol || 0) / 100);
+    const weibi = item.weibi || 0;
+    const outerVol = Math.round((item.outer_vol || 0) / 100);
     const ratio = item.ratio || 0;
     const futuresChange = item.futures_change;
     const price = item.price || 0;
@@ -540,8 +540,8 @@ function renderSnapshot(data) {
     html += '<td>' + price.toFixed(4) + '</td>';
     html += '<td class="' + changeClass + '">' + fmtPct(changePct) + '</td>';
     html += '<td>' + premiumText + '</td>';
-    html += '<td>' + buy1Vol.toLocaleString() + '</td>';
-    html += '<td>' + sell1Vol.toLocaleString() + '</td>';
+    html += '<td>' + weibi.toFixed(2) + '</td>';
+    html += '<td>' + outerVol.toLocaleString() + '</td>';
     html += '<td>' + ratio.toFixed(2) + '</td>';
     html += '<td>' + futuresHtml + '</td>';
     html += '</tr>';
