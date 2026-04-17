@@ -102,20 +102,36 @@ async def _wait_rate_limit(is_direct: bool) -> str | None:
 async def fetch_etf_batch() -> pd.DataFrame:
     """获取全部 ETF 实时行情（单次批量请求）。
 
-    返回 DataFrame 含列：
-    代码, 名称, 最新价, IOPV实时估值, 基金折价率(%), 涨跌幅(%),
-    委比(%), 外盘, 内盘, 买一, 卖一, ...
+    策略：先直连，失败后尝试代理。直连遵守 MIN_INTERVAL_SEC 限速。
     """
+    # 抑制 akshare 内部的 tqdm 进度条
+    os.environ["TQDM_DISABLE"] = "1"
+
+    # 第一次尝试：直连
     await _wait_rate_limit(is_direct=True)
     try:
         df = await asyncio.to_thread(ak.fund_etf_spot_em)
-        logger.info("ETF 批量行情获取成功，共 %d 条", len(df))
+        logger.info("ETF 批量行情获取成功(直连)，共 %d 条", len(df))
         return df
     except Exception as e:
-        logger.error("ETF 批量行情获取失败: %s", e)
-        return pd.DataFrame()
+        logger.warning("ETF 批量直连失败: %s", e)
     finally:
         _clear_proxy_env()
+
+    # 第二次尝试：走代理
+    proxy = _pick_proxy()
+    if proxy:
+        _set_proxy_env(proxy)
+        try:
+            df = await asyncio.to_thread(ak.fund_etf_spot_em)
+            logger.info("ETF 批量行情获取成功(代理 %s)，共 %d 条", proxy, len(df))
+            return df
+        except Exception as e:
+            logger.error("ETF 批量代理也失败: %s", e)
+        finally:
+            _clear_proxy_env()
+
+    return pd.DataFrame()
 
 
 # ---------------------------------------------------------------------------
@@ -123,17 +139,38 @@ async def fetch_etf_batch() -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 async def fetch_futures() -> pd.DataFrame:
-    """获取全球期指实时行情（单次批量请求）。"""
+    """获取全球期指实时行情（单次批量请求）。
+
+    策略：先直连，失败后尝试代理。
+    """
+    # 抑制 akshare 内部的 tqdm 进度条
+    os.environ["TQDM_DISABLE"] = "1"
+
+    # 第一次尝试：直连
     await _wait_rate_limit(is_direct=True)
     try:
         df = await asyncio.to_thread(ak.futures_global_spot_em)
-        logger.info("全球期指行情获取成功，共 %d 条", len(df))
+        logger.info("全球期指行情获取成功(直连)，共 %d 条", len(df))
         return df
     except Exception as e:
-        logger.error("全球期指行情获取失败: %s", e)
-        return pd.DataFrame()
+        logger.warning("期指直连失败: %s", e)
     finally:
         _clear_proxy_env()
+
+    # 第二次尝试：走代理
+    proxy = _pick_proxy()
+    if proxy:
+        _set_proxy_env(proxy)
+        try:
+            df = await asyncio.to_thread(ak.futures_global_spot_em)
+            logger.info("期指行情获取成功(代理 %s)，共 %d 条", proxy, len(df))
+            return df
+        except Exception as e:
+            logger.error("期指代理也失败: %s", e)
+        finally:
+            _clear_proxy_env()
+
+    return pd.DataFrame()
 
 
 def _parse_futures(futures_df: pd.DataFrame) -> dict[str, float | None]:
