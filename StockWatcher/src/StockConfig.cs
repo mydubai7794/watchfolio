@@ -18,11 +18,14 @@ namespace StockWatcher
 
         private static string CONFIG_PATH;
         private const string DEFAULT_REFRESH_INTERVAL = "5";
+        private const string DEFAULT_QDII_API_URL = "http://localhost:8000/api/quote";
         private const string DEFAULT_SETTING =
             INI_PROPERTY_REFRESH_INTERVAL + "=" + DEFAULT_REFRESH_INTERVAL + "\r\n" +
+            INI_PROPERTY_QDII_API_URL + "=" + DEFAULT_QDII_API_URL + "\r\n" +
             INI_PROPERTY_STOCK_LIST + "=" + CODE_SH_STOCK + "," + CODE_SZ_STOCK;
         private const string INI_PROPERTY_STOCK_LIST = "STOCK_LIST";
         private const string INI_PROPERTY_REFRESH_INTERVAL = "REFRESH_INTERVAL";
+        private const string INI_PROPERTY_QDII_API_URL = "QDII_API_URL";
 
         static StockConfig()
         {
@@ -69,6 +72,14 @@ namespace StockWatcher
                 INIHelper.Write(CONFIG_PATH, INI_PROPERTY_REFRESH_INTERVAL, DEFAULT_REFRESH_INTERVAL);
             }
             _RefreshInterval = _refreshInterval;
+
+            var qdiiApiUrlStr = INIHelper.Read(CONFIG_PATH, INI_PROPERTY_QDII_API_URL, DEFAULT_QDII_API_URL);
+            if (string.IsNullOrEmpty(qdiiApiUrlStr))
+            {
+                INIHelper.Write(CONFIG_PATH, INI_PROPERTY_QDII_API_URL, DEFAULT_QDII_API_URL);
+                qdiiApiUrlStr = DEFAULT_QDII_API_URL;
+            }
+            _QdiiApiUrl = qdiiApiUrlStr;
         }
 
         private static List<string> _StockList = null;
@@ -127,6 +138,24 @@ namespace StockWatcher
                     _RefreshInterval = value;
                 }
                 INIHelper.Write(CONFIG_PATH, INI_PROPERTY_REFRESH_INTERVAL, $"{_RefreshInterval}");
+            }
+        }
+
+        private static string _QdiiApiUrl = DEFAULT_QDII_API_URL;
+        public static string QdiiApiUrl
+        {
+            get { return _QdiiApiUrl; }
+            set
+            {
+                if (string.IsNullOrEmpty(value))
+                {
+                    _QdiiApiUrl = DEFAULT_QDII_API_URL;
+                }
+                else
+                {
+                    _QdiiApiUrl = value;
+                }
+                INIHelper.Write(CONFIG_PATH, INI_PROPERTY_QDII_API_URL, _QdiiApiUrl);
             }
         }
     }

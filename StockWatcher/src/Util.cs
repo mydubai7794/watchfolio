@@ -67,7 +67,21 @@ namespace StockWatcher
             {
                 return null;
             }
-            var codeStringBuilder = new StringBuilder();
+
+            var pureLetters = new System.Text.StringBuilder();
+            foreach (var item in code)
+            {
+                if ((item >= 'A' && item <= 'Z') || (item >= 'a' && item <= 'z'))
+                {
+                    pureLetters.Append(item);
+                }
+            }
+            if (pureLetters.Length > 0 && pureLetters.Length == code.Length)
+            {
+                return code.ToUpper();
+            }
+
+            var codeStringBuilder = new System.Text.StringBuilder();
             foreach (var item in code)
             {
                 if (item >= '0' && item <= '9')
@@ -88,11 +102,12 @@ namespace StockWatcher
             {
                 code = StockConfig.CODE_SZ_STOCK;
             }
-            else if (code.StartsWith("60") || code.StartsWith("900"))
+            else if (code.StartsWith("60") || code.StartsWith("900") || code.StartsWith("51"))
             {
                 code = $"sh{code}";
             }
-            else if (code.StartsWith("000") || code.StartsWith("002") || code.StartsWith("300") || code.StartsWith("200"))
+            else if (code.StartsWith("000") || code.StartsWith("002") || code.StartsWith("300")
+                     || code.StartsWith("200") || code.StartsWith("15"))
             {
                 code = $"sz{code}";
             }

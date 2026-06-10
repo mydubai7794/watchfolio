@@ -24,7 +24,7 @@ namespace StockWatcher
 
         private void buttonForAddStock_Click(object sender, EventArgs e)
         {
-            var input = Util.Input("请输入正确的股票代码：");
+            var input = Util.Input("请输入代码（股票/ETF/期指）：");
             var stockCode = Util.ReturnFixStockCode(input);
             if (stockCode == null)
             {

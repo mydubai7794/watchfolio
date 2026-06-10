@@ -69,19 +69,16 @@ namespace StockWatcher
                 Task.Run(async () =>
                 {
                     var currentCode = StockConfig.StockList[currentIndex];
-                    var stockModel = await GetStockInfo(currentCode);
-                    if (stockModel == null)
+                    var quoteModel = await GetQuoteInfo(currentCode);
+                    if (quoteModel == null)
                     {
                         UpdateStatus($"查询{currentCode}失败");
                     }
                     else
                     {
-                        labelForStatus.Tag = stockModel;
-                        UpdateStatus($"{stockModel.Name} {stockModel.CurrentPrice.ToString("F2")}\r\n{stockModel.LastClose.ToString("F2")} {(stockModel.IsUp ? "↑" : "↓")}" 
-                         , stockModel.IsUp ? StockColor.Red : StockColor.Green);
-                        //UpdateStatus($"{stockModel.Name} {stockModel.CurrentPrice.ToString("F2")}/{(stockModel.PricePercent*100).ToString("F1")}{(stockModel.IsUp ? "↑" : "↓")}" +
-                        //    $"\r\n{stockModel.BuyPrice1}-{(stockModel.BuyAmount1/10000f).ToString("F2")} / {stockModel.SellPrice1}-{(stockModel.SellAmount1/10000f).ToString("F2")}" 
-                        //    , stockModel.IsUp ? StockColor.Red : StockColor.Green);
+                        labelForStatus.Tag = quoteModel;
+                        UpdateStatus(quoteModel.DisplayText
+                            , quoteModel.IsUp ? StockColor.Red : StockColor.Green);
                     }
                 });
             }
@@ -126,120 +123,144 @@ namespace StockWatcher
             }
         }
 
-        private async Task<StockModel> GetStockInfo(string code)
+        private async Task<QuoteModel> GetQuoteInfo(string code)
         {
             try
             {
-                var res = await InvokeSinaApi(code);
-#if DEBUG
-                //Util.Log($"服务器返回值【{res}】");
-#endif
-                var startAt = res.IndexOf("\"") + 1;
-                if (startAt == -1)
+                var res = await InvokeQdiiApi(code);
+                if (string.IsNullOrEmpty(res))
                 {
-                    throw new Exception($"服务器返回数据异常：{res}");
+                    throw new Exception("qdii API 返回空响应");
                 }
-                var length = res.LastIndexOf("\"") - res.IndexOf("\"") - 1;
-                var result = res.Substring(startAt, length);
-                if (string.IsNullOrEmpty(result))
+                var serializer = new System.Web.Script.Serialization.JavaScriptSerializer();
+                var json = serializer.Deserialize<Dictionary<string, object>>(res);
+                var items = json["items"] as System.Collections.ArrayList;
+                if (items == null || items.Count == 0)
                 {
-                    throw new Exception($"服务器返回数据异常：{res}");
+                    throw new Exception($"代码 {code} 未在候选池中找到");
                 }
-                var arr = result.Split('~');
-                if (arr.Length < 3)
+                var item = (Dictionary<string, object>)items[0];
+                return new QuoteModel()
                 {
-                    throw new Exception($"服务器返回数据异常：{res}");
-                }
-                return new StockModel()
-                {
-                    Code = code.Substring(code.Length - 6),
-                    Name = arr[1],
-					CurrentPrice = float.Parse(arr[3]),
-					LastClose= float.Parse(arr[4]),
-                    BuyPrice1= float.Parse(arr[6]),
-                    BuyVolume1= 0,
-                    SellPrice1= 0,
-                    SellVolume1= 0
+                    Code = item.ContainsKey("code") ? (item["code"]?.ToString() ?? code) : code,
+                    Name = item.ContainsKey("name") ? (item["name"]?.ToString() ?? "") : "",
+                    Type = item.ContainsKey("type") ? (item["type"]?.ToString() ?? "stock") : "stock",
+                    CurrentPrice = item.ContainsKey("price") ? float.TryParse(item["price"]?.ToString(), out var p) ? p : 0 : 0,
+                    LastClose = item.ContainsKey("pre_close") ? float.TryParse(item["pre_close"]?.ToString(), out var pc) ? pc : 0 : 0,
+                    ChangePct = item.ContainsKey("change_pct") ? float.TryParse(item["change_pct"]?.ToString(), out var cp) ? cp : 0 : 0,
+                    Iopv = item.ContainsKey("iopv") ? float.TryParse(item["iopv"]?.ToString(), out var iv) ? iv : 0 : 0,
+                    PremiumPct = item.ContainsKey("premium_pct") ? float.TryParse(item["premium_pct"]?.ToString(), out var pp) ? pp : 0 : 0,
+                    BuyPrice1 = item.ContainsKey("buy1_price") ? float.TryParse(item["buy1_price"]?.ToString(), out var bp) ? bp : 0 : 0,
+                    BuyVolume1 = item.ContainsKey("buy1_vol") ? float.TryParse(item["buy1_vol"]?.ToString(), out var bv) ? bv : 0 : 0,
+                    SellPrice1 = item.ContainsKey("sell1_price") ? float.TryParse(item["sell1_price"]?.ToString(), out var sp) ? sp : 0 : 0,
+                    SellVolume1 = item.ContainsKey("sell1_vol") ? float.TryParse(item["sell1_vol"]?.ToString(), out var sv) ? sv : 0 : 0,
                 };
             }
             catch (Exception ex)
             {
                 errorCount++;
-                //记录日志
                 if (errorCount < 10)
                 {
-                    Util.Log($"查询股票【{code}】信息出错！", ex);
+                    Util.Log($"查询行情【{code}】出错！", ex);
                 }
-                
                 return null;
             }
         }
 
-        private async Task<string> InvokeSinaApi(string code)
+        private async Task<string> InvokeQdiiApi(string code)
         {
-			//var api = $"http://hq.sinajs.cn/list={code}";
-			var api = $"http://qt.gtimg.cn/q=s_{code}";
-			try
+            var api = $"{StockConfig.QdiiApiUrl}?codes={code}";
+            try
             {
                 using (var client = new HttpClient()
                 {
                     Timeout = TimeSpan.FromSeconds(5),
                 })
                 {
-                    client.DefaultRequestHeaders.Add("Referer", "http://finance.sina.com.cn");
                     return await client.GetStringAsync(api);
                 }
             }
             catch (Exception ex)
             {
-                //记录日志
-                Util.Log($"请求API【{api}】出错！", ex);
+                Util.Log($"请求qdii API【{api}】出错！", ex);
                 return "";
             }
         }
 
         private void labelForStatus_DoubleClick(object sender, EventArgs e)
         {
-            if (labelForStatus.Tag != null && labelForStatus.Tag is StockModel model)
+            if (labelForStatus.Tag != null && labelForStatus.Tag is QuoteModel model)
             {
-                Util.Info(
-                    $@"代码：{model.Code} 
-名称：{model.Name}
-现价：{model.CurrentPrice}
-买一：{model.BuyAmount1}
-卖一：{model.SellVolume1}"
-                , "查看详情");
+                Util.Info(model.DetailText, "查看详情");
             }
         }
     }
 
-    class StockModel
+    class QuoteModel
     {
         public string Code { get; set; }
         public string Name { get; set; }
+        public string Type { get; set; }
         public float CurrentPrice { get; set; }
         public float LastClose { get; set; }
-        public float PricePercent { get {
-              return  (CurrentPrice - LastClose) / LastClose;
-            } }
+        public float ChangePct { get; set; }
+        public float Iopv { get; set; }
+        public float PremiumPct { get; set; }
+        public float BuyPrice1 { get; set; }
+        public float BuyVolume1 { get; set; }
+        public float SellPrice1 { get; set; }
+        public float SellVolume1 { get; set; }
+
         public bool IsUp
+        {
+            get { return LastClose > 0 && CurrentPrice >= LastClose; }
+        }
+
+        public string DisplayText
         {
             get
             {
-                return LastClose > 0;
+                if (Type == "futures")
+                {
+                    return $"{Name} {(ChangePct >= 0 ? "+" : "")}{(ChangePct).ToString("F2")}%";
+                }
+                else if (Type == "etf" && Iopv > 0)
+                {
+                    return $"{Name} {CurrentPrice.ToString("F3")}\r\n{(PremiumPct >= 0 ? "+" : "")}{(PremiumPct).ToString("F2")}%";
+                }
+                else
+                {
+                    return $"{Name} {CurrentPrice.ToString("F2")}\r\n{(ChangePct >= 0 ? "+" : "")}{(ChangePct).ToString("F2")}%";
+                }
             }
         }
 
-        public float BuyPrice1 { get; set; }
-        public int BuyAmount1 { get {
-                return Convert.ToInt32( (this.BuyPrice1 * this.BuyVolume1) / 10000);
-            }  }
-        public float BuyVolume1 { get; set; }
-        public float SellPrice1 { get; set; }
-        public int SellAmount1 { get {
-                return Convert.ToInt32 (SellPrice1 * SellVolume1 / 10000);
-            } }
-        public float SellVolume1 { get; set; }
+        public string DetailText
+        {
+            get
+            {
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine($"代码：{Code}");
+                sb.AppendLine($"名称：{Name}");
+                sb.AppendLine($"类型：{Type}");
+                sb.AppendLine($"现价：{CurrentPrice}");
+                if (Type == "futures")
+                {
+                    sb.AppendLine($"涨跌幅：{(ChangePct >= 0 ? "+" : "")}{ChangePct.ToString("F2")}%");
+                }
+                else
+                {
+                    sb.AppendLine($"昨收：{LastClose}");
+                    sb.AppendLine($"涨跌幅：{(ChangePct >= 0 ? "+" : "")}{ChangePct.ToString("F2")}%");
+                    if (Iopv > 0)
+                    {
+                        sb.AppendLine($"IOPV：{Iopv.ToString("F3")}");
+                        sb.AppendLine($"溢价率：{(PremiumPct >= 0 ? "+" : "")}{PremiumPct.ToString("F2")}%");
+                    }
+                }
+                return sb.ToString();
+            }
+        }
     }
 
     enum StockColor
