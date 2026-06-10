@@ -22,8 +22,22 @@ SEED_ETFS = [
 ]
 
 
+SEED_CANDIDATES = [
+    ("600519", "贵州茅台", "stock", "tencent"),
+    ("000858", "五粮液",   "stock", "tencent"),
+    ("300750", "宁德时代", "stock", "tencent"),
+    ("601318", "中国平安", "stock", "tencent"),
+    ("NQ",     "纳斯达克期指", "futures", "sina_futures"),
+    ("ES",     "标普期指",     "futures", "sina_futures"),
+    ("YM",     "道琼斯期指",   "futures", "sina_futures"),
+    ("513100", "纳指ETF",   "etf",   "tencent"),
+    ("513500", "标普500ETF", "etf", "tencent"),
+    ("513050", "中概互联网ETF", "etf", "tencent"),
+]
+
+
 async def init():
-    from database import init_tables, close_pool, add_etf, get_etf_list
+    from database import init_tables, close_pool, add_etf, get_etf_list, get_candidate_list, add_candidate
 
     # 1. 建表 + 种子配置
     await init_tables()
@@ -42,6 +56,19 @@ async def init():
             logger.info("  . ETF %s 已存在，跳过", code)
 
     logger.info("种子 ETF 写入完成，新增 %d 条", added)
+
+    # 候选池种子
+    existing_candidates = await get_candidate_list()
+    existing_candidate_codes = {row["code"] for row in existing_candidates}
+    added_candidates = 0
+    for code, name, ctype, source in SEED_CANDIDATES:
+        if code not in existing_candidate_codes:
+            await add_candidate(code, name, ctype, source)
+            added_candidates += 1
+            logger.info("  + Candidate %s %s %s %s", code, name, ctype, source)
+        else:
+            logger.info("  . Candidate %s 已存在，跳过", code)
+    logger.info("种子候选池写入完成，新增 %d 条", added_candidates)
 
     # 3. 验证
     rows = await get_etf_list()
