@@ -564,6 +564,8 @@ async def _candidate_refresh_loop():
                         "pre_close": 0,
                         "change_pct": 0,
                     }
+                else:
+                    cache[c["code"]].setdefault("type", c["type"])
 
             candidate_cache = cache
             candidate_cache_time = time.monotonic()
@@ -618,6 +620,8 @@ async def _daily_init():
                 for c in candidates:
                     if c["code"] not in cache_init:
                         cache_init[c["code"]] = {"code": c["code"], "name": c["name"], "type": c["type"], "price": 0, "pre_close": 0, "change_pct": 0}
+                    else:
+                        cache_init[c["code"]].setdefault("type", c["type"])
                 candidate_cache = cache_init
                 candidate_cache_time = time.monotonic()
                 logger.info("候选池首次加载: %d 条", len(cache_init))

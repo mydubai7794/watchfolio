@@ -18,7 +18,7 @@ namespace StockWatcher
         private void LoadStockList()
         {
             var list = (from a in StockConfig.StockList
-                        select a.Substring(a.Length - 6)).ToList();
+                        select a.Length > 6 ? a.Substring(a.Length - 6) : a).ToList();
             this.textBoxStockList.Text = string.Join("\r\n", list);
         }
 
