@@ -839,3 +839,69 @@ async def fetch_etf_prev_day_changes(etf_codes: list[str]) -> dict[str, float]:
     logger.info("ETF昨日涨跌获取完成: %d/%d (%d代理, batch=%d)",
                 len(result), len(etf_codes), len(_proxies), batch_size)
     return result
+
+
+# ---------------------------------------------------------------------------
+# 候选池行情抓取 (股票/ETF/基金/指数 + 期指)
+# ---------------------------------------------------------------------------
+
+async def fetch_candidates(tencent_codes: list[str], futures_codes: list[str] | None = None) -> dict:
+    """抓取候选池行情数据。
+
+    按数据源分组批量请求：
+    1. 腾讯 API 批量获取 A 股品种（股票/ETF/基金/指数）
+    2. 期指路由获取期货数据
+
+    Args:
+        tencent_codes: 腾讯数据源的代码列表（纯数字，如 ['600519', '513100']）
+        futures_codes: 期指代码列表（如 ['NQ', 'ES', 'YM']），为 None 则不获取
+
+    Returns:
+        {
+            "quotes": [{"code": "600519", "name": "...", "price": ..., ...}, ...],
+            "futures": {"NQ": float|None, ...},
+            "errors": [...],
+            "fetch_time": "HH:MM:SS"
+        }
+    """
+    errors: list[str] = []
+    fetch_start = time.monotonic()
+
+    quote_data: list[dict] = []
+
+    if tencent_codes:
+        prefixed = [_add_prefix(c) for c in tencent_codes]
+        tencent_url = f"{TENCENT_BASE}{','.join(prefixed)}"
+
+        raw = await _http_get(tencent_url, source="tencent_candidate")
+        if raw:
+            quote_data, naming = _parse_tencent_quote(raw, tencent_codes)
+            logger.info("候选池腾讯行情: %d/%d 成功", len(quote_data), len(tencent_codes))
+
+            if naming:
+                try:
+                    import database as db
+                    await db.update_candidate_names(naming)
+                except Exception as e:
+                    logger.warning("候选池名称回写失败: %s", e)
+        else:
+            errors.append("候选池腾讯接口请求失败")
+
+    futures_data: dict[str, float | None] = {}
+    if futures_codes:
+        futures_data = await fetch_futures_with_routing(futures_codes)
+
+    elapsed = time.monotonic() - fetch_start
+    fetch_time = datetime.now().strftime("%H:%M:%S")
+
+    logger.info(
+        "候选池抓取完成: %d 条行情, %d 期指, 耗时 %.1fs",
+        len(quote_data), len(futures_data), elapsed,
+    )
+
+    return {
+        "quotes": quote_data,
+        "futures": futures_data,
+        "errors": errors,
+        "fetch_time": fetch_time,
+    }
