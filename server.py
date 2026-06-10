@@ -76,6 +76,8 @@ async def lifespan(app: FastAPI):
     monitor_running = False
     if monitor_task:
         monitor_task.cancel()
+    if candidate_refresh_task:
+        candidate_refresh_task.cancel()
     if daily_task:
         daily_task.cancel()
     if scheduler_task:
@@ -436,6 +438,83 @@ async def config_set(key: str, data: ConfigInput):
 
 
 # ---------------------------------------------------------------------------
+# Quote API (候选池行情 — 供外部客户端消费)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/quote")
+async def quote_list(codes: str = Query(default="", description="逗号分隔的代码列表，为空则返回全部")):
+    """返回候选池缓存的行情数据。"""
+    if not candidate_cache:
+        return {"items": [], "total": 0, "fetch_time": ""}
+
+    if codes:
+        code_list = [c.strip() for c in codes.split(",") if c.strip()]
+        items = [candidate_cache[c] for c in code_list if c in candidate_cache]
+    else:
+        items = list(candidate_cache.values())
+
+    return {
+        "items": items,
+        "total": len(items),
+        "fetch_time": datetime.now().strftime("%H:%M:%S"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Candidate Pool CRUD (候选池管理)
+# ---------------------------------------------------------------------------
+
+class CandidateInput(BaseModel):
+    code: str
+    name: str = ""
+    type: str = "stock"
+    source: str = "tencent"
+
+
+@app.get("/api/candidate")
+async def candidate_list():
+    rows = await db.get_candidate_list()
+    for row in rows:
+        for k, v in row.items():
+            if isinstance(v, datetime):
+                row[k] = v.isoformat()
+    return rows
+
+
+@app.post("/api/candidate")
+async def candidate_add(data: CandidateInput):
+    try:
+        affected = await db.add_candidate(data.code, data.name, data.type, data.source)
+        if affected:
+            return {"ok": True}
+        return JSONResponse(status_code=409, content={"ok": False, "message": "Candidate already exists"})
+    except Exception as e:
+        return JSONResponse(status_code=409, content={"ok": False, "message": str(e)})
+
+
+@app.delete("/api/candidate/{candidate_id}")
+async def candidate_delete(candidate_id: int):
+    affected = await db.delete_candidate(candidate_id)
+    if affected:
+        return {"ok": True}
+    return JSONResponse(status_code=404, content={"ok": False, "message": "Candidate not found"})
+
+
+@app.post("/api/candidate/{candidate_id}/toggle")
+async def candidate_toggle(candidate_id: int, enabled: Optional[bool] = Query(None)):
+    if enabled is not None:
+        affected = await db.execute(
+            "UPDATE candidate_pool SET enabled = %s WHERE id = %s",
+            (1 if enabled else 0, candidate_id),
+        )
+    else:
+        affected = await db.toggle_candidate(candidate_id)
+    if affected:
+        return {"ok": True}
+    return JSONResponse(status_code=404, content={"ok": False, "message": "Candidate not found"})
+
+
+# ---------------------------------------------------------------------------
 # 每日静态数据初始化（隔夜美股 + ETF昨日涨跌幅 + prev_close 更新）
 # ---------------------------------------------------------------------------
 
@@ -508,7 +587,7 @@ async def _daily_init():
     隔夜美股数据每次都会刷新（09:15 可能需要更新）。
     ETF 昨日涨跌幅同一天只计算一次。
     """
-    global overnight_data, prev_day_changes_cache, prev_day_changes_date
+    global overnight_data, prev_day_changes_cache, prev_day_changes_date, candidate_cache, candidate_cache_time
 
     logger.info("===== 每日静态数据初始化 开始 =====")
 
@@ -522,6 +601,26 @@ async def _daily_init():
         # 2. 隔夜美股收盘数据 — 每次都刷新
         overnight_data = await fetcher.fetch_overnight()
         logger.info("隔夜美股: %d 个指数", len(overnight_data))
+
+        # 2.5. 首次填充候选池缓存
+        if not candidate_cache:
+            candidates = await db.get_candidate_list(enabled_only=True)
+            tencent_codes = [c["code"] for c in candidates if c["source"] == "tencent"]
+            futures_codes = [c["code"] for c in candidates if c["source"] in ("sina_futures", "eastmoney_futures")]
+            if tencent_codes or futures_codes:
+                cresult = await fetcher.fetch_candidates(tencent_codes, futures_codes or None)
+                cache_init: dict = {}
+                for q in cresult.get("quotes", []):
+                    cache_init[q["code"]] = q
+                for code, change_pct in cresult.get("futures", {}).items():
+                    name = next((c["name"] for c in candidates if c["code"] == code), code)
+                    cache_init[code] = {"code": code, "name": name, "type": "futures", "change_pct": change_pct, "price": 0, "pre_close": 0}
+                for c in candidates:
+                    if c["code"] not in cache_init:
+                        cache_init[c["code"]] = {"code": c["code"], "name": c["name"], "type": c["type"], "price": 0, "pre_close": 0, "change_pct": 0}
+                candidate_cache = cache_init
+                candidate_cache_time = time.monotonic()
+                logger.info("候选池首次加载: %d 条", len(cache_init))
 
         # 3. ETF 昨日涨跌幅 — 同一天只算一次
         today_str = datetime.now().strftime("%Y-%m-%d")
