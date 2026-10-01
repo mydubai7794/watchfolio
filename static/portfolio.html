@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>我的持仓</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  background: #1a1a2e; color: #e0e0e0; font-size: 14px; min-height: 100vh; }
+.header { background: #16213e; padding: 12px 20px; display: flex; align-items: center; gap: 16px;
+  border-bottom: 2px solid #e94560; flex-wrap: wrap; }
+.header-title { font-size: 18px; font-weight: bold; color: #e94560; }
+.btn { padding: 6px 14px; border: none; border-radius: 4px; cursor: pointer; font-size: 13px; }
+.btn:hover { opacity: .85; }
+.btn-ghost { background: transparent; border: 1px solid #555; color: #e0e0e0; }
+.btn-primary { background: #e94560; color: #fff; }
+.status-area { margin-left: auto; display: flex; align-items: center; gap: 10px; font-size: 13px; color: #aaa; }
+.badge { padding: 2px 10px; border-radius: 10px; font-size: 12px; }
+.badge-pre { background: #3d3d7a; color: #a6a6ff; }
+.badge-regular { background: #1a4a2e; color: #00b894; }
+.badge-post { background: #4a3a1a; color: #fdcb6e; }
+.badge-closed { background: #333; color: #888; }
+.content { padding: 16px 20px; max-width: 1200px; margin: 0 auto; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-bottom: 16px; }
+.card { background: #16213e; border: 1px solid #2a2a4a; border-radius: 8px; padding: 16px 18px; }
+.card-label { font-size: 12px; color: #888; margin-bottom: 6px; }
+.card-value { font-size: 26px; font-weight: bold; }
+.card-sub { font-size: 12px; margin-top: 4px; color: #aaa; }
+.text-red { color: #e94560; } .text-green { color: #00b894; }
+.chart-box { background: #16213e; border: 1px solid #2a2a4a; border-radius: 8px; padding: 14px 16px; margin-bottom: 16px; }
+.chart-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+.chart-title { font-size: 14px; font-weight: bold; }
+.range-btn { padding: 2px 10px; font-size: 12px; background: transparent; border: 1px solid #444;
+  color: #888; border-radius: 4px; cursor: pointer; }
+.range-btn.active { border-color: #e94560; color: #e94560; }
+canvas { width: 100%; height: 220px; display: block; }
+table { width: 100%; border-collapse: collapse; background: #16213e; border-radius: 8px; overflow: hidden; }
+th, td { padding: 10px 12px; text-align: right; border-bottom: 1px solid #232345; font-size: 13px; white-space: nowrap; }
+th { color: #888; font-weight: 500; background: #1b1b38; }
+th:first-child, td:first-child { text-align: left; }
+.sym { color: #888; font-size: 12px; }
+.tag { font-size: 10px; padding: 1px 6px; border-radius: 3px; margin-left: 6px; }
+.tag-pre { background: #3d3d7a; } .tag-fund { background: #145a32; color: #7bed9f; }
+.tag-stale { background: #555; color: #ddd; }
+.modal-mask { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 10;
+  align-items: center; justify-content: center; }
+.modal-mask.show { display: flex; }
+.modal { background: #16213e; border: 1px solid #2a2a4a; border-radius: 8px; padding: 20px;
+  width: 640px; max-height: 80vh; overflow: auto; }
+.modal h3 { color: #e94560; margin-bottom: 12px; }
+.modal table td input { width: 100%; }
+.form-row { display: flex; gap: 10px; margin: 8px 0; flex-wrap: wrap; }
+.form-row input, .form-row select { flex: 1; min-width: 90px; padding: 7px 9px; background: #1a1a2e;
+  border: 1px solid #3a3a5a; border-radius: 4px; color: #e0e0e0; }
+.editable td:hover { background: #1e1e40; cursor: pointer; }
+.link { color: #e94560; cursor: pointer; text-decoration: none; }
+</style>
+</head>
+<body>
+<div class="header">
+  <a class="link" href="/static/index.html">‹ 监控</a>
+  <div class="header-title">我的持仓</div>
+  <span class="badge badge-closed" id="sessionBadge">--</span>
+  <button class="btn btn-primary" onclick="openEditor()">编辑持仓</button>
+  <div class="status-area">
+    <span id="fetchTime">--:--:--</span>
+    <span id="fxInfo"></span>
+    <a class="link" href="#" onclick="logout();return false;">登出</a>
+  </div>
+</div>
+
+<div class="content">
+  <div class="cards">
+    <div class="card"><div class="card-label">总资产 (USD)</div>
+      <div class="card-value" id="totalValue">$0.00</div>
+      <div class="card-sub" id="costInfo"></div></div>
+    <div class="card"><div class="card-label">今日盈亏</div>
+      <div class="card-value" id="dayPnl">$0.00</div>
+      <div class="card-sub" id="dayPnlPct"></div></div>
+    <div class="card"><div class="card-label">持仓盈亏</div>
+      <div class="card-value" id="totalPnl">$0.00</div>
+      <div class="card-sub" id="totalPnlPct"></div></div>
+  </div>
+
+  <div class="chart-box">
+    <div class="chart-head">
+      <div class="chart-title">总资产走势</div>
+      <div style="margin-left:auto">
+        <button class="range-btn active" data-r="intraday" onclick="switchRange('intraday',this)">当日分时</button>
+        <button class="range-btn" data-r="30" onclick="switchRange('30',this)">1月</button>
+        <button class="range-btn" data-r="90" onclick="switchRange('90',this)">3月</button>
+        <button class="range-btn" data-r="all" onclick="switchRange('all',this)">全部</button>
+      </div>
+    </div>
+    <canvas id="chart" width="1100" height="220"></canvas>
+  </div>
+
+  <table id="posTable">
+    <thead><tr>
+      <th>名称/代码</th><th>现价</th><th>涨跌幅</th><th>市值(USD)</th>
+      <th>今日盈亏</th><th>持仓盈亏</th><th>盈亏比例</th><th>成本价</th><th>数量</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</div>
+
+<div class="modal-mask" id="editorMask">
+  <div class="modal">
+    <h3>编辑持仓</h3>
+    <table id="editTable"><thead><tr>
+      <th>代码</th><th>名称</th><th>市场</th><th>数量</th><th>成本价</th><th>币种</th><th>启用</th><th></th>
+    </tr></thead><tbody></tbody></table>
+    <div class="form-row" id="newRow">
+      <input id="n_symbol" placeholder="代码 如 MU">
+      <input id="n_name" placeholder="名称">
+      <select id="n_market"><option value="US">US</option><option value="HKFUND">HKFUND</option></select>
+      <input id="n_quantity" placeholder="数量" type="number" step="any">
+      <input id="n_cost" placeholder="成本价" type="number" step="any">
+      <select id="n_currency"><option>USD</option><option>HKD</option></select>
+      <button class="btn btn-primary" onclick="addHolding()">新增</button>
+    </div>
+    <div style="text-align:right;margin-top:10px">
+      <button class="btn btn-ghost" onclick="closeEditor()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const SESSION_LABEL = {pre:'盘前', regular:'盘中', post:'盘后', closed:'休市'};
+const fmt = (v, d=2) => (v===null||v===undefined) ? '--' : Number(v).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
+const usd = v => (v===null||v===undefined) ? '--' : (v<0?'-$':'$') + fmt(Math.abs(v));
+const cls = v => v>0 ? 'text-red' : (v<0 ? 'text-green' : '');
+const sign = v => v>0?'+':'';
+
+async function logout() {
+  await fetch('/api/logout', {method:'POST'});
+  location.href = '/static/login.html';
+}
+
+function renderOverview(d) {
+  if (!d || !d.ok && !d.positions) return;
+  const s = d.summary || {};
+  document.getElementById('totalValue').textContent = usd(s.total_value);
+  document.getElementById('costInfo').textContent = '成本 $' + fmt(s.cost_basis);
+  const dp = document.getElementById('dayPnl');
+  dp.textContent = sign(s.day_pnl) + usd(s.day_pnl); dp.className = 'card-value ' + cls(s.day_pnl);
+  document.getElementById('dayPnlPct').textContent = sign(s.day_pnl_pct) + fmt(s.day_pnl_pct) + '%';
+  document.getElementById('dayPnlPct').className = 'card-sub ' + cls(s.day_pnl);
+  const tp = document.getElementById('totalPnl');
+  tp.textContent = sign(s.total_pnl) + usd(s.total_pnl); tp.className = 'card-value ' + cls(s.total_pnl);
+  document.getElementById('totalPnlPct').textContent = sign(s.total_pnl_pct) + fmt(s.total_pnl_pct) + '%';
+  document.getElementById('totalPnlPct').className = 'card-sub ' + cls(s.total_pnl);
+  const badge = document.getElementById('sessionBadge');
+  badge.textContent = SESSION_LABEL[d.session] || d.session;
+  badge.className = 'badge badge-' + (d.session || 'closed');
+  document.getElementById('fetchTime').textContent = d.fetch_time || '--';
+  document.getElementById('fxInfo').textContent = 'USD/HKD ' + fmt(d.fx_usdhkd, 4) + (d.fx_fallback ? '(默认)' : '');
+
+  const tbody = document.querySelector('#posTable tbody');
+  tbody.innerHTML = '';
+  (d.positions || []).forEach(p => {
+    const tr = document.createElement('tr');
+    let tags = '';
+    if (p.market === 'HKFUND') tags += '<span class="tag tag-fund">官方日频</span>';
+    else if (p.ext === 'pre/post') tags += '<span class="tag tag-pre">扩展时段</span>';
+    if (p.stale) tags += '<span class="tag tag-stale">无行情</span>';
+    const sub = p.market === 'HKFUND' ? (p.nav_date || '') : (p.quote_time || '');
+    tr.innerHTML = `<td><div>${p.name||p.symbol}${tags}</div><div class="sym">${p.symbol} ${sub}</div></td>
+      <td>${p.price ? fmt(p.price, p.market==='HKFUND'?4:2) : '--'}</td>
+      <td class="${cls(p.change_pct)}">${p.change_pct===null?'--':sign(p.change_pct)+fmt(p.change_pct)+'%'}</td>
+      <td>$${fmt(p.value)}</td>
+      <td class="${cls(p.today_pnl)}">${p.today_pnl===null?'--':sign(p.today_pnl)+'$'+fmt(Math.abs(p.today_pnl))}</td>
+      <td class="${cls(p.position_pnl)}">${p.position_pnl===null?'--':sign(p.position_pnl)+'$'+fmt(Math.abs(p.position_pnl))}</td>
+      <td class="${cls(p.position_pnl_pct)}">${p.position_pnl_pct===null?'--':sign(p.position_pnl_pct)+fmt(p.position_pnl_pct)+'%'}</td>
+      <td>${fmt(p.cost_price)}</td><td>${fmt(p.quantity,0)}</td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+let chartData = null, chartMode = 'intraday';
+function switchRange(mode, btn) {
+  chartMode = mode;
+  document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  loadChart();
+}
+async function loadChart() {
+  let url = chartMode === 'intraday' ? '/api/portfolio/intraday' : '/api/portfolio/daily?range=' + chartMode;
+  try {
+    const d = await (await fetch(url)).json();
+    chartData = chartMode === 'intraday'
+      ? (d.points || []).map(p => ({x: p.ts, y: p.v}))
+      : (d.days || []).map(p => ({x: p.date, y: p.v}));
+    drawChart();
+  } catch (e) { console.warn(e); }
+}
+function drawChart() {
+  const cv = document.getElementById('chart'), ctx = cv.getContext('2d');
+  const W = cv.width = cv.clientWidth * 2, H = cv.height = 440;
+  ctx.clearRect(0, 0, W, H);
+  const pts = chartData || [];
+  if (pts.length < 2) {
+    ctx.fillStyle = '#666'; ctx.font = '28px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(pts.length ? '数据积累中…' : '暂无历史数据', W/2, H/2);
+    return;
+  }
+  const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+  let ymin = Math.min(...ys), ymax = Math.max(...ys);
+  if (ymax - ymin < 1e-9) { ymax += 1; ymin -= 1; }
+  const pad = (ymax - ymin) * 0.1; ymin -= pad; ymax += pad;
+  const L = 130, R = 30, T = 20, B = 40;
+  const px = i => L + (W - L - R) * i / (pts.length - 1);
+  const py = v => T + (H - T - B) * (1 - (v - ymin) / (ymax - ymin));
+  // 网格与Y轴刻度
+  ctx.strokeStyle = '#232345'; ctx.fillStyle = '#888'; ctx.font = '20px sans-serif'; ctx.textAlign = 'right';
+  for (let i = 0; i <= 4; i++) {
+    const v = ymin + (ymax - ymin) * i / 4, y = py(v);
+    ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(W - R, y); ctx.stroke();
+    ctx.fillText('$' + fmt(v, 0), L - 10, y + 7);
+  }
+  // 首值虚线基准
+  ctx.setLineDash([8, 6]); ctx.strokeStyle = '#444';
+  ctx.beginPath(); ctx.moveTo(L, py(ys[0])); ctx.lineTo(W - R, py(ys[0])); ctx.stroke();
+  ctx.setLineDash([]);
+  // 折线（高于首值红、低于绿）
+  const up = ys[ys.length-1] >= ys[0];
+  ctx.strokeStyle = up ? '#e94560' : '#00b894'; ctx.lineWidth = 3; ctx.beginPath();
+  pts.forEach((p, i) => i ? ctx.lineTo(px(i), py(p.y)) : ctx.moveTo(px(i), py(p.y)));
+  ctx.stroke();
+  // X轴标签（等间隔取5个）
+  ctx.textAlign = 'center'; ctx.fillStyle = '#888';
+  for (let i = 0; i < 5; i++) {
+    const idx = Math.round((pts.length - 1) * i / 4);
+    ctx.fillText(String(xs[idx]), px(idx), H - 12);
+  }
+}
+
+async function refresh() {
+  try { renderOverview(await (await fetch('/api/portfolio/overview')).json()); }
+  catch (e) { console.warn(e); }
+}
+
+// ---- 编辑器 ----
+let editRows = [];
+async function openEditor() {
+  editRows = await (await fetch('/api/portfolio/holding')).json();
+  renderEditTable();
+  document.getElementById('editorMask').classList.add('show');
+}
+function closeEditor() { document.getElementById('editorMask').classList.remove('show'); refresh(); }
+function renderEditTable() {
+  const tb = document.querySelector('#editTable tbody'); tb.innerHTML = '';
+  editRows.forEach((h, i) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${h.symbol}</td>
+      <td><input value="${h.name||''}" data-k="name"></td>
+      <td><select data-k="market"><option ${h.market==='US'?'selected':''}>US</option><option ${h.market==='HKFUND'?'selected':''}>HKFUND</option></select></td>
+      <td><input type="number" step="any" value="${h.quantity}" data-k="quantity"></td>
+      <td><input type="number" step="any" value="${h.cost_price}" data-k="cost_price"></td>
+      <td><select data-k="currency"><option ${h.currency==='USD'?'selected':''}>USD</option><option ${h.currency==='HKD'?'selected':''}>HKD</option></select></td>
+      <td><input type="checkbox" ${h.enabled?'checked':''} data-k="enabled"></td>
+      <td><button class="btn btn-ghost" onclick="saveRow(${i})">存</button>
+          <button class="btn btn-ghost" onclick="delRow(${h.id})">删</button></td>`;
+    tr.querySelectorAll('[data-k]').forEach(el => el.addEventListener('change', () => {
+      editRows[i][el.dataset.k] = el.type === 'checkbox' ? (el.checked ? 1 : 0) : el.value;
+    }));
+    tb.appendChild(tr);
+  });
+}
+async function saveRow(i) {
+  const h = editRows[i];
+  await fetch('/api/portfolio/holding/' + h.id, {method:'PUT', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({name:h.name, market:h.market, quantity:Number(h.quantity),
+      cost_price:Number(h.cost_price), currency:h.currency, enabled:Number(h.enabled?1:0), sort_order:h.sort_order||0})});
+  openEditor();
+}
+async function delRow(id) {
+  await fetch('/api/portfolio/holding/' + id, {method:'DELETE'});
+  openEditor();
+}
+async function addHolding() {
+  await fetch('/api/portfolio/holding', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({symbol:v('n_symbol'), name:v('n_name'), market:v('n_market'),
+      quantity:Number(v('n_quantity')||0), cost_price:Number(v('n_cost')||0), currency:v('n_currency')})});
+  openEditor();
+}
+const v = id => document.getElementById(id).value.trim();
+
+refresh(); loadChart();
+setInterval(refresh, 10000);
+setInterval(() => { if (chartMode === 'intraday') loadChart(); }, 30000);
+</script>
+</body>
+</html>
