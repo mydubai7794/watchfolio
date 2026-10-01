@@ -44,6 +44,13 @@ class TestParseTencentUs:
         quotes = pf.parse_tencent_us(TENCENT_RAW, ["NOPE"])
         assert "NOPE" not in quotes
 
+    def test_truncated_line(self):
+        # 构造只有 37 个字段的截断行（< 守卫阈值 38）：不应抛 IndexError 且该 symbol 不入结果
+        mu_fields = TENCENT_RAW.split('"')[1].split("~")[:37]
+        truncated = 'v_usMU="' + "~".join(mu_fields) + '";\n'
+        quotes = pf.parse_tencent_us(truncated, ["MU"])
+        assert "MU" not in quotes
+
 
 SINA_RAW = 'var hq_str_gb_mu="美光,1065.1100,0.00,2026-10-01 21:27:06,0.0000,0.0000,0.0000,0.0000,1254.8500,179.1950,0,25290278,1202386340212,44.80,23.770000,0.00,0.00,0.00,0.00,1128884660,85,1051.9950,-1.23,-13.12,Oct 01 09:27AM EDT,Oct 01 09:10AM EDT,1065.1100,2127019,1,2026,0.0000,1086.4100,1050.2500,2258052759.8623,1072.6400,1065.1100";\nvar hq_str_gb_skhy="SK海力士,184.1500,0.00,2026-10-01 21:27:04,0.0000,0.0000,0.0000,0.0000,199.8650,124.8000,0,20495622,1342205818250,0.00,--,0.00,-0.01,0.00,0.00,7288655000,0,0,0.00,0.00,,,184.1500,1035173,1,2026,0.0000,189.1400,183.0000,193308509.9160,183.0000,184.1500";\n'
 
@@ -120,3 +127,15 @@ class TestBuildPositions:
         positions, summary = pf.build_positions(HOLDINGS, {}, FUND, 7.8)
         mu = next(p for p in positions if p["symbol"] == "MU")
         assert mu["price"] == 0 and mu["value"] == 0 and mu["stale"] is True
+
+    def test_stale_cost_basis(self):
+        # 行情与净值均缺失：stale 行的成本仍需按 USD 口径计入 cost_basis，total_value 归零
+        positions, summary = pf.build_positions(HOLDINGS, {}, None, 7.8)
+        mu = next(p for p in positions if p["symbol"] == "MU")
+        fund = next(p for p in positions if p["symbol"] == "HK0000740297")
+        assert mu["stale"] is True and fund["stale"] is True
+        assert mu["cost_usd"] == 90000.0
+        assert fund["cost_usd"] == 13.0 * 5000 / 7.8      # HKD 成本折算 USD，而非 13.0*5000
+        assert summary["total_value"] == 0.0
+        assert summary["cost_basis"] == 90000.0 + 13.0 * 5000 / 7.8
+        assert summary["total_pnl"] == summary["cost_basis"] * -1

@@ -17,11 +17,10 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-try:
-    from zoneinfo import ZoneInfo
-    ET_TZ = ZoneInfo("America/New_York")
-except Exception:  # 兜底：无 tzdata 时退化为固定 UTC-4/5 不可行，直接报错更安全
-    raise
+from zoneinfo import ZoneInfo
+
+# 美东时区（DST 自动正确；缺失 tzdata 时 import 阶段直接报错，保持 fail-fast）
+ET_TZ = ZoneInfo("America/New_York")
 
 # ---------------------------------------------------------------------------
 # 接口常量
@@ -98,7 +97,8 @@ def parse_tencent_us(raw: str, symbols: list[str]) -> dict[str, dict]:
         if not m or not m.group(1):
             continue
         f = m.group(1).split("~")
-        if len(f) < 36:
+        # 守卫阈值必须大于最大访问索引 37（currency=f[37]），否则截断行会抛 IndexError
+        if len(f) < 38:
             continue
         price, pre_close = _f(f[3]), _f(f[4])
         change_pct = (price - pre_close) / pre_close * 100 if pre_close > 0 else 0.0
@@ -186,30 +186,33 @@ def build_positions(holdings: list[dict], us_quotes: dict[str, dict],
         sym, qty, cost = h["symbol"], float(h["quantity"]), float(h["cost_price"])
         if h["market"] == "HKFUND":
             if not fund or not fund.get("nav"):
-                positions.append(_position(h, 0.0, None, None, None, "fund", True))
-                continue
-            nav, prev = fund["nav"], fund.get("prev_nav") or 0.0
-            value = nav * qty / fx
-            today = (nav - prev) * qty / fx if prev > 0 else 0.0
-            pnl = (nav - cost) * qty / fx
-            cost_usd = cost * qty / fx
-            base_value += prev * qty / fx if prev > 0 else value
-            positions.append(_position(h, nav, value, today, pnl, "fund", False,
-                                       cost_usd=cost_usd, nav_date=str(fund.get("nav_date", "")),
-                                       nav_change_pct=fund.get("nav_change_pct")))
+                # 行情/净值缺失(stale)：成本按 HKD/汇率折算 USD 口径，且落入循环末尾统一累加，避免 cost_basis 漏计失真
+                positions.append(_position(h, 0.0, None, None, None, "fund", True,
+                                           cost_usd=cost * qty / fx))
+            else:
+                nav, prev = fund["nav"], fund.get("prev_nav") or 0.0
+                value = nav * qty / fx
+                today = (nav - prev) * qty / fx if prev > 0 else 0.0
+                pnl = (nav - cost) * qty / fx
+                cost_usd = cost * qty / fx
+                base_value += prev * qty / fx if prev > 0 else value
+                positions.append(_position(h, nav, value, today, pnl, "fund", False,
+                                           cost_usd=cost_usd, nav_date=str(fund.get("nav_date", "")),
+                                           nav_change_pct=fund.get("nav_change_pct")))
         else:
             q = us_quotes.get(sym)
             if not q or not q.get("price"):
+                # 行情缺失(stale)：USD 成本口径不变(默认 cost*qty)，落入循环末尾统一累加
                 positions.append(_position(h, 0.0, None, None, None, "none", True))
-                continue
-            price_now = q["ext_price"] if q.get("ext_price") else q["price"]
-            ext = "pre/post" if q.get("ext_price") else "regular"
-            value = price_now * qty
-            today = (price_now - q["pre_close"]) * qty if q["pre_close"] > 0 else 0.0
-            pnl = (price_now - cost) * qty
-            base_value += q["pre_close"] * qty if q["pre_close"] > 0 else value
-            positions.append(_position(h, price_now, value, today, pnl, ext, False,
-                                       pre_close=q["pre_close"], quote_time=q.get("ext_time") or q.get("quote_time", "")))
+            else:
+                price_now = q["ext_price"] if q.get("ext_price") else q["price"]
+                ext = "pre/post" if q.get("ext_price") else "regular"
+                value = price_now * qty
+                today = (price_now - q["pre_close"]) * qty if q["pre_close"] > 0 else 0.0
+                pnl = (price_now - cost) * qty
+                base_value += q["pre_close"] * qty if q["pre_close"] > 0 else value
+                positions.append(_position(h, price_now, value, today, pnl, ext, False,
+                                           pre_close=q["pre_close"], quote_time=q.get("ext_time") or q.get("quote_time", "")))
         p = positions[-1]
         total_value += p["value"]
         total_cost += p["cost_usd"]
@@ -303,7 +306,7 @@ async def fetch_us_quotes(symbols: list[str], session: str | None = None) -> dic
                     q["ext_time"] = e["ext_time"]
 
     # 东财兜底：主源整体失败且连续>=3轮、距上次>=60s
-    if not quotes and _em_fail_streak >= _EM_FAIL_THRESHOLD and time.monotonic() - _last_em_used > _EM_MIN_INTERVAL_SEC:
+    if not quotes and _em_fail_streak >= _EM_FAIL_THRESHOLD and time.monotonic() - _last_em_used >= _EM_MIN_INTERVAL_SEC:
         _last_em_used = time.monotonic()
         secids = ",".join(f"{EM_MARKET_MAP.get(s, EM_DEFAULT_MARKET)}.{s}" for s in symbols)
         try:
