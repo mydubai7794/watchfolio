@@ -250,3 +250,110 @@ def _position(h: dict, price, value, today, pnl, ext, stale,
         "ext": ext, "stale": stale,
         "quote_time": quote_time, "nav_date": nav_date, "nav_change_pct": nav_change_pct,
     }
+
+
+# ---------------------------------------------------------------------------
+# 网络函数（境内源直连；FT 优先走代理池）
+# ---------------------------------------------------------------------------
+
+async def _get_text(url: str, headers: dict | None = None, timeout: float = 10.0) -> str | None:
+    """GET 并按 GBK 解码（腾讯/新浪），失败返回 None。"""
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(url, headers=headers or {})
+            if resp.status_code == 200:
+                return resp.content.decode("gbk", errors="replace")
+            logger.warning("GET %s → HTTP %d", url[:70], resp.status_code)
+    except Exception as e:
+        logger.warning("GET %s 失败: %s", url[:70], e)
+    return None
+
+
+async def fetch_us_quotes(symbols: list[str], session: str | None = None) -> dict[str, dict]:
+    """抓取美股行情：腾讯批量主源 + 扩展时段新浪批量 + 东财兜底。
+
+    返回 {symbol: quote}，quote 含 price/pre_close/ext_price/ext_time 等。
+    """
+    global _em_fail_streak, _last_em_used
+    if not symbols:
+        return {}
+    if session is None:
+        session, _, _ = us_market_session()
+
+    raw = await _get_text(TENCENT_US_URL.format(symbols=",".join("us" + s for s in symbols)))
+    quotes: dict[str, dict] = {}
+    if raw:
+        quotes = parse_tencent_us(raw, symbols)
+        _em_fail_streak = 0
+    else:
+        _em_fail_streak += 1
+
+    # 扩展时段合并新浪盘前盘后价
+    if session in ("pre", "post") and quotes:
+        raw2 = await _get_text(
+            SINA_US_URL.format(symbols=",".join("gb_" + s.lower() for s in symbols)),
+            headers=SINA_HEADERS,
+        )
+        if raw2:
+            ext = parse_sina_us(raw2, symbols)
+            for sym, q in quotes.items():
+                e = ext.get(sym)
+                if e and e.get("ext_price", 0) > 0:
+                    q["ext_price"] = e["ext_price"]
+                    q["ext_time"] = e["ext_time"]
+
+    # 东财兜底：主源整体失败且连续>=3轮、距上次>=60s
+    if not quotes and _em_fail_streak >= _EM_FAIL_THRESHOLD and time.monotonic() - _last_em_used > _EM_MIN_INTERVAL_SEC:
+        _last_em_used = time.monotonic()
+        secids = ",".join(f"{EM_MARKET_MAP.get(s, EM_DEFAULT_MARKET)}.{s}" for s in symbols)
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(EM_ULIST_URL, params={
+                    "secids": secids, "fields": EM_FIELDS, "fltt": "2", "invt": "2"})
+                data = resp.json()
+                for item in (data.get("data") or {}).get("diff") or []:
+                    sym = item.get("f12")
+                    if sym in symbols:
+                        quotes[sym] = {
+                            "symbol": sym, "name": item.get("f14", ""),
+                            "price": _f(item.get("f2")), "pre_close": _f(item.get("f18")),
+                            "change_pct": _f(item.get("f3")), "high": 0.0, "low": 0.0,
+                            "currency": "USD", "quote_time": "",
+                            "ext_price": 0.0, "ext_time": "",
+                        }
+                logger.info("东财兜底: %d/%d", len(quotes), len(symbols))
+        except Exception as e:
+            logger.warning("东财兜底失败: %s", e)
+
+    return quotes
+
+
+async def fetch_fx_usdhkd() -> tuple[float, bool]:
+    """获取 USD/HKD 汇率。返回 (汇率, 是否兜底)。"""
+    raw = await _get_text(SINA_FX_URL, headers=SINA_HEADERS)
+    v = parse_fx_usdhkd(raw or "")
+    if v > 0:
+        return v, False
+    return FX_FALLBACK, True
+
+
+async def fetch_fund_nav(proxy_urls: list[str] | None = None) -> dict | None:
+    """FT 官网 GraphQL 获取基金净值。优先代理（前2个），最后直连重试。"""
+    payload = {"query": FT_FUND_QUERY, "variables": FT_FUND_VARS}
+    candidates = list(proxy_urls or [])[:2] + [None]
+    last_err = ""
+    for proxy in candidates:
+        try:
+            async with httpx.AsyncClient(timeout=15, proxy=proxy) as client:
+                resp = await client.post(FT_PDS_URL, json=payload, headers=FT_HEADERS)
+                if resp.status_code == 200:
+                    parsed = parse_ft_nav(resp.json())
+                    if parsed:
+                        return parsed
+                    last_err = "nav 解析失败"
+                else:
+                    last_err = f"HTTP {resp.status_code}"
+        except Exception as e:
+            last_err = str(e)
+    logger.warning("FT 基金净值获取失败: %s", last_err)
+    return None
