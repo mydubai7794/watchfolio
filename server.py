@@ -75,6 +75,8 @@ _captchas: dict[str, dict] = {}
 CAPTCHA_TTL = 300  # 验证码 5 分钟有效
 # 登录限速: ip -> [时间戳...]
 _login_attempts: dict[str, list[float]] = {}
+# 验证码下发限速: ip -> [时间戳...]
+_captcha_attempts: dict[str, list[float]] = {}
 
 
 def _create_session(username: str) -> str:
@@ -323,8 +325,19 @@ def _generate_captcha() -> tuple[int, str]:
 
 
 @app.get("/api/captcha")
-async def captcha():
+async def captcha(request: Request):
     """下发算术验证码（免鉴权，5 分钟有效，一次性）。"""
+    # 下发限速：每 IP 每分钟最多 30 次（防公网无限刷 PIL 生成）
+    client_ip = request.client.host if request.client else "?"
+    now_ts = time.time()
+    attempts = [t for t in _captcha_attempts.get(client_ip, []) if now_ts - t < 60]
+    if not attempts:
+        # 60s 窗口外无记录，回收 key 防止无界增长
+        _captcha_attempts.pop(client_ip, None)
+    if len(attempts) >= 30:
+        return JSONResponse(status_code=429, content={"ok": False, "message": "请求过于频繁"})
+    attempts.append(now_ts)
+    _captcha_attempts[client_ip] = attempts
     captcha_id = secrets.token_hex(8)
     answer, b64 = _generate_captcha()
     _captchas[captcha_id] = {"answer": answer, "expires": time.time() + CAPTCHA_TTL}
@@ -345,6 +358,9 @@ async def login(data: LoginInput, request: Request):
     client_ip = request.client.host if request.client else "?"
     now_ts = time.time()
     attempts = [t for t in _login_attempts.get(client_ip, []) if now_ts - t < 60]
+    if not attempts:
+        # 60s 窗口外无记录，回收 key 防止无界增长
+        _login_attempts.pop(client_ip, None)
     if len(attempts) >= 10:
         return JSONResponse(status_code=429, content={"ok": False, "message": "尝试过于频繁，请稍后再试"})
     attempts.append(now_ts)
@@ -1168,7 +1184,16 @@ async def _portfolio_loop():
             break
         except Exception as e:
             logger.exception("持仓采集循环错误: %s", e)
+            # 故障时钳制最小间隔，避免 10s 高频刷异常日志
+            interval = max(interval, 30.0)
         await asyncio.sleep(interval)
+
+
+def _next_fund_nav_run(now: datetime) -> datetime:
+    """计算基金净值任务下一次执行时刻（北京 14:00/20:00，过点顺延次日）。"""
+    targets = [now.replace(hour=14, minute=0, second=0, microsecond=0),
+               now.replace(hour=20, minute=0, second=0, microsecond=0)]
+    return next((t for t in targets if t > now), targets[0] + timedelta(days=1))
 
 
 async def _fund_nav_loop():
@@ -1199,9 +1224,7 @@ async def _fund_nav_loop():
             await asyncio.sleep(1800)
             continue
         now = datetime.now()
-        targets = [now.replace(hour=14, minute=0, second=0, microsecond=0),
-                   now.replace(hour=20, minute=0, second=0, microsecond=0)]
-        nxt = next((t for t in targets if t > now), targets[0] + timedelta(days=1))
+        nxt = _next_fund_nav_run(now)
         await asyncio.sleep((nxt - now).total_seconds())
 
 
@@ -1248,9 +1271,9 @@ async def portfolio_intraday(trade_date: str = Query(default="")):
 
 
 @app.get("/api/portfolio/daily")
-async def portfolio_daily(range: str = Query(default="30")):
+async def portfolio_daily(days_range: str = Query(default="30", alias="range")):
     """历史日线（每美东交易日最后一条采样）。range: 30/90/all。"""
-    days = 3650 if range == "all" else (90 if range == "90" else 30)
+    days = 3650 if days_range == "all" else (90 if days_range == "90" else 30)
     rows = await db.get_portfolio_daily(days)
     return {"ok": True, "days": [
         {"date": str(r["date"]), "v": float(r["total_value"]),
@@ -1273,14 +1296,22 @@ async def holding_add(data: HoldingInput):
     symbol = data.symbol.strip().upper()
     if not symbol:
         return JSONResponse(status_code=400, content={"ok": False, "message": "symbol 不能为空"})
-    await db.upsert_holding(symbol, data.name.strip(), data.market.strip() or "US",
+    # market 枚举校验（规范化大小写后校验，防非法值静默入库）
+    mkt = data.market.strip().upper()
+    if mkt not in ("US", "HKFUND"):
+        return JSONResponse(status_code=400, content={"ok": False, "message": "market 必须为 US 或 HKFUND"})
+    await db.upsert_holding(symbol, data.name.strip(), mkt,
                             data.quantity, data.cost_price, data.currency.strip() or "USD")
     return {"ok": True}
 
 
 @app.put("/api/portfolio/holding/{holding_id}")
 async def holding_update(holding_id: int, data: HoldingUpdateInput):
-    affected = await db.update_holding(holding_id, data.name.strip(), data.market.strip() or "US",
+    # market 枚举校验（规范化大小写后校验，防非法值静默入库）
+    mkt = data.market.strip().upper()
+    if mkt not in ("US", "HKFUND"):
+        return JSONResponse(status_code=400, content={"ok": False, "message": "market 必须为 US 或 HKFUND"})
+    affected = await db.update_holding(holding_id, data.name.strip(), mkt,
                                        data.quantity, data.cost_price, data.currency.strip() or "USD",
                                        data.enabled, data.sort_order)
     if affected:
