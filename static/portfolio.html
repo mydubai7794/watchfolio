@@ -127,6 +127,27 @@ th:first-child, td:first-child { text-align: left; }
 </div>
 
 <script>
+// HTML 转义：名称/代码等用户可控字段插入 DOM 前统一转义，防止 XSS
+function esc(str) {
+  if (!str) return '';
+  var div = document.createElement('div');
+  div.appendChild(document.createTextNode(str));
+  return div.innerHTML;
+}
+
+// 全局拦截 fetch 响应，401 时跳转登录页
+(function patchFetch() {
+  var originalFetch = window.fetch;
+  window.fetch = function() {
+    return originalFetch.apply(this, arguments).then(function(resp) {
+      if (resp.status === 401) {
+        window.location.href = '/static/login.html';
+      }
+      return resp;
+    });
+  };
+})();
+
 const SESSION_LABEL = {pre:'盘前', regular:'盘中', post:'盘后', closed:'休市'};
 const fmt = (v, d=2) => (v===null||v===undefined) ? '--' : Number(v).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
 const usd = v => (v===null||v===undefined) ? '--' : (v<0?'-$':'$') + fmt(Math.abs(v));
@@ -166,7 +187,7 @@ function renderOverview(d) {
     else if (p.ext === 'pre/post') tags += '<span class="tag tag-pre">扩展时段</span>';
     if (p.stale) tags += '<span class="tag tag-stale">无行情</span>';
     const sub = p.market === 'HKFUND' ? (p.nav_date || '') : (p.quote_time || '');
-    tr.innerHTML = `<td><div>${p.name||p.symbol}${tags}</div><div class="sym">${p.symbol} ${sub}</div></td>
+    tr.innerHTML = `<td><div>${esc(p.name||p.symbol)}${tags}</div><div class="sym">${esc(p.symbol)} ${esc(sub)}</div></td>
       <td>${p.price ? fmt(p.price, p.market==='HKFUND'?4:2) : '--'}</td>
       <td class="${cls(p.change_pct)}">${p.change_pct===null?'--':sign(p.change_pct)+fmt(p.change_pct)+'%'}</td>
       <td>$${fmt(p.value)}</td>
@@ -244,17 +265,27 @@ async function refresh() {
 // ---- 编辑器 ----
 let editRows = [];
 async function openEditor() {
-  editRows = await (await fetch('/api/portfolio/holding')).json();
+  try {
+    editRows = await (await fetch('/api/portfolio/holding')).json();
+  } catch (e) { alert('加载持仓失败'); return; }
   renderEditTable();
   document.getElementById('editorMask').classList.add('show');
+}
+// 弹窗已打开时的重新拉取（保存/删除/新增成功后调用）：
+// 先确认，避免静默丢弃其他行未保存的修改；首次打开不走此确认
+async function reopenEditor() {
+  const mask = document.getElementById('editorMask');
+  if (mask.classList.contains('show') &&
+      !confirm('其他行可能有未保存修改，刷新将丢弃，继续？')) return;
+  await openEditor();
 }
 function closeEditor() { document.getElementById('editorMask').classList.remove('show'); refresh(); }
 function renderEditTable() {
   const tb = document.querySelector('#editTable tbody'); tb.innerHTML = '';
   editRows.forEach((h, i) => {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${h.symbol}</td>
-      <td><input value="${h.name||''}" data-k="name"></td>
+    tr.innerHTML = `<td>${esc(h.symbol)}</td>
+      <td><input value="${esc(h.name||'')}" data-k="name"></td>
       <td><select data-k="market"><option ${h.market==='US'?'selected':''}>US</option><option ${h.market==='HKFUND'?'selected':''}>HKFUND</option></select></td>
       <td><input type="number" step="any" value="${h.quantity}" data-k="quantity"></td>
       <td><input type="number" step="any" value="${h.cost_price}" data-k="cost_price"></td>
@@ -270,23 +301,37 @@ function renderEditTable() {
 }
 async function saveRow(i) {
   const h = editRows[i];
-  await fetch('/api/portfolio/holding/' + h.id, {method:'PUT', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({name:h.name, market:h.market, quantity:Number(h.quantity),
-      cost_price:Number(h.cost_price), currency:h.currency, enabled:Number(h.enabled?1:0), sort_order:h.sort_order||0})});
-  openEditor();
+  try {
+    const r = await fetch('/api/portfolio/holding/' + h.id, {method:'PUT', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({name:h.name, market:h.market, quantity:Number(h.quantity),
+        cost_price:Number(h.cost_price), currency:h.currency, enabled:Number(h.enabled?1:0), sort_order:h.sort_order||0})});
+    const d = await r.json();
+    if (!r.ok || (d && d.ok === false)) { alert((d && d.message) || '操作失败'); return; }
+  } catch (e) { alert('网络错误'); return; }
+  reopenEditor();
 }
 async function delRow(id) {
-  await fetch('/api/portfolio/holding/' + id, {method:'DELETE'});
-  openEditor();
+  if (!confirm('确认删除该持仓？')) return;
+  try {
+    const r = await fetch('/api/portfolio/holding/' + id, {method:'DELETE'});
+    const d = await r.json();
+    if (!r.ok || (d && d.ok === false)) { alert((d && d.message) || '操作失败'); return; }
+  } catch (e) { alert('网络错误'); return; }
+  reopenEditor();
 }
 async function addHolding() {
-  await fetch('/api/portfolio/holding', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({symbol:v('n_symbol'), name:v('n_name'), market:v('n_market'),
-      quantity:Number(v('n_quantity')||0), cost_price:Number(v('n_cost')||0), currency:v('n_currency')})});
-  openEditor();
+  try {
+    const r = await fetch('/api/portfolio/holding', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({symbol:val('n_symbol'), name:val('n_name'), market:val('n_market'),
+        quantity:Number(val('n_quantity')||0), cost_price:Number(val('n_cost')||0), currency:val('n_currency')})});
+    const d = await r.json();
+    if (!r.ok || (d && d.ok === false)) { alert((d && d.message) || '操作失败'); return; }
+  } catch (e) { alert('网络错误'); return; }
+  reopenEditor();
 }
-const v = id => document.getElementById(id).value.trim();
+const val = id => document.getElementById(id).value.trim();
 
+window.addEventListener('resize', drawChart);  // 窗口尺寸变化时重绘走势图
 refresh(); loadChart();
 setInterval(refresh, 10000);
 setInterval(() => { if (chartMode === 'intraday') loadChart(); }, 30000);

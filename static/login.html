@@ -169,6 +169,7 @@ let captchaId = '';
 async function loadCaptcha() {
   try {
     const d = await (await fetch('/api/captcha')).json();
+    if (!d.ok) return;  // 获取失败保持图片空白，不设置无效 captchaId
     captchaId = d.captcha_id;
     document.getElementById('captchaImg').src = d.image;
   } catch (e) { console.warn(e); }
