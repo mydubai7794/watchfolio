@@ -596,7 +596,8 @@ async def proxy_check(proxy_id: int):
         async with httpx.AsyncClient(
             proxy=proxy_url, timeout=10, verify=False
         ) as client:
-            resp = await client.get("https://www.baidu.com")
+            # 海外代理检测目标：baidu 对境外出口会误判，统一用 ipinfo
+            resp = await client.get("https://ipinfo.io/ip")
             latency_ms = int((time.monotonic() - start) * 1000)
             if resp.status_code == 200:
                 await db.update_proxy_status(proxy_id, alive=1, latency_ms=latency_ms)
