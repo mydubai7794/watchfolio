@@ -14,6 +14,7 @@ import logging
 import re
 import time
 from datetime import date, datetime
+from urllib.parse import quote
 
 import httpx
 
@@ -33,9 +34,16 @@ TENCENT_MINUTE_URL = "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code={
 SINA_US_URL = "https://hq.sinajs.cn/list={symbols}"
 SINA_HEADERS = {"Referer": "https://finance.sina.com.cn"}
 SINA_FX_URL = "https://hq.sinajs.cn/list=fx_susdhkd"
-SINA_OIL_URL = "https://hq.sinajs.cn/list=hf_OIL"
+SINA_PANEL_URL = "https://hq.sinajs.cn/list=DINIW,hf_OIL,hf_GC"
 EM_ULIST_URL = "http://push2.eastmoney.com/api/qt/ulist.np/get"
 EM_FIELDS = "f2,f3,f12,f13,f14,f18,f124"
+# Yahoo v8 chart（美债收益率/恐慌指数）：v7 quote 已封（Unauthorized），v8 需 UA 伪装 + 代理
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=5d"
+YAHOO_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"),
+}
+YAHOO_PANEL_SYMBOLS = {"US30Y": "^TYX", "US10Y": "^TNX", "VIX": "^VIX"}
 FT_PDS_URL = "https://www.franklintempleton.com.hk/api/pds/price-and-performance"
 FT_HEADERS = {
     "Content-Type": "application/json",
@@ -101,16 +109,42 @@ def _f(s: str | None, default: float = 0.0) -> float:
 
 def parse_tencent_quotes(raw: str, symbols: list[str],
                          prefixes: dict[str, str] | None = None) -> dict[str, dict]:
-    """解析腾讯批量行情响应（GBK 已解码文本），支持美股 us / 港股 hk 前缀混合，返回 {symbol: quote}。
+    """解析腾讯批量行情响应（GBK 已解码文本），支持美股 us / 港股 hk / 外盘期货 hf 前缀混合。
 
-    prefixes: {symbol: "us"|"hk"}，缺省全部按美股处理。
-    两市场真实字段布局前段一致：f[1]名称/f[3]现价/f[4]昨收/f[30]时间/f[33]高/f[34]低；
+    prefixes: {symbol: "us"|"hk"|"hf"}，缺省全部按美股处理。
+    us/hk 两市场为波浪线布局，前段字段一致：f[1]名称/f[3]现价/f[4]昨收/f[30]时间/f[33]高/f[34]低；
     币种分市场：美股 f[35]、港股 f[75]。
+    hf 外盘期货为逗号布局：f[0]现价/f[4]高/f[5]低/f[6]时间/f[7]昨结/f[13]名称，
+    涨跌幅必须按 f[7] 昨结自算（f[2] 是买价，不能用作昨结）。
     """
     prefixes = prefixes or {s: "us" for s in symbols}
     quotes: dict[str, dict] = {}
     for sym in symbols:
         prefix = prefixes.get(sym, "us")
+        if prefix == "hf":
+            # 外盘期货行（v_hf_{sym}）为逗号布局：守卫 14 大于最大访问索引 13（name=f[13]）
+            m = re.search(rf'v_hf_{re.escape(sym)}="([^"]*)"', raw)
+            if not m or not m.group(1):
+                continue
+            f = m.group(1).split(",")
+            if len(f) < 14 or not f[0]:
+                continue
+            price, pre_close = _f(f[0]), _f(f[7])
+            change_pct = (price - pre_close) / pre_close * 100 if pre_close > 0 else 0.0
+            quotes[sym] = {
+                "symbol": sym,
+                "name": f[13],
+                "price": price,
+                "pre_close": pre_close,
+                "change_pct": round(change_pct, 4),
+                "high": _f(f[4]),
+                "low": _f(f[5]),
+                "currency": "USD",
+                "quote_time": f[6],
+                "ext_price": 0.0,
+                "ext_time": "",
+            }
+            continue
         m = re.search(rf'v_{prefix}{re.escape(sym)}="([^"]*)"', raw)
         if not m or not m.group(1):
             continue
@@ -183,18 +217,60 @@ def parse_fx_usdhkd(raw: str) -> float:
     return v if 7.5 <= v <= 8.5 else 0.0
 
 
-def parse_sina_oil(raw: str) -> dict:
-    """解析新浪布伦特原油 hf_OIL：f[0]现价 f[2]昨收 f[13]名称，涨跌幅自算；字段不足返回 {}。"""
-    m = re.search(r'hf_OIL="([^"]*)"', raw or "")
+def _parse_sina_hf(raw: str, code: str) -> dict:
+    """解析新浪/腾讯 hf_ 外盘期货行（通用）：f[0]现价 f[7]昨结 f[13]名称，涨跌幅自算。
+
+    昨结必须取 f[7]：f[2] 是买价，旧实现误用作昨结导致涨跌幅口径错误。
+    字段不足/无匹配返回 {}。腾讯混排行 v_hf_{code} 与新浪 hq_str_hf_{code}
+    共用同一正则（两者逗号布局一致，腾讯版仅尾部少成交量字段）。
+    """
+    m = re.search(rf'hf_{re.escape(code)}="([^"]*)"', raw or "")
     if not m:
         return {}
     f = m.group(1).split(",")
     # 守卫 14：大于最大访问索引 13（name=f[13]），截断行不入结果
     if len(f) < 14 or not f[0]:
         return {}
-    price, pre = float(f[0]), float(f[2] or 0)
+    price, pre = _f(f[0]), _f(f[7])
     return {"price": price, "pre_close": pre,
             "change_pct": (price - pre) / pre * 100 if pre > 0 else 0.0, "name": f[13]}
+
+
+def parse_sina_oil(raw: str) -> dict:
+    """解析新浪布伦特原油 hf_OIL：f[0]现价 f[7]昨结 f[13]名称（委托通用 hf 解析）。"""
+    return _parse_sina_hf(raw, "OIL")
+
+
+def parse_sina_diniw(raw: str) -> dict:
+    """解析新浪美元指数 DINIW：f[1]现价 f[3]昨收 f[9]名称，涨跌幅自算；字段不足返回 {}。"""
+    m = re.search(r'DINIW="([^"]*)"', raw or "")
+    if not m:
+        return {}
+    f = m.group(1).split(",")
+    # 守卫 10：大于最大访问索引 9（name=f[9]），截断行不入结果
+    if len(f) < 10 or not f[1]:
+        return {}
+    price, pre = _f(f[1]), _f(f[3])
+    return {"price": price, "pre_close": pre,
+            "change_pct": (price - pre) / pre * 100 if pre > 0 else 0.0, "name": f[9]}
+
+
+def parse_yahoo_chart(raw: str) -> dict:
+    """解析 Yahoo v8 chart 响应（^TYX/^TNX/^VIX）：meta 现价/昨收 + adjclose 近5日 spark。
+
+    spark 过滤 None 后取末尾 ≤60 点；非法 JSON/结构缺失返回 {}。
+    """
+    try:
+        r = json.loads(raw)["chart"]["result"][0]
+        meta = r["meta"]
+        pre = float(meta.get("chartPreviousClose") or 0)
+        price = float(meta["regularMarketPrice"])
+        spark = [v for v in r["indicators"]["adjclose"][0]["adjclose"] if v]
+        return {"price": price, "pre_close": pre,
+                "change_pct": (price - pre) / pre * 100 if pre > 0 else 0.0,
+                "spark": spark[-60:]}
+    except Exception:
+        return {}
 
 
 def parse_tencent_minute(raw: str) -> list[tuple[str, float]]:
@@ -458,17 +534,20 @@ async def fetch_fund_nav(proxy_urls: list[str] | None = None) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# 市场参考看板（QQQ/SPY/SOXX/GLD/布油/TLT/恒指 + 分时 sparkline）
+# 市场参考看板（QQQ/SPY/SOXX/HSI/BZ/GC/DXY/US30Y/US10Y/VIX + sparkline）
 # ---------------------------------------------------------------------------
 
-MARKET_PANEL = [  # (key, 腾讯代码, 展示名, 币种, sparkline 是否可用)
+MARKET_PANEL = [  # (key, 腾讯代码(空=新浪DINIW或Yahoo见YAHOO_PANEL_SYMBOLS), 展示名, 币种, sparkline 可用)
     ("QQQ", "usQQQ", "纳指100", "USD", True),
     ("SPY", "usSPY", "标普500", "USD", True),
     ("SOXX", "usSOXX", "费城半导体", "USD", True),
-    ("GLD", "usGLD", "黄金", "USD", True),
-    ("BZ", "", "布伦特原油", "USD", False),      # 新浪 hf_OIL，无腾讯代码故无分时
-    ("TLT", "usTLT", "美债20Y+", "USD", True),   # US30Y 无稳定源，以 TLT 替代
     ("HSI", "hkHSI", "恒生指数", "HKD", True),
+    ("BZ", "hf_OIL", "布伦特原油", "USD", False),   # 腾讯 hf_ 混排；新浪 hf_OIL 兜底
+    ("GC", "hf_GC", "COMEX黄金", "USD", False),     # 腾讯 hf_ 混排；新浪 hf_GC 兜底
+    ("DXY", "", "美元指数", "", False),             # 新浪 DINIW（f[1]价 f[3]昨收 f[9]名称）
+    ("US30Y", "", "美债30Y", "%", True),            # Yahoo ^TYX，单位百分点
+    ("US10Y", "", "美债10Y", "%", True),            # Yahoo ^TNX，单位百分点
+    ("VIX", "", "恐慌指数", "", True),              # Yahoo ^VIX
 ]
 
 
@@ -483,30 +562,82 @@ def _downsample_minute(points: list[tuple[str, float]], limit: int = 60) -> list
     return [points[i][1] for i in idxs]
 
 
-async def fetch_market_panel(session: str | None = None) -> list[dict]:
-    """抓市场看板：腾讯批量行情 + 新浪布伦特 + 分时 sparkline（降采样≤60点）。
+def _split_tencent_code(code: str) -> tuple[str, str]:
+    """腾讯看板代码拆为 (prefix, symbol)：外盘期货 hf_ 前缀含下划线共 3 位，us/hk 取前 2 位。"""
+    if code.startswith("hf_"):
+        return "hf", code[3:]
+    return code[:2], code[2:]
 
-    单项失败不致命：price 置 None、spark 置空数组；返回
-    [{key,name,price,change_pct,currency,spark:[float,...]}]，name 用 MARKET_PANEL 中文展示名。
+
+async def _fetch_yahoo_chart(symbol: str, proxy_urls: list[str] | None = None) -> dict:
+    """抓取 Yahoo v8 chart：代理池优先（前2个，复用 fetch_fund_nav 候选模式），全失败重试一轮直连。
+
+    全部失败返回 {}（该项 price 置 None，不致命）。响应为 UTF-8 JSON，用 resp.text 自动解码。
     """
-    # 1. 腾讯批量：全部带腾讯代码的看板项一次拉取（us/hk 前缀混合）
+    url = YAHOO_CHART_URL.format(sym=quote(symbol, safe=""))
+    candidates = list(proxy_urls or [])[:2] + [None]
+    last_err = ""
+    for proxy in candidates:
+        try:
+            async with httpx.AsyncClient(timeout=15, proxy=proxy) as client:
+                resp = await client.get(url, headers=YAHOO_HEADERS)
+                if resp.status_code == 200:
+                    parsed = parse_yahoo_chart(resp.text)
+                    if parsed:
+                        return parsed
+                    last_err = "chart 解析失败"
+                else:
+                    last_err = f"HTTP {resp.status_code}"
+        except Exception as e:
+            last_err = str(e)
+    logger.warning("Yahoo chart %s 获取失败: %s", symbol, last_err)
+    return {}
+
+
+async def fetch_market_panel(session: str | None = None,
+                             proxy_urls: list[str] | None = None) -> list[dict]:
+    """抓市场看板 10 项：腾讯混排批量 + 新浪(DINIW主用/hf兜底) + Yahoo chart(代理池) + sparkline。
+
+    数据分工：
+    - QQQ/SPY/SOXX/HSI：腾讯 us/hk 波浪线行情 + minute 分时 spark（降采样≤60点）
+    - BZ/GC：腾讯 hf_ 逗号行（与股指同一混排请求）；新浪 hf_OIL/hf_GC 兜底腾讯失败项
+    - DXY：新浪 DINIW
+    - US30Y/US10Y/VIX：Yahoo v8 chart（代理池优先，全失败直连重试），spark 用 adjclose 日线
+    单项失败不致命：price/change_pct 置 None（前端隐藏涨跌）、spark 置空数组。
+    返回 [{key,name,price,change_pct,currency,spark:[float,...]}]，name 用 MARKET_PANEL 中文展示名。
+    """
+    # 1. 腾讯混排一次：6 代码（usQQQ,usSPY,usSOXX,hkHSI,hf_OIL,hf_GC），us/hk/hf 三前缀并存
     tencent_codes = [code for _, code, _, _, _ in MARKET_PANEL if code]
-    prefixes = {c[2:]: c[:2] for c in tencent_codes}
+    code_sym = {c: _split_tencent_code(c)[1] for c in tencent_codes}   # 腾讯代码 → 输出 symbol
+    sym_prefix = {s: p for p, s in (_split_tencent_code(c) for c in tencent_codes)}
     quotes: dict[str, dict] = {}
-    if tencent_codes:
-        raw = await _get_text(TENCENT_US_URL.format(symbols=",".join(tencent_codes)))
-        if raw:
-            quotes = parse_tencent_quotes(raw, list(prefixes), prefixes)
+    raw = await _get_text(TENCENT_US_URL.format(symbols=",".join(tencent_codes)))
+    if raw:
+        quotes = parse_tencent_quotes(raw, list(code_sym.values()), sym_prefix)
 
-    # 2. 新浪布伦特原油一次（hf_OIL）
-    oil: dict = {}
-    raw_oil = await _get_text(SINA_OIL_URL, headers=SINA_HEADERS)
-    if raw_oil:
-        oil = parse_sina_oil(raw_oil)
+    # 2. 新浪一次：DINIW 主用（美元指数）+ hf_OIL/hf_GC 兜底腾讯失败项
+    sina_dxy: dict = {}
+    sina_hf: dict[str, dict] = {}
+    raw_sina = await _get_text(SINA_PANEL_URL, headers=SINA_HEADERS)
+    if raw_sina:
+        sina_dxy = parse_sina_diniw(raw_sina)
+        sina_hf["BZ"] = _parse_sina_hf(raw_sina, "OIL")
+        sina_hf["GC"] = _parse_sina_hf(raw_sina, "GC")
 
-    # 3. sparkline：spark=True 的项并发拉腾讯分时接口并降采样（失败→空数组）
+    # 3. Yahoo v8 chart 并发 3 个（^TYX/^TNX/^VIX）：代理池优先、直连兜底
+    async def _yahoo(key: str) -> tuple[str, dict]:
+        return key, await _fetch_yahoo_chart(YAHOO_PANEL_SYMBOLS[key], proxy_urls)
+
+    yahoo_map: dict[str, dict] = {}
+    results = await asyncio.gather(*(_yahoo(k) for k in YAHOO_PANEL_SYMBOLS),
+                                   return_exceptions=True)
+    for r in results:
+        if not isinstance(r, Exception):
+            yahoo_map[r[0]] = r[1]
+
+    # 4. sparkline：QQQ/SPY/SOXX/HSI 并发拉腾讯分时接口并降采样（失败→空数组）
     spark_map: dict[str, list[float]] = {}
-    spark_codes = [code for _, code, _, _, spark in MARKET_PANEL if spark and code]
+    spark_codes = [code for key, code, _, _, spark in MARKET_PANEL if spark and code]
 
     async def _spark(code: str) -> tuple[str, list[float]]:
         # _get_text 失败返回 None，parse_tencent_minute 对 None 返回 []，故不会抛出
@@ -518,18 +649,31 @@ async def fetch_market_panel(session: str | None = None) -> list[dict]:
         if not isinstance(r, Exception):
             spark_map[r[0]] = r[1]
 
-    # 4. 组装输出：无行情的项 price/change_pct 置 None（前端隐藏涨跌），不致命
+    # 5. 组装输出：无行情的项 price/change_pct 置 None（前端隐藏涨跌），不致命
     panel: list[dict] = []
     for key, code, name, cur, spark in MARKET_PANEL:
         price = change = None
-        if key == "BZ":
-            if oil.get("price"):
-                price, change = oil["price"], oil["change_pct"]
+        spark_data: list[float] = []
+        if key == "DXY":
+            q = sina_dxy
+        elif key in ("BZ", "GC"):
+            # 腾讯 hf 行优先，失败用新浪 hf 兜底
+            q = quotes.get(code_sym.get(code, "")) or {}
+            if not q.get("price"):
+                q = sina_hf.get(key) or {}
+        elif key in YAHOO_PANEL_SYMBOLS:
+            q = yahoo_map.get(key) or {}
+            # 收益率类（美债30Y/10Y）price 保留 3 位小数（前端再 fmt）
+            if q.get("price") and key in ("US30Y", "US10Y"):
+                q = {**q, "price": round(q["price"], 3)}
+            if spark:
+                spark_data = (q.get("spark") or [])[-60:]
         else:
-            q = quotes.get(code[2:])
-            if q and q.get("price"):
-                price, change = q["price"], q.get("change_pct")
+            q = quotes.get(code_sym.get(code, "")) or {}
+            if spark:
+                spark_data = spark_map.get(code, [])
+        if q.get("price"):
+            price, change = q["price"], q.get("change_pct")
         panel.append({"key": key, "name": name, "price": price, "change_pct": change,
-                      "currency": cur,
-                      "spark": spark_map.get(code, []) if (spark and code) else []})
+                      "currency": cur, "spark": spark_data})
     return panel

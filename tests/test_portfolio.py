@@ -206,17 +206,64 @@ class TestBuildPositionsHk:
 
 class TestMarketPanelParsers:
     def test_parse_sina_oil(self):
-        """新浪布伦特 hf_OIL：f[0]现价 f[2]昨收 f[13]名称，涨跌幅自算。"""
-        raw = 'var hq_str_hf_OIL="100.896,,100.790,100.810,101.880,96.550,00:32:51,98.030,97.660,0,8,2,2026-10-02,布伦特原油,358704";\n'
+        """新浪布伦特 hf_OIL：f[0]现价 f[7]昨结 f[13]名称，涨跌幅自算。
+
+        修正：旧实现误用 f[2]（买价）作昨结，导致涨跌幅口径错误。
+        """
+        raw = 'var hq_str_hf_OIL="101.18,3.21,101.09,101.12,101.88,96.55,00:45:07,98.03,97.66,0,6,7,2026-10-02,布伦特原油";\n'
         q = pf.parse_sina_oil(raw)
-        assert q["price"] == 100.896 and q["pre_close"] == 100.790
-        assert abs(q["change_pct"] - (100.896 - 100.790) / 100.790 * 100) < 1e-9
+        assert q["price"] == 101.18 and q["pre_close"] == 98.03
+        assert abs(q["change_pct"] - (101.18 - 98.03) / 98.03 * 100) < 1e-9
         assert q["name"] == "布伦特原油"
 
     def test_parse_sina_oil_bad(self):
         """字段不足/无匹配时返回空 dict，不抛异常。"""
-        assert pf.parse_sina_oil("var hq_str_hf_OIL=\"1,2,3\";") == {}
+        assert pf.parse_sina_oil('var hq_str_hf_OIL="1,2,3";') == {}
         assert pf.parse_sina_oil("") == {}
+
+    def test_parse_tencent_hf_line(self):
+        """腾讯混排返回中的 hf_ 行（逗号布局，无尾部成交量字段，区别于 us/hk 波浪线）。"""
+        raw = 'v_hf_OIL="101.18,3.21,101.09,101.12,101.88,96.55,00:45:07,98.03,97.66,0,6,7,2026-10-02,布伦特原油";\n'
+        q = pf.parse_tencent_quotes(raw, ["OIL"], {"OIL": "hf"})
+        assert q["OIL"]["price"] == 101.18 and q["OIL"]["pre_close"] == 98.03
+        assert q["OIL"]["name"] == "布伦特原油"
+        # parse_tencent_quotes 统一对 change_pct 做 round(4)（与 us/hk 分支一致）
+        assert q["OIL"]["change_pct"] == round((101.18 - 98.03) / 98.03 * 100, 4)
+
+    def test_parse_tencent_hf_truncated(self):
+        """hf 行裁到 13 字段（< 守卫阈值 14，无法安全访问 f[13] 名称）：不抛异常且不入结果。"""
+        fields = "101.18,3.21,101.09,101.12,101.88,96.55,00:45:07,98.03,97.66,0,6,7,2026-10-02".split(",")
+        truncated = 'v_hf_OIL="' + ",".join(fields) + '";\n'
+        quotes = pf.parse_tencent_quotes(truncated, ["OIL"], {"OIL": "hf"})
+        assert "OIL" not in quotes
+
+    def test_parse_sina_diniw(self):
+        """新浪美元指数 DINIW：f[1]现价 f[3]昨收 f[9]名称。"""
+        raw = 'var hq_str_DINIW="00:45:25,102.1406,102.1406,101.4743,7389,101.4825,102.1766,101.4377,102.1406,美元指数,2026-10-02";\n'
+        q = pf.parse_sina_diniw(raw)
+        assert q["price"] == 102.1406 and q["pre_close"] == 101.4743
+        assert q["name"] == "美元指数"
+        assert abs(q["change_pct"] - (102.1406 - 101.4743) / 101.4743 * 100) < 1e-9
+
+    def test_parse_sina_diniw_bad(self):
+        """字段不足/无匹配时返回空 dict，不抛异常。"""
+        assert pf.parse_sina_diniw('var hq_str_DINIW="1,2,3";') == {}
+        assert pf.parse_sina_diniw("") == {}
+
+    def test_parse_yahoo_chart(self):
+        """Yahoo v8 chart：meta 现价/昨收 + adjclose 过滤空值后作近5日 spark。"""
+        raw = json.dumps({"chart": {"result": [{"meta": {"regularMarketPrice": 5.599,
+            "chartPreviousClose": 5.639},
+            "indicators": {"adjclose": [{"adjclose": [5.60, 5.61, None, 5.599]}]}}]}, "error": None})
+        q = pf.parse_yahoo_chart(raw)
+        assert q["price"] == 5.599 and q["pre_close"] == 5.639
+        assert q["spark"] == [5.60, 5.61, 5.599]
+        assert abs(q["change_pct"] - (5.599 - 5.639) / 5.639 * 100) < 1e-9
+
+    def test_parse_yahoo_chart_bad(self):
+        """非法 JSON/结构缺失 → 空 dict，不抛异常。"""
+        assert pf.parse_yahoo_chart("not-json") == {}
+        assert pf.parse_yahoo_chart(json.dumps({"chart": {"error": "x"}})) == {}
 
     def test_parse_tencent_minute(self):
         """腾讯分时接口 → [(HHMM, 价格)]。"""
