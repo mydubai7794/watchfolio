@@ -1,8 +1,11 @@
 """FastAPI 主服务：SSE 推送 + REST 管理 API + 后台监控任务。"""
 
 import asyncio
+import base64
+import io
 import json
 import logging
+import random
 import secrets
 import time
 from datetime import datetime, timedelta
@@ -53,6 +56,8 @@ class ConfigInput(BaseModel):
 class LoginInput(BaseModel):
     username: str
     password: str
+    captcha_id: str = ""
+    captcha_answer: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +67,13 @@ class LoginInput(BaseModel):
 # 登录会话: token -> {"username": str, "expires": float}
 # 简易内存会话，重启服务需重新登录
 _sessions: dict[str, dict] = {}
-SESSION_TTL = 7 * 24 * 3600  # 7 天有效期（秒）
+SESSION_TTL = 30 * 24 * 3600  # 30 天有效期
+
+# 验证码: captcha_id -> {"answer": int, "expires": float}
+_captchas: dict[str, dict] = {}
+CAPTCHA_TTL = 300  # 验证码 5 分钟有效
+# 登录限速: ip -> [时间戳...]
+_login_attempts: dict[str, list[float]] = {}
 
 
 def _create_session(username: str) -> str:
@@ -96,6 +107,7 @@ def _is_auth_path(path: str) -> bool:
         or path.startswith("/api/logout")
         or path == "/static/login.html"
         or path.startswith("/api/quote")
+        or path.startswith("/api/captcha")
     )
 
 @asynccontextmanager
@@ -263,9 +275,64 @@ def _calc_prev_day_changes(
 # Auth API (登录/登出)
 # ---------------------------------------------------------------------------
 
+def _generate_captcha() -> tuple[int, str]:
+    """生成算术验证码，返回 (答案, PNG base64)。"""
+    from PIL import Image, ImageDraw, ImageFont
+    a, b = random.randint(2, 19), random.randint(2, 19)
+    if random.random() < 0.5:
+        text, answer = f"{a}+{b}=?", a + b
+    else:
+        hi, lo = max(a, b), min(a, b)
+        text, answer = f"{hi}-{lo}=?", hi - lo
+    img = Image.new("RGB", (150, 46), (26, 26, 46))
+    draw = ImageDraw.Draw(img)
+    # 干扰线
+    for _ in range(5):
+        x1, y1 = random.randint(0, 150), random.randint(0, 46)
+        x2, y2 = random.randint(0, 150), random.randint(0, 46)
+        draw.line([(x1, y1), (x2, y2)], fill=(70, 70, 110), width=1)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 26)
+    except Exception:
+        font = ImageFont.load_default()
+    # 逐字符随机偏移上色
+    colors = [(233, 69, 96), (0, 184, 148), (253, 203, 110), (116, 185, 255)]
+    x = 14
+    for ch in text:
+        draw.text((x, random.randint(4, 12)), ch, fill=random.choice(colors), font=font)
+        x += 24
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return answer, base64.b64encode(buf.getvalue()).decode()
+
+
+@app.get("/api/captcha")
+async def captcha():
+    """下发算术验证码（免鉴权，5 分钟有效，一次性）。"""
+    captcha_id = secrets.token_hex(8)
+    answer, b64 = _generate_captcha()
+    _captchas[captcha_id] = {"answer": answer, "expires": time.time() + CAPTCHA_TTL}
+    # 清理过期验证码
+    for k in [k for k, v in _captchas.items() if time.time() > v["expires"]]:
+        _captchas.pop(k, None)
+    return {"ok": True, "captcha_id": captcha_id, "image": f"data:image/png;base64,{b64}"}
+
+
 @app.post("/api/login")
-async def login(data: LoginInput):
+async def login(data: LoginInput, request: Request):
     """用户名密码登录，成功后下发会话 cookie。"""
+    # 验证码校验（一次性）
+    cap = _captchas.pop(data.captcha_id, None) if data.captcha_id else None
+    if not cap or time.time() > cap["expires"] or data.captcha_answer.strip() != str(cap["answer"]):
+        return JSONResponse(status_code=401, content={"ok": False, "message": "验证码错误或已过期"})
+    # 登录限速：每 IP 每分钟最多 10 次
+    client_ip = request.client.host if request.client else "?"
+    now_ts = time.time()
+    attempts = [t for t in _login_attempts.get(client_ip, []) if now_ts - t < 60]
+    if len(attempts) >= 10:
+        return JSONResponse(status_code=429, content={"ok": False, "message": "尝试过于频繁，请稍后再试"})
+    attempts.append(now_ts)
+    _login_attempts[client_ip] = attempts
     user = await db.get_user(data.username.strip())
     if not user or user["password"] != data.password:
         return JSONResponse(
