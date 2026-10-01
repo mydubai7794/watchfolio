@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 import database as db
 import fetcher
+import portfolio_fetcher as pf
 import scorer
 from config import (
     MIN_INTERVAL_SEC,
@@ -129,11 +130,20 @@ async def lifespan(app: FastAPI):
     global candidate_refresh_task
     candidate_refresh_task = asyncio.create_task(_candidate_refresh_loop())
 
+    global portfolio_task, fund_nav_task, fund_nav_cache
+    fund_nav_cache = await db.get_latest_fund_nav()
+    fund_nav_task = asyncio.create_task(_fund_nav_loop())
+    portfolio_task = asyncio.create_task(_portfolio_loop())
+
     yield
     global monitor_running
     monitor_running = False
     if monitor_task:
         monitor_task.cancel()
+    if portfolio_task:
+        portfolio_task.cancel()
+    if fund_nav_task:
+        fund_nav_task.cancel()
     if candidate_refresh_task:
         candidate_refresh_task.cancel()
     if daily_task:
@@ -183,7 +193,6 @@ monitor_task: Optional[asyncio.Task] = None
 daily_task: Optional[asyncio.Task] = None
 scheduler_task: Optional[asyncio.Task] = None
 monitor_running: bool = False
-monitor_mode: str = "auto"  # "auto" = 交易时间自动启停, "manual" = 手动控制
 futures_kill_enabled: bool = False
 overnight_data: dict = {}
 
@@ -197,6 +206,13 @@ candidate_refresh_task: Optional[asyncio.Task] = None
 
 # 全球指数缓存（由 fetcher._last_global_index_cache 写入，跟随期指路由频率）
 global_index_cache: dict = {}
+
+# 持仓模块状态
+portfolio_cache: dict = {"ok": False, "positions": [], "summary": {}, "errors": []}
+fund_nav_cache: dict | None = None   # {"nav","prev_nav","nav_date","nav_change_pct"}
+fx_state: dict = {"rate": 7.80, "fallback": True, "time": ""}
+portfolio_task: Optional[asyncio.Task] = None
+fund_nav_task: Optional[asyncio.Task] = None
 
 
 # ---------------------------------------------------------------------------
@@ -441,38 +457,9 @@ async def _do_monitor_stop() -> bool:
         "etf_count": 0,
         "interval_sec": MIN_INTERVAL_SEC,
         "timestamp": datetime.now().isoformat(),
-        "mode": monitor_mode,
         "in_trading_hours": _is_trading_hours(),
     })
     return True
-
-
-@app.post("/api/monitor/start")
-async def monitor_start():
-    global monitor_mode
-    monitor_mode = "manual"  # 手动操作切换为手动模式
-    if await _do_monitor_start():
-        return {"ok": True, "message": "Monitor started (manual mode)"}
-    return {"ok": False, "message": "Monitor is already running"}
-
-
-@app.post("/api/monitor/stop")
-async def monitor_stop():
-    global monitor_mode
-    monitor_mode = "manual"  # 手动操作切换为手动模式
-    if await _do_monitor_stop():
-        return {"ok": True, "message": "Monitor stopped (manual mode)"}
-    return {"ok": False, "message": "Monitor is not running"}
-
-
-@app.post("/api/monitor/mode")
-async def monitor_set_mode(mode: str = Query("auto")):
-    """切换监控模式: auto=交易时间自动启停, manual=手动控制."""
-    global monitor_mode
-    if mode not in ("auto", "manual"):
-        return JSONResponse(status_code=400, content={"ok": False, "message": "mode must be 'auto' or 'manual'"})
-    monitor_mode = mode
-    return {"ok": True, "mode": monitor_mode}
 
 
 @app.get("/api/monitor/status")
@@ -486,7 +473,6 @@ async def monitor_status():
         "etf_count": len(etf_list),
         "interval_sec": MIN_INTERVAL_SEC,
         "overnight": overnight_data,
-        "mode": monitor_mode,
         "in_trading_hours": _is_trading_hours(),
     }
 
@@ -932,26 +918,24 @@ async def _daily_schedule_loop():
 # ---------------------------------------------------------------------------
 
 async def _trading_hours_scheduler():
-    """后台定时任务：auto 模式下根据交易时间自动启停监控。
+    """后台定时任务：根据交易时间全自动启停监控。
 
     每 30 秒检查一次：
-    - 进入交易时间 且 auto 模式 且监控未运行 → 自动启动
-    - 离开交易时间 且 auto 模式 且监控运行中   → 自动停止
-    - manual 模式 → 不做任何操作
+    - 进入交易时间 且监控未运行 → 自动启动
+    - 离开交易时间 且监控运行中 → 自动停止
     """
-    logger.info("交易时间调度器启动 (默认 auto 模式)")
+    logger.info("交易时间调度器启动 (全自动模式)")
     while True:
         try:
-            if monitor_mode == "auto":
-                in_trading = _is_trading_hours()
+            in_trading = _is_trading_hours()
 
-                if in_trading and not monitor_running:
-                    logger.info("交易时间调度: 自动启动监控")
-                    await _do_monitor_start()
+            if in_trading and not monitor_running:
+                logger.info("交易时间调度: 自动启动监控")
+                await _do_monitor_start()
 
-                elif not in_trading and monitor_running:
-                    logger.info("交易时间调度: 自动停止监控（非交易时间）")
-                    await _do_monitor_stop()
+            elif not in_trading and monitor_running:
+                logger.info("交易时间调度: 自动停止监控（非交易时间）")
+                await _do_monitor_stop()
 
             await asyncio.sleep(30)
         except asyncio.CancelledError:
@@ -1119,7 +1103,6 @@ async def _monitor_loop():
                 "interval_sec": round(interval, 2),
                 "etf_count": len(etf_codes),
                 "timestamp": datetime.now().isoformat(),
-                "mode": monitor_mode,
                 "in_trading_hours": _is_trading_hours(),
             })
 
@@ -1135,6 +1118,182 @@ async def _monitor_loop():
             await asyncio.sleep(MIN_INTERVAL_SEC)
 
     logger.info("Monitor loop stopped")
+
+
+# ---------------------------------------------------------------------------
+# 持仓模块：行情采集循环 + 基金净值/汇率循环
+# ---------------------------------------------------------------------------
+
+async def _portfolio_loop():
+    """持仓行情采集：盘中10s/扩展时段30s/休市600s，成功才写 tick。"""
+    global portfolio_cache
+    logger.info("持仓行情采集循环启动")
+    while True:
+        interval = 600.0
+        try:
+            session, et_date, et_now = pf.us_market_session()
+            interval = {"regular": 10.0, "pre": 30.0, "post": 30.0}.get(session, 600.0)
+            holdings = await db.get_holdings(enabled_only=True)
+            us_symbols = [h["symbol"] for h in holdings if h["market"] == "US"]
+            if not holdings:
+                await asyncio.sleep(interval)
+                continue
+            quotes = await pf.fetch_us_quotes(us_symbols, session) if us_symbols else {}
+            if quotes:
+                try:
+                    await db.update_holding_names({s: q["name"] for s, q in quotes.items() if q.get("name")})
+                except Exception:
+                    pass
+            positions, summary = pf.build_positions(holdings, quotes, fund_nav_cache, fx_state["rate"])
+            portfolio_cache = {
+                "ok": bool(quotes),
+                "fetch_time": datetime.now().strftime("%H:%M:%S"),
+                "session": session,
+                "et_now": et_now,
+                "trade_date": str(et_date),
+                "fx_usdhkd": fx_state["rate"],
+                "fx_fallback": fx_state["fallback"],
+                "fx_time": fx_state["time"],
+                "positions": positions,
+                "summary": summary,
+                "errors": [] if quotes else ["行情源暂不可用"],
+            }
+            # 休市不写 tick（避免日线聚合混入休市平线）
+            if quotes and session != "closed":
+                await db.save_portfolio_tick(
+                    datetime.now(), et_date, summary["total_value"], summary["day_pnl"],
+                    summary["total_pnl"], summary["day_pnl_pct"], summary["total_pnl_pct"])
+        except asyncio.CancelledError:
+            logger.info("持仓行情采集循环已停止")
+            break
+        except Exception as e:
+            logger.exception("持仓采集循环错误: %s", e)
+        await asyncio.sleep(interval)
+
+
+async def _fund_nav_loop():
+    """基金净值+汇率：启动立即执行，此后每天北京时间 14:00/20:00；失败 30 分钟后重试。"""
+    global fund_nav_cache, fx_state
+    logger.info("基金净值/汇率任务启动")
+    while True:
+        ok = False
+        try:
+            rate, fallback = await pf.fetch_fx_usdhkd()
+            fx_state = {"rate": rate, "fallback": fallback,
+                        "time": datetime.now().strftime("%m-%d %H:%M")}
+            proxies = [r["url"] for r in await db.get_alive_proxies()]
+            nav = await pf.fetch_fund_nav(proxies)
+            if nav:
+                await db.upsert_fund_nav(nav["nav_date"], nav["nav"], nav["change_pct"])
+                logger.info("基金净值已更新: %s = %s", nav["nav_date"], nav["nav"])
+            latest = await db.get_latest_fund_nav()
+            if latest:
+                fund_nav_cache = latest
+            ok = nav is not None
+        except asyncio.CancelledError:
+            logger.info("基金净值任务已停止")
+            break
+        except Exception as e:
+            logger.exception("基金净值任务错误: %s", e)
+        if not ok:
+            await asyncio.sleep(1800)
+            continue
+        now = datetime.now()
+        targets = [now.replace(hour=14, minute=0, second=0, microsecond=0),
+                   now.replace(hour=20, minute=0, second=0, microsecond=0)]
+        nxt = next((t for t in targets if t > now), targets[0] + timedelta(days=1))
+        await asyncio.sleep((nxt - now).total_seconds())
+
+
+# ---------------------------------------------------------------------------
+# Portfolio API (持仓)
+# ---------------------------------------------------------------------------
+
+class HoldingInput(BaseModel):
+    symbol: str
+    name: str = ""
+    market: str = "US"
+    quantity: float = 0
+    cost_price: float = 0
+    currency: str = "USD"
+
+
+class HoldingUpdateInput(BaseModel):
+    name: str = ""
+    market: str = "US"
+    quantity: float = 0
+    cost_price: float = 0
+    currency: str = "USD"
+    enabled: int = 1
+    sort_order: int = 0
+
+
+@app.get("/api/portfolio/overview")
+async def portfolio_overview():
+    """持仓总览（读缓存，含汇总/持仓明细/时段/汇率）。"""
+    data = dict(portfolio_cache)
+    data["fund"] = fund_nav_cache
+    return data
+
+
+@app.get("/api/portfolio/intraday")
+async def portfolio_intraday(trade_date: str = Query(default="")):
+    """当日（或指定美东交易日）分时点。"""
+    if not trade_date:
+        trade_date = portfolio_cache.get("trade_date") or datetime.now().strftime("%Y-%m-%d")
+    rows = await db.get_portfolio_intraday(trade_date)
+    return {"ok": True, "trade_date": trade_date, "points": [
+        {"ts": r["ts"].strftime("%H:%M:%S") if isinstance(r["ts"], datetime) else str(r["ts"]),
+         "v": float(r["total_value_usd"]), "p": float(r["day_pnl_usd"])} for r in rows]}
+
+
+@app.get("/api/portfolio/daily")
+async def portfolio_daily(range: str = Query(default="30")):
+    """历史日线（每美东交易日最后一条采样）。range: 30/90/all。"""
+    days = 3650 if range == "all" else (90 if range == "90" else 30)
+    rows = await db.get_portfolio_daily(days)
+    return {"ok": True, "days": [
+        {"date": str(r["date"]), "v": float(r["total_value"]),
+         "p": float(r["day_pnl"]), "pct": float(r["total_pnl_pct"])} for r in rows]}
+
+
+@app.get("/api/portfolio/holding")
+async def holding_list():
+    """持仓列表（编辑用，含停用）。"""
+    rows = await db.get_holdings(enabled_only=False)
+    for row in rows:
+        for k, v in row.items():
+            if isinstance(v, datetime):
+                row[k] = v.isoformat()
+    return rows
+
+
+@app.post("/api/portfolio/holding")
+async def holding_add(data: HoldingInput):
+    symbol = data.symbol.strip().upper()
+    if not symbol:
+        return JSONResponse(status_code=400, content={"ok": False, "message": "symbol 不能为空"})
+    await db.upsert_holding(symbol, data.name.strip(), data.market.strip() or "US",
+                            data.quantity, data.cost_price, data.currency.strip() or "USD")
+    return {"ok": True}
+
+
+@app.put("/api/portfolio/holding/{holding_id}")
+async def holding_update(holding_id: int, data: HoldingUpdateInput):
+    affected = await db.update_holding(holding_id, data.name.strip(), data.market.strip() or "US",
+                                       data.quantity, data.cost_price, data.currency.strip() or "USD",
+                                       data.enabled, data.sort_order)
+    if affected:
+        return {"ok": True}
+    return JSONResponse(status_code=404, content={"ok": False, "message": "holding not found"})
+
+
+@app.delete("/api/portfolio/holding/{holding_id}")
+async def holding_delete(holding_id: int):
+    affected = await db.delete_holding(holding_id)
+    if affected:
+        return {"ok": True}
+    return JSONResponse(status_code=404, content={"ok": False, "message": "holding not found"})
 
 
 # ---------------------------------------------------------------------------
