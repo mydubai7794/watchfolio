@@ -100,8 +100,8 @@ def parse_tencent_quotes(raw: str, symbols: list[str],
     """解析腾讯批量行情响应（GBK 已解码文本），支持美股 us / 港股 hk 前缀混合，返回 {symbol: quote}。
 
     prefixes: {symbol: "us"|"hk"}，缺省全部按美股处理。
-    港股字段布局与美股前段一致（f[1]名称/f[3]现价/f[4]昨收），
-    但时间在 f[30]、高/低在 f[33]/f[34]、币种在 f[75]（美股 f[32]/f[35]/f[36]/f[37]）。
+    两市场真实字段布局前段一致：f[1]名称/f[3]现价/f[4]昨收/f[30]时间/f[33]高/f[34]低；
+    币种分市场：美股 f[35]、港股 f[75]。
     """
     prefixes = prefixes or {s: "us" for s in symbols}
     quotes: dict[str, dict] = {}
@@ -115,15 +115,16 @@ def parse_tencent_quotes(raw: str, symbols: list[str],
             # 守卫阈值必须大于最大访问索引 75（currency=f[75]），否则截断行会抛 IndexError
             if len(f) < 76:
                 continue
-            currency, quote_time = f[75] or "HKD", f[30]
-            high, low = _f(f[33]), _f(f[34])
+            currency = f[75] or "HKD"
         else:
-            # 守卫阈值必须大于最大访问索引 37（currency=f[37]），否则截断行会抛 IndexError
+            # 守卫 38：大于真实布局最大访问索引 35（currency=f[35]），
+            # 并保留"37 字段截断行不入结果"的历史裕度（见 tests test_truncated_line）
             if len(f) < 38:
                 continue
-            currency, quote_time = f[37] or "USD", (f[32] if len(f) > 32 else "")
-            high, low = _f(f[35]), _f(f[36])
+            currency = f[35] or "USD"
         price, pre_close = _f(f[3]), _f(f[4])
+        # 两市场真实布局一致：时间 f[30]、高 f[33]、低 f[34]
+        quote_time, high, low = f[30], _f(f[33]), _f(f[34])
         change_pct = (price - pre_close) / pre_close * 100 if pre_close > 0 else 0.0
         quotes[sym] = {
             "symbol": sym,
