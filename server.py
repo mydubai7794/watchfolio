@@ -1174,7 +1174,10 @@ async def _portfolio_loop():
             if not holdings:
                 await asyncio.sleep(interval)
                 continue
-            quotes = await pf.fetch_quotes(us_symbols, hk_symbols, session) if (us_symbols or hk_symbols) else {}
+            # 新浪盘前盘后扩展价直连 403 时代理池重试（腾讯主源仍直连，取法仿 _market_loop）
+            proxies = [r["url"] for r in await db.get_alive_proxies()]
+            quotes = await pf.fetch_quotes(us_symbols, hk_symbols, session,
+                                           proxy_urls=proxies) if (us_symbols or hk_symbols) else {}
             if quotes:
                 try:
                     await db.update_holding_names({s: q["name"] for s, q in quotes.items() if q.get("name")})
@@ -1238,10 +1241,11 @@ async def _fund_nav_loop():
     while True:
         ok = False
         try:
-            rate, fallback = await pf.fetch_fx_usdhkd()
+            # 新浪汇率直连 403（云服务器 IP 被拉黑）时代理池重试；取法仿 _market_loop
+            proxies = [r["url"] for r in await db.get_alive_proxies()]
+            rate, fallback = await pf.fetch_fx_usdhkd(proxy_urls=proxies)
             fx_state = {"rate": rate, "fallback": fallback,
                         "time": datetime.now().strftime("%m-%d %H:%M")}
-            proxies = [r["url"] for r in await db.get_alive_proxies()]
             nav = await pf.fetch_fund_nav(proxies)
             if nav:
                 await db.upsert_fund_nav(nav["nav_date"], nav["nav"], nav["change_pct"])

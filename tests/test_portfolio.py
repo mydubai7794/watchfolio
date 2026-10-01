@@ -1,4 +1,5 @@
 """持仓模块离线单元测试：时段/解析/盈亏计算（不发真实网络请求）"""
+import asyncio
 import json
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -276,3 +277,103 @@ class TestMarketPanelParsers:
         """非法 JSON/结构缺失 → 空列表，不抛异常。"""
         assert pf.parse_tencent_minute("not-json") == []
         assert pf.parse_tencent_minute(json.dumps({"code": 0, "data": {}})) == []
+
+
+class _FakeResp:
+    """假 httpx 响应：200 + GBK 编码内容。"""
+    status_code = 200
+    content = "美元指数".encode("gbk")
+
+
+class _FakeProxyClient:
+    """假 httpx.AsyncClient：记录所用代理，get 恒返回 200 GBK 响应。"""
+    tried: list = []
+
+    def __init__(self, *args, proxy=None, **kwargs):
+        _FakeProxyClient.tried.append(proxy)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, url, headers=None):
+        return _FakeResp()
+
+
+FX_OK_RAW = ('var hq_str_fx_susdhkd="21:55:24,7.846600,7.847600,7.846400,19,7.846700,'
+             '7.847300,7.845400,7.846600,美元兑港元即期汇率,0.010000,0.000200,0.0002421,,'
+             '7.847600,7.781500,,2026-10-01";')
+
+
+class TestGetTextResilient:
+    """新浪容错版 GET：直连优先，403/失败时代理候选依次重试。"""
+
+    def test_direct_ok(self, monkeypatch):
+        """直连成功：直接返回，不创建任何代理 client。"""
+        async def fake_get_text(url, headers=None, timeout=10.0):
+            return "ok"
+
+        _FakeProxyClient.tried = []
+        monkeypatch.setattr(pf, "_get_text", fake_get_text)
+        monkeypatch.setattr(pf.httpx, "AsyncClient", _FakeProxyClient)
+        got = asyncio.run(pf._get_text_resilient("http://x", proxy_urls=["p1", "p2"]))
+        assert got == "ok"
+        assert _FakeProxyClient.tried == []          # 未发起任何代理请求
+
+    def test_proxy_fallback(self, monkeypatch):
+        """直连失败：按候选顺序试代理，首个 200 即返回 GBK 解码内容且不再续试。"""
+        async def fake_get_text(url, headers=None, timeout=10.0):
+            return None
+
+        _FakeProxyClient.tried = []
+        monkeypatch.setattr(pf, "_get_text", fake_get_text)
+        monkeypatch.setattr(pf.httpx, "AsyncClient", _FakeProxyClient)
+        got = asyncio.run(pf._get_text_resilient("http://x", proxy_urls=["p1", "p2"]))
+        assert got == "美元指数"                      # GBK 解码正确
+        assert _FakeProxyClient.tried == ["p1"]      # 首个代理成功即止
+
+    def test_all_fail_returns_none(self, monkeypatch):
+        """直连与全部代理候选均失败：返回 None，不抛异常。"""
+        async def fake_get_text(url, headers=None, timeout=10.0):
+            return None
+
+        class _FailClient(_FakeProxyClient):
+            def __init__(self, *args, proxy=None, **kwargs):
+                _FakeProxyClient.tried.append(proxy)
+
+            async def get(self, url, headers=None):
+                raise OSError("proxy down")
+
+        _FakeProxyClient.tried = []
+        monkeypatch.setattr(pf, "_get_text", fake_get_text)
+        monkeypatch.setattr(pf.httpx, "AsyncClient", _FailClient)
+        got = asyncio.run(pf._get_text_resilient("http://x", proxy_urls=["p1", "p2"]))
+        assert got is None
+        assert _FakeProxyClient.tried == ["p1", "p2"]  # 两个候选都试过
+
+    def test_no_proxies(self, monkeypatch):
+        """无代理清单：直连失败即返回 None（等价旧直连行为）。"""
+        async def fake_get_text(url, headers=None, timeout=10.0):
+            return None
+
+        monkeypatch.setattr(pf, "_get_text", fake_get_text)
+        assert asyncio.run(pf._get_text_resilient("http://x")) is None
+
+
+class TestFetchFxUsesProxies:
+    def test_proxy_passthrough(self, monkeypatch):
+        """fetch_fx_usdhkd 代理清单透传到 _get_text_resilient。"""
+        captured = {}
+
+        async def fake_resilient(url, headers=None, proxy_urls=None, timeout=10.0):
+            captured["url"] = url
+            captured["proxy_urls"] = proxy_urls
+            return FX_OK_RAW
+
+        monkeypatch.setattr(pf, "_get_text_resilient", fake_resilient)
+        rate, fallback = asyncio.run(pf.fetch_fx_usdhkd(proxy_urls=["p9"]))
+        assert rate == 7.8466 and fallback is False
+        assert captured["proxy_urls"] == ["p9"]
+        assert "susdhkd" in captured["url"]

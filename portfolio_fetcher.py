@@ -412,7 +412,7 @@ def _position(h: dict, price, value, today, pnl, ext, stale,
 
 
 # ---------------------------------------------------------------------------
-# 网络函数（境内源直连；FT 优先走代理池）
+# 网络函数（境内源直连；FT/Yahoo 优先走代理池；新浪容错版直连失败走代理）
 # ---------------------------------------------------------------------------
 
 async def _get_text(url: str, headers: dict | None = None, timeout: float = 10.0) -> str | None:
@@ -428,11 +428,32 @@ async def _get_text(url: str, headers: dict | None = None, timeout: float = 10.0
     return None
 
 
+async def _get_text_resilient(url: str, headers: dict | None = None,
+                              proxy_urls: list[str] | None = None,
+                              timeout: float = 10.0) -> str | None:
+    """境内新浪源容错版 GET：先直连，403/网络失败时代理候选依次重试（云服务器 IP 常被新浪拉黑）。"""
+    raw = await _get_text(url, headers=headers, timeout=timeout)
+    if raw is not None:
+        return raw
+    for proxy in list(proxy_urls or [])[:2]:
+        try:
+            async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
+                resp = await client.get(url, headers=headers or {})
+                if resp.status_code == 200:
+                    return resp.content.decode("gbk", errors="replace")
+                logger.warning("代理 %s GET %s → HTTP %d", proxy, url[:60], resp.status_code)
+        except Exception as e:
+            logger.warning("代理 %s GET %s 失败: %s", proxy, url[:60], e)
+    return None
+
+
 async def fetch_quotes(us_symbols: list[str], hk_symbols: list[str],
-                       session: str | None = None) -> dict[str, dict]:
+                       session: str | None = None,
+                       proxy_urls: list[str] | None = None) -> dict[str, dict]:
     """抓取美股+港股行情：腾讯混合批量主源 + 美股扩展时段新浪批量 + 东财兜底。
 
     us_symbols/hk_symbols 分别为美股/港股代码列表；
+    proxy_urls 仅用于新浪扩展时段请求的直连失败重试（腾讯主源仍直连）；
     返回 {symbol: quote}，quote 含 price/pre_close/ext_price/ext_time 等。
     """
     global _em_fail_streak, _last_em_used
@@ -455,9 +476,9 @@ async def fetch_quotes(us_symbols: list[str], hk_symbols: list[str],
 
     # 扩展时段合并新浪盘前盘后价（仅美股；港股无扩展时段概念）
     if session in ("pre", "post") and quotes and us_symbols:
-        raw2 = await _get_text(
+        raw2 = await _get_text_resilient(
             SINA_US_URL.format(symbols=",".join("gb_" + s.lower() for s in us_symbols)),
-            headers=SINA_HEADERS,
+            headers=SINA_HEADERS, proxy_urls=proxy_urls,
         )
         if raw2:
             ext = parse_sina_us(raw2, us_symbols)
@@ -502,9 +523,12 @@ async def fetch_us_quotes(symbols: list[str], session: str | None = None) -> dic
     return await fetch_quotes(symbols, [], session)
 
 
-async def fetch_fx_usdhkd() -> tuple[float, bool]:
-    """获取 USD/HKD 汇率。返回 (汇率, 是否兜底)。"""
-    raw = await _get_text(SINA_FX_URL, headers=SINA_HEADERS)
+async def fetch_fx_usdhkd(proxy_urls: list[str] | None = None) -> tuple[float, bool]:
+    """获取 USD/HKD 汇率。返回 (汇率, 是否兜底)。
+
+    直连 403/失败时按 proxy_urls 前 2 个代理重试（云服务器 IP 常被新浪拉黑）。
+    """
+    raw = await _get_text_resilient(SINA_FX_URL, headers=SINA_HEADERS, proxy_urls=proxy_urls)
     v = parse_fx_usdhkd(raw or "")
     if v > 0:
         return v, False
@@ -617,7 +641,8 @@ async def fetch_market_panel(proxy_urls: list[str] | None = None) -> list[dict]:
     # 2. 新浪一次：DINIW 主用（美元指数）+ hf_OIL/hf_GC 兜底腾讯失败项
     sina_dxy: dict = {}
     sina_hf: dict[str, dict] = {}
-    raw_sina = await _get_text(SINA_PANEL_URL, headers=SINA_HEADERS)
+    raw_sina = await _get_text_resilient(SINA_PANEL_URL, headers=SINA_HEADERS,
+                                         proxy_urls=proxy_urls)
     if raw_sina:
         sina_dxy = parse_sina_diniw(raw_sina)
         sina_hf["BZ"] = _parse_sina_hf(raw_sina, "OIL")
