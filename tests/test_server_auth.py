@@ -81,7 +81,7 @@ def test_market_validation():
     try:
         r = client.post("/api/portfolio/holding", json={"symbol": "AAPL", "market": "xxx"})
         assert r.status_code == 400
-        assert "US 或 HKFUND" in r.json()["message"]
+        assert "US、HK 或 HKFUND" in r.json()["message"]
     finally:
         client.cookies.clear()
 

@@ -139,3 +139,65 @@ class TestBuildPositions:
         assert summary["total_value"] == 0.0
         assert summary["cost_basis"] == 90000.0 + 13.0 * 5000 / 7.8
         assert summary["total_pnl"] == summary["cost_basis"] * -1
+
+
+# 腾讯港股实测样例（v_hk03152，78 字段，币种在 f[75]）
+TENCENT_HK_RAW = ('v_hk03152="100~A博时港元~03152~1134.900~1134.650~1135.000~9382.0~0~0~1134.900~'
+                  '0~0~0~0~0~0~0~0~0~1134.900~0~0~0~0~0~0~0~0~0~9382.0~2026/09/30 16:08:33~0.250~0.02~'
+                  '1135.150~1134.650~1134.900~9382.0~10647825.200~0~0.00~~0~0~0.04~1.9520~1.9520~'
+                  'A BOS HKD MM~0.00~1138.100~1104.500~1.90~51.88~0~0~0~0~0~0.00~0.00~5.45~1~1.95~0.09~'
+                  'GP-FUND~~~0.18~0.24~0.67~172000.00~172000.00~0.00~0.000~1134.921~1.96~HKD~1~50";\n')
+
+
+class TestParseTencentHk:
+    def test_tencent_hk(self):
+        quotes = pf.parse_tencent_quotes(TENCENT_HK_RAW, ["03152"], {"03152": "hk"})
+        q = quotes["03152"]
+        assert q["price"] == 1134.9
+        assert q["pre_close"] == 1134.65
+        assert q["currency"] == "HKD"
+        assert q["quote_time"] == "2026/09/30 16:08:33"
+
+    def test_tencent_mixed(self):
+        # 港股 + 美股混合一次解析，两 symbol 均返回
+        raw = TENCENT_HK_RAW + TENCENT_RAW
+        quotes = pf.parse_tencent_quotes(raw, ["03152", "MU"], {"03152": "hk", "MU": "us"})
+        assert set(quotes) == {"03152", "MU"}
+        assert quotes["03152"]["currency"] == "HKD"
+        assert quotes["03152"]["price"] == 1134.9
+        assert quotes["MU"]["currency"] == "USD"
+        assert quotes["MU"]["price"] == 1065.11
+
+    def test_hk_truncated(self):
+        # 港股行裁到 75 字段（< 守卫阈值 76，无法安全访问 f[75]）：不抛 IndexError 且不入结果
+        fields = TENCENT_HK_RAW.split('"')[1].split("~")[:75]
+        truncated = 'v_hk03152="' + "~".join(fields) + '";\n'
+        quotes = pf.parse_tencent_quotes(truncated, ["03152"], {"03152": "hk"})
+        assert "03152" not in quotes
+
+
+HK_HOLDINGS = [
+    {"symbol": "03152", "name": "博时港元货币ETF", "market": "HK",
+     "quantity": 1, "cost_price": 1126.6, "currency": "HKD"},
+]
+HK_QUOTES = {"03152": {"name": "A博时港元", "price": 1134.9, "pre_close": 1134.65,
+                       "change_pct": 0.02, "high": 1135.15, "low": 1134.65,
+                       "currency": "HKD", "quote_time": "2026/09/30 16:08:33",
+                       "ext_price": 0.0, "ext_time": ""}}
+
+
+class TestBuildPositionsHk:
+    def test_hk_quote(self):
+        positions, summary = pf.build_positions(HK_HOLDINGS, HK_QUOTES, None, fx_usdhkd=7.8)
+        p = positions[0]
+        assert p["value"] == 1134.9 / 7.8
+        assert p["today_pnl"] == (1134.9 - 1134.65) / 7.8
+        assert p["position_pnl"] == (1134.9 - 1126.6) / 7.8
+        assert p["stale"] is False
+        assert p["ext"] == "regular"
+
+    def test_hk_stale(self):
+        positions, summary = pf.build_positions(HK_HOLDINGS, {}, None, fx_usdhkd=7.8)
+        p = positions[0]
+        assert p["stale"] is True
+        assert p["cost_usd"] == 1126.6 / 7.8

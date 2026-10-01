@@ -1152,16 +1152,24 @@ async def _portfolio_loop():
             interval = {"regular": 10.0, "pre": 30.0, "post": 30.0}.get(session, 600.0)
             holdings = await db.get_holdings(enabled_only=True)
             us_symbols = [h["symbol"] for h in holdings if h["market"] == "US"]
+            hk_symbols = [h["symbol"] for h in holdings if h["market"] == "HK"]
             if not holdings:
                 await asyncio.sleep(interval)
                 continue
-            quotes = await pf.fetch_us_quotes(us_symbols, session) if us_symbols else {}
+            quotes = await pf.fetch_quotes(us_symbols, hk_symbols, session) if (us_symbols or hk_symbols) else {}
             if quotes:
                 try:
                     await db.update_holding_names({s: q["name"] for s, q in quotes.items() if q.get("name")})
                 except Exception:
                     pass
             positions, summary = pf.build_positions(holdings, quotes, fund_nav_cache, fx_state["rate"])
+            # 现金并入总资产（现金无盈亏，今日/持仓盈亏口径不变）
+            cash_rows = await db.get_cash_accounts()
+            cash_usd = sum(r["amount"] for r in cash_rows if r["currency"] == "USD") + \
+                sum(r["amount"] / fx_state["rate"] for r in cash_rows if r["currency"] == "HKD")
+            summary["holdings_value"] = summary["total_value"]
+            summary["cash_usd"] = round(cash_usd, 2)
+            summary["total_value"] = round(summary["holdings_value"] + cash_usd, 2)
             portfolio_cache = {
                 "ok": bool(quotes),
                 "fetch_time": datetime.now().strftime("%H:%M:%S"),
@@ -1173,6 +1181,7 @@ async def _portfolio_loop():
                 "fx_time": fx_state["time"],
                 "positions": positions,
                 "summary": summary,
+                "cash": cash_rows,
                 "errors": [] if quotes else ["行情源暂不可用"],
             }
             # 休市不写 tick（避免日线聚合混入休市平线）
@@ -1240,6 +1249,12 @@ class HoldingInput(BaseModel):
     quantity: float = 0
     cost_price: float = 0
     currency: str = "USD"
+    deduct_cash: bool = False
+
+
+class CashInput(BaseModel):
+    currency: str
+    amount: float
 
 
 class HoldingUpdateInput(BaseModel):
@@ -1299,10 +1314,18 @@ async def holding_add(data: HoldingInput):
         return JSONResponse(status_code=400, content={"ok": False, "message": "symbol 不能为空"})
     # market 枚举校验（规范化大小写后校验，防非法值静默入库）
     mkt = data.market.strip().upper()
-    if mkt not in ("US", "HKFUND"):
-        return JSONResponse(status_code=400, content={"ok": False, "message": "market 必须为 US 或 HKFUND"})
+    if mkt not in ("US", "HK", "HKFUND"):
+        return JSONResponse(status_code=400, content={"ok": False, "message": "market 必须为 US、HK 或 HKFUND"})
+    currency = data.currency.strip() or "USD"
     await db.upsert_holding(symbol, data.name.strip(), mkt,
-                            data.quantity, data.cost_price, data.currency.strip() or "USD")
+                            data.quantity, data.cost_price, currency)
+    # 录入持仓时可选同步扣减现金（quantity×cost_price 原币种金额）
+    if data.deduct_cash and data.quantity > 0 and data.cost_price > 0:
+        mkt_currency = "USD" if mkt == "US" else currency
+        balance = await db.deduct_cash(mkt_currency, data.quantity * data.cost_price)
+        logger.info("录入 %s 扣减 %s 现金 %.2f，余额 %.2f",
+                    symbol, mkt_currency, data.quantity * data.cost_price,
+                    balance if balance is not None else float("nan"))
     return {"ok": True}
 
 
@@ -1310,14 +1333,24 @@ async def holding_add(data: HoldingInput):
 async def holding_update(holding_id: int, data: HoldingUpdateInput):
     # market 枚举校验（规范化大小写后校验，防非法值静默入库）
     mkt = data.market.strip().upper()
-    if mkt not in ("US", "HKFUND"):
-        return JSONResponse(status_code=400, content={"ok": False, "message": "market 必须为 US 或 HKFUND"})
+    if mkt not in ("US", "HK", "HKFUND"):
+        return JSONResponse(status_code=400, content={"ok": False, "message": "market 必须为 US、HK 或 HKFUND"})
     affected = await db.update_holding(holding_id, data.name.strip(), mkt,
                                        data.quantity, data.cost_price, data.currency.strip() or "USD",
                                        data.enabled, data.sort_order)
     if affected:
         return {"ok": True}
     return JSONResponse(status_code=404, content={"ok": False, "message": "holding not found"})
+
+
+@app.put("/api/portfolio/cash")
+async def cash_update(data: CashInput):
+    """设置某币种现金余额。"""
+    curr = data.currency.strip().upper()
+    if curr not in ("USD", "HKD"):
+        return JSONResponse(status_code=400, content={"ok": False, "message": "currency 必须为 USD 或 HKD"})
+    await db.set_cash(curr, data.amount)
+    return {"ok": True}
 
 
 @app.delete("/api/portfolio/holding/{holding_id}")

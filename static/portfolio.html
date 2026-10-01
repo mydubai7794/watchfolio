@@ -114,11 +114,18 @@ th:first-child, td:first-child { text-align: left; }
     <div class="form-row" id="newRow">
       <input id="n_symbol" placeholder="代码 如 MU">
       <input id="n_name" placeholder="名称">
-      <select id="n_market"><option value="US">US</option><option value="HKFUND">HKFUND</option></select>
+      <select id="n_market"><option value="US">US</option><option value="HK">HK</option><option value="HKFUND">HKFUND</option></select>
       <input id="n_quantity" placeholder="数量" type="number" step="any">
       <input id="n_cost" placeholder="成本价" type="number" step="any">
       <select id="n_currency"><option>USD</option><option>HKD</option></select>
+      <label style="display:flex;align-items:center;gap:4px;color:#aaa;font-size:12px"><input type="checkbox" id="n_deduct" checked>扣现金</label>
       <button class="btn btn-primary" onclick="addHolding()">新增</button>
+    </div>
+    <div class="form-row" id="cashRow" style="margin-top:14px;border-top:1px solid #2a2a4a;padding-top:12px">
+      <span style="align-self:center;color:#888">现金：</span>
+      <input id="c_usd" placeholder="USD" type="number" step="any" style="max-width:110px">
+      <input id="c_hkd" placeholder="HKD" type="number" step="any" style="max-width:110px">
+      <button class="btn btn-ghost" onclick="saveCash()">保存现金</button>
     </div>
     <div style="text-align:right;margin-top:10px">
       <button class="btn btn-ghost" onclick="closeEditor()">关闭</button>
@@ -163,7 +170,8 @@ function renderOverview(d) {
   if (!d || !d.ok && !d.positions) return;
   const s = d.summary || {};
   document.getElementById('totalValue').textContent = usd(s.total_value);
-  document.getElementById('costInfo').textContent = '成本 $' + fmt(s.cost_basis);
+  document.getElementById('costInfo').textContent =
+    '持仓 $' + fmt(s.holdings_value) + ' + 现金 $' + fmt(s.cash_usd);
   const dp = document.getElementById('dayPnl');
   dp.textContent = sign(s.day_pnl) + usd(s.day_pnl); dp.className = 'card-value ' + cls(s.day_pnl);
   document.getElementById('dayPnlPct').textContent = sign(s.day_pnl_pct) + fmt(s.day_pnl_pct) + '%';
@@ -257,17 +265,28 @@ function drawChart() {
   }
 }
 
+let cashData = [];  // overview 缓存的现金账户列表（编辑弹窗填充用）
 async function refresh() {
-  try { renderOverview(await (await fetch('/api/portfolio/overview')).json()); }
-  catch (e) { console.warn(e); }
+  try {
+    const d = await (await fetch('/api/portfolio/overview')).json();
+    cashData = d.cash || [];
+    renderOverview(d);
+  } catch (e) { console.warn(e); }
 }
 
 // ---- 编辑器 ----
 let editRows = [];
+function fillCashInputs() {
+  const usdRow = cashData.find(c => c.currency === 'USD');
+  const hkdRow = cashData.find(c => c.currency === 'HKD');
+  document.getElementById('c_usd').value = usdRow ? usdRow.amount : '';
+  document.getElementById('c_hkd').value = hkdRow ? hkdRow.amount : '';
+}
 async function openEditor() {
   try {
     editRows = await (await fetch('/api/portfolio/holding')).json();
   } catch (e) { alert('加载持仓失败'); return; }
+  fillCashInputs();
   renderEditTable();
   document.getElementById('editorMask').classList.add('show');
 }
@@ -287,7 +306,7 @@ function renderEditTable() {
     const tr = document.createElement('tr');
     tr.innerHTML = `<td>${esc(h.symbol)}</td>
       <td><input value="${esc(h.name||'')}" data-k="name"></td>
-      <td><select data-k="market"><option ${h.market==='US'?'selected':''}>US</option><option ${h.market==='HKFUND'?'selected':''}>HKFUND</option></select></td>
+      <td><select data-k="market"><option ${h.market==='US'?'selected':''}>US</option><option ${h.market==='HK'?'selected':''}>HK</option><option ${h.market==='HKFUND'?'selected':''}>HKFUND</option></select></td>
       <td><input type="number" step="any" value="${h.quantity}" data-k="quantity"></td>
       <td><input type="number" step="any" value="${h.cost_price}" data-k="cost_price"></td>
       <td><select data-k="currency"><option ${h.currency==='USD'?'selected':''}>USD</option><option ${h.currency==='HKD'?'selected':''}>HKD</option></select></td>
@@ -324,11 +343,26 @@ async function addHolding() {
   try {
     const r = await fetch('/api/portfolio/holding', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({symbol:val('n_symbol'), name:val('n_name'), market:val('n_market'),
-        quantity:Number(val('n_quantity')||0), cost_price:Number(val('n_cost')||0), currency:val('n_currency')})});
+        quantity:Number(val('n_quantity')||0), cost_price:Number(val('n_cost')||0), currency:val('n_currency'),
+        deduct_cash: document.getElementById('n_deduct').checked})});
     const d = await r.json();
     if (!r.ok || (d && d.ok === false)) { alert((d && d.message) || '操作失败'); return; }
   } catch (e) { alert('网络错误'); return; }
   reopenEditor();
+}
+async function saveCash() {
+  // 空输入跳过对应币种，两个币种各自 PUT 一次
+  for (const [curr, amt] of [['USD', val('c_usd')], ['HKD', val('c_hkd')]]) {
+    if (amt === '') continue;
+    try {
+      const r = await fetch('/api/portfolio/cash', {method:'PUT', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({currency:curr, amount:Number(amt)})});
+      const d = await r.json();
+      if (!r.ok || (d && d.ok === false)) { alert((d && d.message) || '保存失败'); return; }
+    } catch (e) { alert('网络错误'); return; }
+  }
+  alert('现金已保存');
+  refresh();
 }
 const val = id => document.getElementById(id).value.trim();
 

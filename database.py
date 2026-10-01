@@ -292,6 +292,25 @@ async def init_tables():
             _pool=pool,
         )
 
+    # ---- cash_accounts (现金账户) ----
+    await execute(
+        """
+        CREATE TABLE IF NOT EXISTS cash_accounts (
+            currency   VARCHAR(5) PRIMARY KEY COMMENT '币种 USD/HKD',
+            amount     DECIMAL(16,2) NOT NULL DEFAULT 0 COMMENT '金额',
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='现金账户'
+        """,
+        _pool=pool,
+    )
+    # 种子：用户当前剩余资产（幂等）
+    for curr, amt in (("USD", 476.79), ("HKD", 70.48)):
+        await execute(
+            "INSERT IGNORE INTO cash_accounts (currency, amount) VALUES (%s, %s)",
+            (curr, amt),
+            _pool=pool,
+        )
+
     logger.info("数据库表初始化完成")
 
 # ---------------------------------------------------------------------------
@@ -805,3 +824,34 @@ async def get_fund_nav_history(days: int) -> list[dict]:
         "WHERE nav_date >= DATE_SUB(CURDATE(), INTERVAL %s DAY) ORDER BY nav_date",
         (days,),
     )
+
+
+# ---------------------------------------------------------------------------
+# Cash accounts (现金账户)
+# ---------------------------------------------------------------------------
+
+async def get_cash_accounts() -> list[dict]:
+    """返回现金账户列表。"""
+    rows = await execute_dict("SELECT currency, amount FROM cash_accounts ORDER BY currency")
+    for r in rows:
+        r["amount"] = float(r["amount"])
+    return rows
+
+
+async def set_cash(currency: str, amount: float) -> int:
+    """设置某币种现金余额。"""
+    return await execute(
+        "INSERT INTO cash_accounts (currency, amount) VALUES (%s, %s) "
+        "ON DUPLICATE KEY UPDATE amount=VALUES(amount)",
+        (currency, amount),
+    )
+
+
+async def deduct_cash(currency: str, amount: float) -> float | None:
+    """扣减现金（可为负），返回扣减后余额。"""
+    await execute(
+        "UPDATE cash_accounts SET amount = amount - %s WHERE currency = %s",
+        (amount, currency),
+    )
+    rows = await execute_dict("SELECT amount FROM cash_accounts WHERE currency = %s", (currency,))
+    return float(rows[0]["amount"]) if rows else None

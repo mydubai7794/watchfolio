@@ -1,9 +1,9 @@
-"""持仓数据抓取模块：美股行情(腾讯主源/新浪扩展/东财兜底) + 基金净值(FT GraphQL) + 汇率。
+"""持仓数据抓取模块：美股+港股行情(腾讯主源/新浪扩展/东财兜底) + 基金净值(FT GraphQL) + 汇率。
 
 数据源结论见 docs/us-hk-quote-api-research.md：
-- 腾讯 us 前缀批量：常规时段行情（无盘前盘后）
-- 新浪 gb_ 前缀批量：字段[21]-[24] 为盘前/盘后实时价
-- 东财 ulist 批量：兜底（仅常规价，105=NASDAQ/107=AMEX，易封 IP，≤1次/分钟）
+- 腾讯 us/hk 前缀混合批量：常规时段行情（美股无盘前盘后，港股无扩展时段）
+- 新浪 gb_ 前缀批量：字段[21]-[24] 为美股盘前/盘后实时价
+- 东财 ulist 批量：兜底（仅常规价，105=NASDAQ/106=NYSE/107=AMEX/116=港股，易封 IP，≤1次/分钟）
 - FT 官网 GraphQL：基金官方日频净值（fundid=31402/shclcode=2B）
 - 新浪 fx_susdhkd：USD/HKD 汇率（失败兜底 7.80）
 """
@@ -47,9 +47,15 @@ FT_FUND_QUERY = (
 FT_FUND_VARS = {"f": "31402", "s": "2B", "c": "HK", "l": "en_GB"}
 FX_FALLBACK = 7.80
 
-# 东财兜底市场号（105=NASDAQ 107=AMEX），未知符号默认 105
-EM_MARKET_MAP = {"MU": "105", "SKHY": "105", "QQQM": "105", "SPYM": "107", "DRAM": "107", "DISK": "107"}
+# 东财兜底市场号（105=NASDAQ 106=NYSE 107=AMEX 116=港股），未知美股符号默认 105
+EM_MARKET_MAP = {
+    "MU": "105", "SKHY": "105", "QQQ": "105", "QQQM": "105", "AMD": "105",
+    "AMKR": "105", "SMH": "105", "NVDA": "105", "LITE": "105",
+    "BABA": "106", "PCG": "106", "F": "106",
+    "SPYM": "107", "DRAM": "107", "DISK": "107",
+}
 EM_DEFAULT_MARKET = "105"
+EM_HK_MARKET = "116"  # 东财港股市场号（secid 格式 "116.03152"）
 
 # 东财兜底节流：主源连续失败>=3轮才启用，且间隔>=60s
 _EM_FAIL_THRESHOLD = 3
@@ -89,17 +95,34 @@ def _f(s: str | None, default: float = 0.0) -> float:
         return default
 
 
-def parse_tencent_us(raw: str, symbols: list[str]) -> dict[str, dict]:
-    """解析腾讯美股批量响应（GBK 已解码文本），返回 {symbol: quote}。"""
+def parse_tencent_quotes(raw: str, symbols: list[str],
+                         prefixes: dict[str, str] | None = None) -> dict[str, dict]:
+    """解析腾讯批量行情响应（GBK 已解码文本），支持美股 us / 港股 hk 前缀混合，返回 {symbol: quote}。
+
+    prefixes: {symbol: "us"|"hk"}，缺省全部按美股处理。
+    港股字段布局与美股前段一致（f[1]名称/f[3]现价/f[4]昨收），
+    但时间在 f[30]、高/低在 f[33]/f[34]、币种在 f[75]（美股 f[32]/f[35]/f[36]/f[37]）。
+    """
+    prefixes = prefixes or {s: "us" for s in symbols}
     quotes: dict[str, dict] = {}
     for sym in symbols:
-        m = re.search(rf'v_us{re.escape(sym)}="([^"]*)"', raw)
+        prefix = prefixes.get(sym, "us")
+        m = re.search(rf'v_{prefix}{re.escape(sym)}="([^"]*)"', raw)
         if not m or not m.group(1):
             continue
         f = m.group(1).split("~")
-        # 守卫阈值必须大于最大访问索引 37（currency=f[37]），否则截断行会抛 IndexError
-        if len(f) < 38:
-            continue
+        if prefix == "hk":
+            # 守卫阈值必须大于最大访问索引 75（currency=f[75]），否则截断行会抛 IndexError
+            if len(f) < 76:
+                continue
+            currency, quote_time = f[75] or "HKD", f[30]
+            high, low = _f(f[33]), _f(f[34])
+        else:
+            # 守卫阈值必须大于最大访问索引 37（currency=f[37]），否则截断行会抛 IndexError
+            if len(f) < 38:
+                continue
+            currency, quote_time = f[37] or "USD", (f[32] if len(f) > 32 else "")
+            high, low = _f(f[35]), _f(f[36])
         price, pre_close = _f(f[3]), _f(f[4])
         change_pct = (price - pre_close) / pre_close * 100 if pre_close > 0 else 0.0
         quotes[sym] = {
@@ -108,14 +131,19 @@ def parse_tencent_us(raw: str, symbols: list[str]) -> dict[str, dict]:
             "price": price,
             "pre_close": pre_close,
             "change_pct": round(change_pct, 4),
-            "high": _f(f[35]),
-            "low": _f(f[36]),
-            "currency": f[37] or "USD",
-            "quote_time": f[32] if len(f) > 32 else "",
+            "high": high,
+            "low": low,
+            "currency": currency,
+            "quote_time": quote_time,
             "ext_price": 0.0,
             "ext_time": "",
         }
     return quotes
+
+
+def parse_tencent_us(raw: str, symbols: list[str]) -> dict[str, dict]:
+    """解析腾讯美股批量响应（向后兼容包装：委托 parse_tencent_quotes，全 us 前缀）。"""
+    return parse_tencent_quotes(raw, symbols, {s: "us" for s in symbols})
 
 
 def parse_sina_us(raw: str, symbols: list[str]) -> dict[str, dict]:
@@ -199,6 +227,23 @@ def build_positions(holdings: list[dict], us_quotes: dict[str, dict],
                 positions.append(_position(h, nav, value, today, pnl, "fund", False,
                                            cost_usd=cost_usd, nav_date=str(fund.get("nav_date", "")),
                                            nav_change_pct=fund.get("nav_change_pct")))
+        elif h["market"] == "HK":
+            # 港股上市 ETF：腾讯 hk 前缀行情，HKD 计价按汇率折算 USD；无扩展时段(ext=regular)
+            q = us_quotes.get(sym)
+            if not q or not q.get("price"):
+                # 行情缺失(stale)：HKD 成本按汇率折算 USD 口径，落入循环末尾统一累加
+                positions.append(_position(h, 0.0, None, None, None, "regular", True,
+                                           cost_usd=cost * qty / fx))
+            else:
+                price_now = q["price"]
+                value = price_now * qty / fx
+                today = (price_now - q["pre_close"]) * qty / fx if q["pre_close"] > 0 else 0.0
+                pnl = (price_now - cost) * qty / fx
+                cost_usd = cost * qty / fx
+                base_value += q["pre_close"] * qty / fx if q["pre_close"] > 0 else value
+                positions.append(_position(h, price_now, value, today, pnl, "regular", False,
+                                           cost_usd=cost_usd, pre_close=q["pre_close"],
+                                           quote_time=q.get("quote_time", "")))
         else:
             q = us_quotes.get(sym)
             if not q or not q.get("price"):
@@ -272,43 +317,53 @@ async def _get_text(url: str, headers: dict | None = None, timeout: float = 10.0
     return None
 
 
-async def fetch_us_quotes(symbols: list[str], session: str | None = None) -> dict[str, dict]:
-    """抓取美股行情：腾讯批量主源 + 扩展时段新浪批量 + 东财兜底。
+async def fetch_quotes(us_symbols: list[str], hk_symbols: list[str],
+                       session: str | None = None) -> dict[str, dict]:
+    """抓取美股+港股行情：腾讯混合批量主源 + 美股扩展时段新浪批量 + 东财兜底。
 
+    us_symbols/hk_symbols 分别为美股/港股代码列表；
     返回 {symbol: quote}，quote 含 price/pre_close/ext_price/ext_time 等。
     """
     global _em_fail_streak, _last_em_used
-    if not symbols:
+    all_symbols = list(us_symbols) + list(hk_symbols)
+    if not all_symbols:
         return {}
     if session is None:
         session, _, _ = us_market_session()
 
-    raw = await _get_text(TENCENT_US_URL.format(symbols=",".join("us" + s for s in symbols)))
+    prefixes = {s: "us" for s in us_symbols}
+    prefixes.update({s: "hk" for s in hk_symbols})
+    req = ",".join(prefixes[s] + s for s in all_symbols)
+    raw = await _get_text(TENCENT_US_URL.format(symbols=req))
     quotes: dict[str, dict] = {}
     if raw:
-        quotes = parse_tencent_us(raw, symbols)
+        quotes = parse_tencent_quotes(raw, all_symbols, prefixes)
         _em_fail_streak = 0
     else:
         _em_fail_streak += 1
 
-    # 扩展时段合并新浪盘前盘后价
-    if session in ("pre", "post") and quotes:
+    # 扩展时段合并新浪盘前盘后价（仅美股；港股无扩展时段概念）
+    if session in ("pre", "post") and quotes and us_symbols:
         raw2 = await _get_text(
-            SINA_US_URL.format(symbols=",".join("gb_" + s.lower() for s in symbols)),
+            SINA_US_URL.format(symbols=",".join("gb_" + s.lower() for s in us_symbols)),
             headers=SINA_HEADERS,
         )
         if raw2:
-            ext = parse_sina_us(raw2, symbols)
+            ext = parse_sina_us(raw2, us_symbols)
             for sym, q in quotes.items():
                 e = ext.get(sym)
                 if e and e.get("ext_price", 0) > 0:
                     q["ext_price"] = e["ext_price"]
                     q["ext_time"] = e["ext_time"]
 
-    # 东财兜底：主源整体失败且连续>=3轮、距上次>=60s
+    # 东财兜底：主源整体失败且连续>=3轮、距上次>=60s（美股/港股混合请求）
     if not quotes and _em_fail_streak >= _EM_FAIL_THRESHOLD and time.monotonic() - _last_em_used >= _EM_MIN_INTERVAL_SEC:
         _last_em_used = time.monotonic()
-        secids = ",".join(f"{EM_MARKET_MAP.get(s, EM_DEFAULT_MARKET)}.{s}" for s in symbols)
+        hk_set = set(hk_symbols)
+        secids = ",".join(
+            f"{EM_HK_MARKET}.{s}" if s in hk_set else f"{EM_MARKET_MAP.get(s, EM_DEFAULT_MARKET)}.{s}"
+            for s in all_symbols
+        )
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.get(EM_ULIST_URL, params={
@@ -316,19 +371,24 @@ async def fetch_us_quotes(symbols: list[str], session: str | None = None) -> dic
                 data = resp.json()
                 for item in (data.get("data") or {}).get("diff") or []:
                     sym = item.get("f12")
-                    if sym in symbols:
+                    if sym in prefixes:
                         quotes[sym] = {
                             "symbol": sym, "name": item.get("f14", ""),
                             "price": _f(item.get("f2")), "pre_close": _f(item.get("f18")),
                             "change_pct": _f(item.get("f3")), "high": 0.0, "low": 0.0,
-                            "currency": "USD", "quote_time": "",
+                            "currency": "HKD" if sym in hk_set else "USD", "quote_time": "",
                             "ext_price": 0.0, "ext_time": "",
                         }
-                logger.info("东财兜底: %d/%d", len(quotes), len(symbols))
+                logger.info("东财兜底: %d/%d", len(quotes), len(all_symbols))
         except Exception as e:
             logger.warning("东财兜底失败: %s", e)
 
     return quotes
+
+
+async def fetch_us_quotes(symbols: list[str], session: str | None = None) -> dict[str, dict]:
+    """抓取美股行情（向后兼容包装：委托 fetch_quotes，无港股）。"""
+    return await fetch_quotes(symbols, [], session)
 
 
 async def fetch_fx_usdhkd() -> tuple[float, bool]:
