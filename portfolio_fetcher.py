@@ -594,8 +594,7 @@ async def _fetch_yahoo_chart(symbol: str, proxy_urls: list[str] | None = None) -
     return {}
 
 
-async def fetch_market_panel(session: str | None = None,
-                             proxy_urls: list[str] | None = None) -> list[dict]:
+async def fetch_market_panel(proxy_urls: list[str] | None = None) -> list[dict]:
     """抓市场看板 10 项：腾讯混排批量 + 新浪(DINIW主用/hf兜底) + Yahoo chart(代理池) + sparkline。
 
     数据分工：

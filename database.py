@@ -737,6 +737,11 @@ async def delete_session(token: str) -> int:
     return await execute("DELETE FROM sessions WHERE token = %s", (token,))
 
 
+async def purge_expired_sessions() -> int:
+    """批量清理所有已过期会话行（每日定时任务调用，防止 sessions 表无限膨胀）。"""
+    return await execute("DELETE FROM sessions WHERE expires < %s", (datetime.now(),))
+
+
 # ---------------------------------------------------------------------------
 # Holdings CRUD (持仓)
 # ---------------------------------------------------------------------------

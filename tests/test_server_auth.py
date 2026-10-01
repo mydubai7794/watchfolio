@@ -5,7 +5,7 @@
 - 涉及 DB 的分支用 monkeypatch 桩掉
 """
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -229,10 +229,33 @@ def test_session_persisted_via_db(monkeypatch):
 
 
 def test_expired_token_rejected(monkeypatch):
-    """过期 token 401（DB 层过期校验）。"""
+    """过期 token 401：cookie 携带 token，DB 层返回 float 过去时刻 → _check_session 兜底拦截。"""
+    calls = []
+
     async def fake_get(token):
+        calls.append(token)
         return {"username": "t", "expires": time.time() - 1}
+
     monkeypatch.setattr(server.db, "get_session", fake_get)
-    r = client.get("/api/portfolio/overview",
-                   headers={"Authorization": "Bearer tok"})
-    assert r.status_code == 401
+    client.cookies.set("session_token", "tok")
+    try:
+        r = client.get("/api/portfolio/overview")
+        assert r.status_code == 401
+        # 鉴权必须真实查库且收到 cookie 中的 token（Authorization 头不在鉴权链路）
+        assert calls == ["tok"]
+    finally:
+        client.cookies.clear()
+
+
+def test_expired_token_datetime_rejected(monkeypatch):
+    """过期 token 401：DB 返回 datetime 形式的过去时刻，覆盖 _is_expired 的 datetime 分支。"""
+    async def fake_get(token):
+        return {"username": "t", "expires": datetime.now() - timedelta(seconds=1)}
+
+    monkeypatch.setattr(server.db, "get_session", fake_get)
+    client.cookies.set("session_token", "tok")
+    try:
+        r = client.get("/api/portfolio/overview")
+        assert r.status_code == 401
+    finally:
+        client.cookies.clear()

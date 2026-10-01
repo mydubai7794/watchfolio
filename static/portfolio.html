@@ -387,8 +387,15 @@ function renderPositions(d) {
   if (!d) return;
   const session = d.session || 'closed';
   const positions = (d.positions || []).slice();
-  // null（stale 行）沉底：按现有方向自然排尾/排头，可接受
-  positions.sort((a, b) => ((a[sortKey] ?? -1e18) - (b[sortKey] ?? -1e18)) * sortDir);
+  // null（无行情 stale 行）恒沉底：与排序方向无关始终排尾。
+  // 升序(null→+Infinity) / 降序(null→-Infinity)，保证与末元素相减后沿 sortDir 排尾；双 null 相等
+  positions.sort((a, b) => {
+    const va = a[sortKey] ?? null, vb = b[sortKey] ?? null;
+    if (va === null && vb === null) return 0;
+    const na = va === null ? (sortDir > 0 ? Infinity : -Infinity) : va;
+    const nb = vb === null ? (sortDir > 0 ? Infinity : -Infinity) : vb;
+    return (na - nb) * sortDir;
+  });
   updateSortArrows();
 
   const tbody = document.querySelector('#posTable tbody');
@@ -460,6 +467,8 @@ function renderOverview(d) {
 
   renderMarket(d);
   renderPositions(d);
+  // overview 到达即触发分时重绘：baseTotalCache 已更新，消除最长 30s 轮询空窗的口径偏差
+  if (chartMode === 'intraday' && chartData && chartData.length) { drawChart(); }
 }
 
 // ---- 走势图 ----

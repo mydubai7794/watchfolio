@@ -7,8 +7,12 @@
 输出仅 token 一行，便于脚本捕获。
 """
 import asyncio
+import os
 import secrets
 import sys
+
+# 保证 python3 scripts/make_token.py 从项目根任意位置可直接运行（scripts/ 不在包路径内）
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import database
 

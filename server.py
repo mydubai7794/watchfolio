@@ -825,6 +825,14 @@ async def _daily_init():
 
     logger.info("===== 每日静态数据初始化 开始 =====")
 
+    # 0. 清理过期登录会话（独立 try：失败不阻断后续静态数据初始化）
+    try:
+        purged = await db.purge_expired_sessions()
+        if purged:
+            logger.info("已清理过期登录会话 %d 行", purged)
+    except Exception as e:
+        logger.warning("清理过期登录会话失败: %s", e)
+
     try:
         # 1. 加载代理池
         proxy_rows = await db.get_alive_proxies()
@@ -1180,6 +1188,12 @@ async def _portfolio_loop():
             summary["holdings_value"] = summary["total_value"]
             summary["cash_usd"] = round(cash_usd, 2)
             summary["total_value"] = round(summary["holdings_value"] + cash_usd, 2)
+            # 口径契约：total_value(v)含现金 / holdings_value(p)不含现金 / base_value不含现金；
+            # day_pnl_pct 分母必须含现金，与前端展示分母 total_value 一致（build_positions
+            # 纯函数层只算持仓分母，此处现金并入后统一重算覆盖）
+            denom = summary["base_value"] + cash_usd
+            if denom > 0:
+                summary["day_pnl_pct"] = summary["day_pnl"] / denom * 100
             portfolio_cache = {
                 "ok": bool(quotes),
                 "fetch_time": datetime.now().strftime("%H:%M:%S"),
@@ -1256,7 +1270,9 @@ async def _market_loop():
     while True:
         interval = 60.0
         try:
-            market_cache = await pf.fetch_market_panel()
+            # Yahoo 链路国内直连不稳：仿 _fund_nav_loop 从代理池取存活代理透传
+            proxies = [r["url"] for r in await db.get_alive_proxies()]
+            market_cache = await pf.fetch_market_panel(proxy_urls=proxies)
         except asyncio.CancelledError:
             logger.info("市场看板采集循环已停止")
             break
