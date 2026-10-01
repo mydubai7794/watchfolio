@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Net.Http;
 using System.Threading.Tasks;
@@ -92,7 +93,7 @@ namespace StockWatcher
                     labelForStatus.ForeColor = Color.FromArgb(0, 120, 0);
                     break;
                 case StockColor.Red:
-                    labelForStatus.ForeColor = Color.FromArgb(120, 0, 0);
+                    labelForStatus.ForeColor = Color.FromArgb(170, 25, 25);
                     break;
                 case StockColor.Disabled:
                     labelForStatus.ForeColor = Color.White;
@@ -213,25 +214,27 @@ namespace StockWatcher
 
         public bool IsUp
         {
-            get { return LastClose > 0 && CurrentPrice >= LastClose; }
+            get { return LastClose > 0 ? CurrentPrice >= LastClose : ChangePct >= 0; }
         }
 
         public string DisplayText
         {
             get
             {
-                if (Type == "futures")
-                {
-                    return $"{Name} {(ChangePct >= 0 ? "+" : "")}{(ChangePct).ToString("F2")}%";
-                }
-                else if (Type == "etf" && Iopv > 0)
-                {
-                    return $"{Name} {CurrentPrice.ToString("F3")}\r\n{(PremiumPct >= 0 ? "+" : "")}{(PremiumPct).ToString("F2")}%";
-                }
-                else
-                {
-                    return $"{Name} {CurrentPrice.ToString("F2")}\r\n{(ChangePct >= 0 ? "+" : "")}{(ChangePct).ToString("F2")}%";
-                }
+                int dec = (Type == "etf" && Iopv > 0) ? 3 : 2;
+                string fmt = "F" + dec;
+
+                string line1 = Name;
+                if (CurrentPrice > 0)
+                    line1 += " " + CurrentPrice.ToString(fmt);
+
+                float changeAmt = CurrentPrice - LastClose;
+                var parts = new List<string>();
+                if (LastClose > 0)
+                    parts.Add(changeAmt.ToString(fmt));
+                parts.Add($"{(ChangePct >= 0 ? "+" : "-")} {Math.Abs(ChangePct).ToString("F2")} %");
+
+                return line1 + "\r\n" + string.Join("  ", parts);
             }
         }
 

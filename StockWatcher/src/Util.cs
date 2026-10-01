@@ -81,6 +81,20 @@ namespace StockWatcher
                 return code.ToUpper();
             }
 
+            bool hasLetter = false;
+            bool hasDigit = false;
+            foreach (var item in code)
+            {
+                if ((item >= 'A' && item <= 'Z') || (item >= 'a' && item <= 'z'))
+                    hasLetter = true;
+                else if (item >= '0' && item <= '9')
+                    hasDigit = true;
+            }
+            if (hasLetter && hasDigit)
+            {
+                return code.ToUpper();
+            }
+
             var codeStringBuilder = new System.Text.StringBuilder();
             foreach (var item in code)
             {

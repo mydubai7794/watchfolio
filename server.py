@@ -3,13 +3,14 @@
 import asyncio
 import json
 import logging
+import secrets
 import time
 from datetime import datetime, timedelta
 from typing import Optional
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query, Request, Response
 from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -28,6 +29,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+logging.getLogger("httpx").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -48,9 +50,53 @@ class ConfigInput(BaseModel):
     value: str
 
 
+class LoginInput(BaseModel):
+    username: str
+    password: str
+
+
 # ---------------------------------------------------------------------------
 # App & globals
 # ---------------------------------------------------------------------------
+
+# 登录会话: token -> {"username": str, "expires": float}
+# 简易内存会话，重启服务需重新登录
+_sessions: dict[str, dict] = {}
+SESSION_TTL = 7 * 24 * 3600  # 7 天有效期（秒）
+
+
+def _create_session(username: str) -> str:
+    token = secrets.token_urlsafe(32)
+    _sessions[token] = {
+        "username": username,
+        "expires": time.time() + SESSION_TTL,
+    }
+    return token
+
+
+def _check_session(request: Request) -> bool:
+    """检查请求是否携带有效会话 token。"""
+    token = request.cookies.get("session_token")
+    if not token:
+        return False
+    session = _sessions.get(token)
+    if not session:
+        return False
+    if time.time() > session["expires"]:
+        _sessions.pop(token, None)
+        return False
+    return True
+
+
+def _is_auth_path(path: str) -> bool:
+    """判断请求路径是否为登录相关或静态登录页（免鉴权）。"""
+    return (
+        path == "/"
+        or path.startswith("/api/login")
+        or path.startswith("/api/logout")
+        or path == "/static/login.html"
+        or path.startswith("/api/quote")
+    )
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -88,6 +134,35 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="QDII Monitor", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    """鉴权中间件：未登录用户只能访问登录页和登录接口。"""
+    path = request.url.path
+
+    # 放行登录相关路径
+    if _is_auth_path(path):
+        # 已登录用户访问根路径 → 跳转主页
+        if path == "/" and _check_session(request):
+            return RedirectResponse(url="/static/index.html", status_code=302)
+        return await call_next(request)
+
+    # 放行 OPTIONS 预检
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    # 其余路径必须登录
+    if not _check_session(request):
+        # API 请求返回 401，页面请求跳转登录
+        if path.startswith("/api/"):
+            return JSONResponse(
+                status_code=401,
+                content={"ok": False, "message": "未登录或会话已过期"},
+            )
+        return RedirectResponse(url="/static/login.html", status_code=302)
+
+    return await call_next(request)
+
 # SSE client queues
 clients: list[asyncio.Queue] = []
 
@@ -107,6 +182,9 @@ prev_day_changes_date: str = ""  # 缓存对应的日期
 candidate_cache: dict = {}
 candidate_cache_time: float = 0
 candidate_refresh_task: Optional[asyncio.Task] = None
+
+# 全球指数缓存（由 fetcher._last_global_index_cache 写入，跟随期指路由频率）
+global_index_cache: dict = {}
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +257,52 @@ def _calc_prev_day_changes(
             missing.append(code)
 
     return results, missing
+
+
+# ---------------------------------------------------------------------------
+# Auth API (登录/登出)
+# ---------------------------------------------------------------------------
+
+@app.post("/api/login")
+async def login(data: LoginInput):
+    """用户名密码登录，成功后下发会话 cookie。"""
+    user = await db.get_user(data.username.strip())
+    if not user or user["password"] != data.password:
+        return JSONResponse(
+            status_code=401,
+            content={"ok": False, "message": "用户名或密码错误"},
+        )
+    token = _create_session(user["username"])
+    resp = JSONResponse(content={"ok": True, "username": user["username"]})
+    resp.set_cookie(
+        key="session_token",
+        value=token,
+        httponly=True,
+        samesite="lax",
+        max_age=SESSION_TTL,
+        path="/",
+    )
+    return resp
+
+
+@app.post("/api/logout")
+async def logout(request: Request):
+    """登出，清除会话。"""
+    token = request.cookies.get("session_token")
+    if token:
+        _sessions.pop(token, None)
+    resp = JSONResponse(content={"ok": True})
+    resp.delete_cookie(key="session_token", path="/")
+    return resp
+
+
+@app.get("/api/session")
+async def session_check(request: Request):
+    """检查当前会话是否有效。"""
+    if _check_session(request):
+        token = request.cookies.get("session_token")
+        return {"ok": True, "username": _sessions[token]["username"]}
+    return JSONResponse(status_code=401, content={"ok": False, "message": "未登录"})
 
 
 # ---------------------------------------------------------------------------
@@ -403,7 +527,7 @@ async def proxy_check(proxy_id: int):
         async with httpx.AsyncClient(
             proxy=proxy_url, timeout=10, verify=False
         ) as client:
-            resp = await client.get("https://httpbin.org/ip")
+            resp = await client.get("https://www.baidu.com")
             latency_ms = int((time.monotonic() - start) * 1000)
             if resp.status_code == 200:
                 await db.update_proxy_status(proxy_id, alive=1, latency_ms=latency_ms)
@@ -443,15 +567,27 @@ async def config_set(key: str, data: ConfigInput):
 
 @app.get("/api/quote")
 async def quote_list(codes: str = Query(default="", description="逗号分隔的代码列表，为空则返回全部")):
-    """返回候选池缓存的行情数据。"""
-    if not candidate_cache:
-        return {"items": [], "total": 0, "fetch_time": ""}
-
+    """返回候选池缓存的行情数据。支持带 sz/sh 前缀的代码和全球指数代码。"""
     if codes:
         code_list = [c.strip() for c in codes.split(",") if c.strip()]
-        items = [candidate_cache[c] for c in code_list if c in candidate_cache]
-    else:
+        items = []
+        for c in code_list:
+            stripped = c.removeprefix("sz").removeprefix("sh") if c.startswith(("sz", "sh")) else c
+            found = False
+            for key in (c, stripped, f"sz{stripped}", f"sh{stripped}"):
+                if key in candidate_cache:
+                    items.append(candidate_cache[key])
+                    found = True
+                    break
+            if not found and c in global_index_cache:
+                items.append(global_index_cache[c])
+    elif candidate_cache:
         items = list(candidate_cache.values())
+    else:
+        items = []
+
+    if not items:
+        return {"items": [], "total": 0, "fetch_time": ""}
 
     return {
         "items": items,
@@ -520,8 +656,9 @@ async def candidate_toggle(candidate_id: int, enabled: Optional[bool] = Query(No
 
 async def _candidate_refresh_loop():
     """后台定时刷新候选池缓存。"""
-    global candidate_cache, candidate_cache_time
+    global candidate_cache, candidate_cache_time, global_index_cache
     logger.info("候选池刷新循环启动 (间隔 %.0fs)", CANDIDATE_REFRESH_SEC)
+
     while True:
         try:
             candidates = await db.get_candidate_list(enabled_only=True)
@@ -532,12 +669,20 @@ async def _candidate_refresh_loop():
 
             tencent_codes = [c["code"] for c in candidates if c["source"] == "tencent"]
             futures_codes = [c["code"] for c in candidates if c["source"] in ("sina_futures", "eastmoney_futures")]
+            global_index_codes = [c["code"] for c in candidates if c["source"] == "eastmoney_index"]
 
             proxy_rows = await db.get_alive_proxies()
             proxy_urls = [row["url"] for row in proxy_rows]
             fetcher.set_proxies(proxy_urls)
 
-            result = await fetcher.fetch_candidates(tencent_codes, futures_codes or None)
+            result = await fetcher.fetch_candidates(
+                tencent_codes,
+                futures_codes or None,
+                global_index_codes or None,
+            )
+
+            if result.get("global_indices"):
+                global_index_cache = {q["code"]: q for q in result["global_indices"]}
 
             cache: dict = {}
             for q in result.get("quotes", []):
@@ -553,6 +698,13 @@ async def _candidate_refresh_loop():
                     "price": 0,
                     "pre_close": 0,
                 }
+
+            # 使用全球指数缓存
+            for code in global_index_codes:
+                if code in global_index_cache:
+                    q = global_index_cache[code]
+                    q.setdefault("type", "index")
+                    cache[code] = q
 
             for c in candidates:
                 if c["code"] not in cache:
@@ -589,7 +741,7 @@ async def _daily_init():
     隔夜美股数据每次都会刷新（09:15 可能需要更新）。
     ETF 昨日涨跌幅同一天只计算一次。
     """
-    global overnight_data, prev_day_changes_cache, prev_day_changes_date, candidate_cache, candidate_cache_time
+    global overnight_data, prev_day_changes_cache, prev_day_changes_date, candidate_cache, candidate_cache_time, global_index_cache
 
     logger.info("===== 每日静态数据初始化 开始 =====")
 
@@ -604,19 +756,24 @@ async def _daily_init():
         overnight_data = await fetcher.fetch_overnight()
         logger.info("隔夜美股: %d 个指数", len(overnight_data))
 
-        # 2.5. 首次填充候选池缓存
+        # 2.5. 首次填充候选池缓存（不含全球指数，等 refresh loop 获取）
         if not candidate_cache:
             candidates = await db.get_candidate_list(enabled_only=True)
             tencent_codes = [c["code"] for c in candidates if c["source"] == "tencent"]
             futures_codes = [c["code"] for c in candidates if c["source"] in ("sina_futures", "eastmoney_futures")]
+            global_index_codes = [c["code"] for c in candidates if c["source"] == "eastmoney_index"]
             if tencent_codes or futures_codes:
-                cresult = await fetcher.fetch_candidates(tencent_codes, futures_codes or None)
+                cresult = await fetcher.fetch_candidates(tencent_codes, futures_codes or None, None)
                 cache_init: dict = {}
                 for q in cresult.get("quotes", []):
                     cache_init[q["code"]] = q
                 for code, change_pct in cresult.get("futures", {}).items():
                     name = next((c["name"] for c in candidates if c["code"] == code), code)
                     cache_init[code] = {"code": code, "name": name, "type": "futures", "change_pct": change_pct, "price": 0, "pre_close": 0}
+                for q in cresult.get("global_indices", []):
+                    q.setdefault("type", "index")
+                    cache_init[q["code"]] = q
+                    global_index_cache[q["code"]] = q
                 for c in candidates:
                     if c["code"] not in cache_init:
                         cache_init[c["code"]] = {"code": c["code"], "name": c["name"], "type": c["type"], "price": 0, "pre_close": 0, "change_pct": 0}
@@ -870,7 +1027,9 @@ async def _monitor_loop():
             await _broadcast("snapshot", {
                 "items": snapshot_items,
                 "futures": {k: v for k, v in futures_data.items()},
-                "overnight": overnight_data,
+        "overnight": overnight_data,
+        "global_indices": global_index_cache,
+                "global_indices": global_index_cache,
                 "fetch_time": round_result.get("fetch_time", ""),
                 "decision": {
                     "scenario": decision_result["scenario"],
@@ -916,8 +1075,11 @@ async def _monitor_loop():
 # ---------------------------------------------------------------------------
 
 @app.get("/")
-async def root():
-    return RedirectResponse(url="/static/index.html")
+async def root(request: Request):
+    """根路径：已登录跳转主页，未登录跳转登录页。"""
+    if _check_session(request):
+        return RedirectResponse(url="/static/index.html")
+    return RedirectResponse(url="/static/login.html")
 
 
 # Mount static directory

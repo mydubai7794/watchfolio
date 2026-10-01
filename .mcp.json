@@ -11,7 +11,7 @@
         "MYSQL_HOST": "***REMOVED***",
         "MYSQL_PORT": "3914",
         "MYSQL_USER": "*REMOVED*",
-        "MYSQL_PASS": "n7VO5yOzTDavUocK",
+        "MYSQL_PASS": "***REMOVED***",
         "MYSQL_DB": "qdii",
         "ALLOW_DDL_OPERATION": "true",
         "SCHEMA_DDL_PERMISSIONS": "qdii:true",

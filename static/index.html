@@ -54,6 +54,8 @@ body {
 .btn-start { background: #00b894; color: #fff; }
 .btn-stop { background: #e94560; color: #fff; }
 .btn-primary { background: #e94560; color: #fff; }
+.btn-outline { background: transparent; border: 1px solid #00b894; color: #00b894; }
+.btn-outline.mode-manual { border-color: #ffa502; color: #ffa502; }
 .btn-small { padding: 4px 10px; font-size: 12px; }
 .btn-ghost { background: transparent; border: 1px solid #555; color: #e0e0e0; }
 .btn-green { background: #00b894; color: #fff; }
@@ -176,8 +178,8 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
   font-size: 12px;
   font-weight: 500;
 }
-.futures-up { background: rgba(0,184,148,0.15); color: #00b894; }
-.futures-down { background: rgba(233,69,96,0.15); color: #e94560; }
+.futures-up { background: rgba(233,69,96,0.15); color: #e94560; }
+.futures-down { background: rgba(0,184,148,0.15); color: #00b894; }
 .futures-flat { background: rgba(128,128,128,0.15); color: #888; }
 
 /* Score column */
@@ -299,6 +301,34 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
 .table-wrapper {
   overflow-x: auto;
 }
+
+/* Overnight market bar */
+.overnight-bar {
+  display: flex;
+  gap: 20px;
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  background: #16213e;
+  border-radius: 4px;
+  border: 1px solid #2a2a4a;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+.overnight-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.overnight-label {
+  color: #888;
+}
+.overnight-close {
+  font-weight: 500;
+}
+.overnight-change {
+  font-weight: 600;
+  font-size: 12px;
+}
 </style>
 </head>
 <body>
@@ -312,11 +342,14 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
       竞价风控
     </label>
     <button class="btn btn-start" id="monitorBtn" onclick="toggleMonitor()">开始监控</button>
+    <button class="btn btn-outline" id="modeBtn" onclick="toggleMode()" title="切换自动/手动模式">自动模式</button>
     <button class="btn btn-primary" onclick="openEtfModal()">管理标的</button>
+    <button class="btn btn-ghost btn-small" onclick="logout()">登出</button>
   </div>
   <div class="status-area">
     <span class="status-dot disconnected" id="statusDot"></span>
     <span id="statusText">未连接</span>
+    <span id="scheduleText" style="margin-left:12px;font-size:12px;color:#aaa;"></span>
   </div>
 </div>
 
@@ -329,6 +362,7 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
 <!-- Tab 1: Monitor -->
 <div class="content">
   <div class="tab-panel active" id="panel-monitor">
+    <div class="overnight-bar" id="overnightBar"></div>
     <div class="table-wrapper">
       <table>
         <thead>
@@ -336,6 +370,7 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
             <th>代码</th>
             <th>名称</th>
             <th>得分</th>
+            <th>推荐操作</th>
             <th>当前价</th>
             <th>涨幅%</th>
             <th>溢价%</th>
@@ -346,7 +381,7 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
           </tr>
         </thead>
         <tbody id="monitorBody">
-          <tr><td colspan="10" class="empty-msg">等待监控数据...</td></tr>
+          <tr><td colspan="11" class="empty-msg">等待监控数据...</td></tr>
         </tbody>
       </table>
     </div>
@@ -415,7 +450,10 @@ tbody tr:hover { background: rgba(255,255,255,0.03); }
 // State
 // ---------------------------------------------------------------------------
 let monitorRunning = false;
+let monitorMode = "auto";
+let inTradingHours = false;
 let es = null;
+let prevItemsMap = {};  // code -> last valid item (score > 0)
 
 // ---------------------------------------------------------------------------
 // SSE Connection
@@ -430,6 +468,7 @@ function connectSSE() {
     try {
       const data = JSON.parse(e.data);
       renderSnapshot(data);
+      if (data.overnight || data.futures || data.global_indices) renderOvernight(data.overnight, data.futures, data.global_indices);
     } catch (err) {
       console.error('Failed to parse snapshot:', err);
     }
@@ -465,6 +504,77 @@ function setStatusDot(connected) {
 }
 
 // ---------------------------------------------------------------------------
+// Render overnight market bar (row 1) + realtime futures (row 2)
+// ---------------------------------------------------------------------------
+function renderOvernight(data, realtimeFutures, globalIndices) {
+  const bar = document.getElementById('overnightBar');
+  if ((!data || Object.keys(data).length === 0) && (!realtimeFutures || Object.keys(realtimeFutures).length === 0)) {
+    bar.style.display = 'none';
+    return;
+  }
+  bar.style.display = 'flex';
+  bar.style.flexDirection = 'column';
+  bar.style.gap = '4px';
+
+  const overnightOrder = ['纳斯达克', '道琼斯', '标普500'];
+  const globalIndexOrder = ['N225', 'KS11'];
+  const globalIndexNames = { 'N225': '日经225', 'KS11': '韩国KOSPI' };
+  const futuresOrder = ['NQ', 'YM', 'ES'];
+  const futuresNames = { 'NQ': '纳指期货', 'ES': '标普期货', 'YM': '道指期货' };
+
+  let html = '';
+
+  html += '<div style="display:flex;gap:20px;">';
+  if (data) {
+    for (const name of overnightOrder) {
+      const info = data[name];
+      if (!info) continue;
+      const pct = info.change_pct || 0;
+      const colorClass = pct > 0 ? 'text-red' : (pct < 0 ? 'text-green' : '');
+      const arrow = pct > 0 ? '▲' : (pct < 0 ? '▼' : '');
+      html += '<div class="overnight-item">';
+      html += '<span class="overnight-label">' + esc(name) + '</span>';
+      html += '<span class="overnight-close">' + (info.close || 0).toFixed(2) + '</span>';
+      html += '<span class="overnight-change ' + colorClass + '">' + arrow + fmtPct(pct) + '</span>';
+      html += '</div>';
+    }
+  }
+  if (globalIndices) {
+    for (const code of globalIndexOrder) {
+      const info = globalIndices[code];
+      if (!info) continue;
+      const pct = info.change_pct || 0;
+      const price = info.price || 0;
+      const colorClass = pct > 0 ? 'text-red' : (pct < 0 ? 'text-green' : '');
+      const arrow = pct > 0 ? '▲' : (pct < 0 ? '▼' : '');
+      html += '<div class="overnight-item">';
+      html += '<span class="overnight-label">' + esc(globalIndexNames[code] || code) + '</span>';
+      html += '<span class="overnight-close">' + price.toFixed(2) + '</span>';
+      html += '<span class="overnight-change ' + colorClass + '">' + arrow + fmtPct(pct) + '</span>';
+      html += '</div>';
+    }
+  }
+  html += '</div>';
+
+  html += '<div style="display:flex;gap:20px;">';
+  if (realtimeFutures) {
+    for (const code of futuresOrder) {
+      const changePct = realtimeFutures[code];
+      if (changePct === null || changePct === undefined) continue;
+      const colorClass = changePct > 0 ? 'text-red' : (changePct < 0 ? 'text-green' : '');
+      const arrow = changePct > 0 ? '▲' : (changePct < 0 ? '▼' : '');
+      html += '<div class="overnight-item">';
+      html += '<span class="overnight-label">' + esc(futuresNames[code] || code) + '</span>';
+      html += '<span class="overnight-change ' + colorClass + '">' + arrow + fmtPct(changePct) + '</span>';
+      html += '</div>';
+    }
+  }
+  html += '</div>';
+
+  bar.innerHTML = html;
+}
+
+// ---------------------------------------------------------------------------
 // Render snapshot
 // ---------------------------------------------------------------------------
 function renderSnapshot(data) {
@@ -476,12 +586,37 @@ function renderSnapshot(data) {
 
   if (items.length === 0) {
     document.getElementById('monitorBody').innerHTML =
-      '<tr><td colspan="10" class="empty-msg">暂无数据</td></tr>';
+      '<tr><td colspan="11" class="empty-msg">暂无数据</td></tr>';
     return;
   }
 
+  // Merge with previous valid data: if new item has score 0 but previous had score > 0,
+  // keep previous data to avoid flashing line-through during refresh gap
+  var mergedItems = items.map(function(item) {
+    var prev = prevItemsMap[item.code];
+    if (prev && (item.score === 0 || item.score == null) && prev.score > 0) {
+      return Object.assign({}, prev, {
+        price: item.price || prev.price,
+        change_pct: item.change_pct || prev.change_pct,
+        premium_pct: item.premium_pct || prev.premium_pct,
+        futures_change: item.futures_change != null ? item.futures_change : prev.futures_change,
+      });
+    }
+    return item;
+  });
+
+  // Update prevItemsMap with current valid items
+  items.forEach(function(item) {
+    if (item.score > 0) {
+      prevItemsMap[item.code] = item;
+    }
+  });
+
+  // Sort by score descending
+  mergedItems.sort(function(a, b) { return (b.score || 0) - (a.score || 0); });
+
   let html = '';
-  items.forEach(function(item, idx) {
+  mergedItems.forEach(function(item, idx) {
     const rank = idx + 1;
     const score = item.score || 0;
     const changePct = item.change_pct || 0;
@@ -495,9 +630,9 @@ function renderSnapshot(data) {
 
     // Determine row class
     let rowClass = '';
-    if (rank <= 3 && score > 70) {
+    if (rank <= 3 && score >= 0.7) {
       rowClass = 'row-top3';
-    } else if (score > 50) {
+    } else if (score >= 0.5) {
       rowClass = 'row-mid';
     } else if (score === 0 && (item.buy1_vol || 0) === 0) {
       rowClass = 'row-nobuy';
@@ -505,10 +640,10 @@ function renderSnapshot(data) {
       rowClass = 'row-stale';
     }
 
-    // Change pct color
+    // Change pct color — 红涨绿跌
     let changeClass = '';
-    if (changePct > 0) changeClass = 'text-green';
-    else if (changePct < 0) changeClass = 'text-red';
+    if (changePct > 0) changeClass = 'text-red';
+    else if (changePct < 0) changeClass = 'text-green';
 
     // Premium display
     let premiumText = fmtPct(premiumPct);
@@ -516,11 +651,11 @@ function renderSnapshot(data) {
       premiumText += ' (估)';
     }
 
-    // Score badge
+    // Score badge (continuous 0-1 scale)
     let scoreStyle = '';
-    if (score >= 80) scoreStyle = 'background:#006644;color:#fff;';
-    else if (score >= 60) scoreStyle = 'background:#1a3a2a;color:#00b894;';
-    else if (score >= 40) scoreStyle = 'background:#2d2d2d;color:#ccc;';
+    if (score >= 0.8) scoreStyle = 'background:#006644;color:#fff;';
+    else if (score >= 0.6) scoreStyle = 'background:#1a3a2a;color:#00b894;';
+    else if (score >= 0.4) scoreStyle = 'background:#2d2d2d;color:#ccc;';
     else scoreStyle = 'background:#3a1a1a;color:#e94560;';
 
     // Futures badge
@@ -536,7 +671,19 @@ function renderSnapshot(data) {
     html += '<tr class="' + rowClass + '">';
     html += '<td>' + esc(item.code) + '</td>';
     html += '<td>' + esc(item.name) + '</td>';
-    html += '<td><span class="score-badge" style="' + scoreStyle + '">' + score + '</span></td>';
+    html += '<td><span class="score-badge" style="' + scoreStyle + '">' + score.toFixed(2) + '</span></td>';
+
+    // Recommended action
+    let recHtml = '-';
+    const recAction = item.rec_action || '';
+    const recPrice = item.rec_price || 0;
+    if (recAction === 'Buy') {
+      recHtml = '<span class="text-green">Buy ' + recPrice.toFixed(3) + '</span>';
+    } else if (recAction === 'Sell') {
+      recHtml = '<span class="text-red">Sell ' + recPrice.toFixed(3) + '</span>';
+    }
+
+    html += '<td>' + recHtml + '</td>';
     html += '<td>' + price.toFixed(4) + '</td>';
     html += '<td class="' + changeClass + '">' + fmtPct(changePct) + '</td>';
     html += '<td>' + premiumText + '</td>';
@@ -554,7 +701,10 @@ function renderSnapshot(data) {
 // Status update
 // ---------------------------------------------------------------------------
 function updateStatus(data) {
+  console.log('updateStatus: data.running=', data.running);
   monitorRunning = data.running;
+  monitorMode = data.mode || monitorMode;
+  inTradingHours = data.in_trading_hours !== undefined ? data.in_trading_hours : inTradingHours;
   const proxyCount = data.proxy_count || 0;
   const intervalSec = data.interval_sec || 0;
   const etfCount = data.etf_count || 0;
@@ -569,6 +719,15 @@ function updateStatus(data) {
     setStatusDot(false);
   }
 
+  // Update schedule text
+  const scheduleText = document.getElementById('scheduleText');
+  if (monitorMode === 'auto') {
+    const tradingTag = inTradingHours ? '交易时间' : '非交易时间';
+    scheduleText.textContent = '自动模式 · ' + tradingTag;
+  } else {
+    scheduleText.textContent = '手动模式';
+  }
+
   // Update monitor button
   const btn = document.getElementById('monitorBtn');
   if (monitorRunning) {
@@ -578,21 +737,92 @@ function updateStatus(data) {
     btn.textContent = '开始监控';
     btn.className = 'btn btn-start';
   }
+
+  // Update mode button
+  updateModeButton();
 }
 
 // ---------------------------------------------------------------------------
 // Monitor control
 // ---------------------------------------------------------------------------
 async function toggleMonitor() {
+  const btn = document.getElementById('monitorBtn');
+  const wasRunning = monitorRunning;
+
   try {
-    if (monitorRunning) {
-      await fetch('/api/monitor/stop', { method: 'POST' });
+    const url = monitorRunning ? '/api/monitor/stop' : '/api/monitor/start';
+    console.log('toggleMonitor: sending', url, 'monitorRunning=', monitorRunning);
+
+    const resp = await fetch(url, { method: 'POST' });
+    const data = await resp.json();
+
+    console.log('toggleMonitor: response', data);
+
+    // 更新状态
+    if (data.ok) {
+      monitorRunning = !wasRunning;
+      monitorMode = 'manual';  // 手动操作自动切换到手动模式
+      console.log('toggleMonitor: updated monitorRunning=', monitorRunning);
+      updateMonitorButton();
+      updateModeButton();
+      const scheduleText = document.getElementById('scheduleText');
+      scheduleText.textContent = '手动模式';
     } else {
-      await fetch('/api/monitor/start', { method: 'POST' });
+      console.warn('toggleMonitor: operation failed', data.message);
     }
   } catch (err) {
     console.error('Failed to toggle monitor:', err);
     alert('操作失败: ' + err.message);
+  }
+}
+
+function updateMonitorButton() {
+  const btn = document.getElementById('monitorBtn');
+  const statusText = document.getElementById('statusText');
+
+  console.log('updateMonitorButton: monitorRunning=', monitorRunning);
+
+  if (monitorRunning) {
+    btn.textContent = '停止监控';
+    btn.className = 'btn btn-stop';
+    statusText.textContent = '监控中';
+    setStatusDot(true);
+  } else {
+    btn.textContent = '开始监控';
+    btn.className = 'btn btn-start';
+    statusText.textContent = '已停止';
+    setStatusDot(false);
+  }
+}
+
+function updateModeButton() {
+  const btn = document.getElementById('modeBtn');
+  if (monitorMode === 'auto') {
+    btn.textContent = '自动模式';
+    btn.className = 'btn btn-outline';
+  } else {
+    btn.textContent = '手动模式';
+    btn.className = 'btn btn-outline mode-manual';
+  }
+}
+
+async function toggleMode() {
+  const newMode = monitorMode === 'auto' ? 'manual' : 'auto';
+  try {
+    const resp = await fetch('/api/monitor/mode?mode=' + newMode, { method: 'POST' });
+    const data = await resp.json();
+    if (data.ok) {
+      monitorMode = newMode;
+      updateModeButton();
+      const scheduleText = document.getElementById('scheduleText');
+      if (monitorMode === 'auto') {
+        scheduleText.textContent = '自动模式 · ' + (inTradingHours ? '交易时间' : '非交易时间');
+      } else {
+        scheduleText.textContent = '手动模式';
+      }
+    }
+  } catch (err) {
+    console.error('Failed to toggle mode:', err);
   }
 }
 
@@ -672,7 +902,7 @@ function renderProxies(proxies) {
 
 // MIN_INTERVAL_SEC is a server-side constant; we approximate it here
 // The server sends interval_sec in status events, so we display that
-const MIN_INTERVAL_SEC_DISPLAY = 3;
+const MIN_INTERVAL_SEC_DISPLAY = 4;
 
 async function addProxy() {
   const input = document.getElementById('proxyUrlInput');
@@ -851,6 +1081,32 @@ function esc(str) {
 }
 
 // ---------------------------------------------------------------------------
+// Auth (登出 + 401 拦截)
+// ---------------------------------------------------------------------------
+async function logout() {
+  if (!confirm('确认登出?')) return;
+  try {
+    await fetch('/api/logout', { method: 'POST', credentials: 'include' });
+  } catch (err) {
+    // 忽略错误，直接跳转
+  }
+  window.location.href = '/static/login.html';
+}
+
+// 全局拦截 fetch 响应，401 时跳转登录页
+(function patchFetch() {
+  var originalFetch = window.fetch;
+  window.fetch = function() {
+    return originalFetch.apply(this, arguments).then(function(resp) {
+      if (resp.status === 401) {
+        window.location.href = '/static/login.html';
+      }
+      return resp;
+    });
+  };
+})();
+
+// ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
 (function init() {
@@ -864,6 +1120,8 @@ function esc(str) {
       if (data.futures_kill_enabled) {
         document.getElementById('futuresKillCb').checked = true;
       }
+      // Render overnight data (期指数据会在监控开始后通过snapshot更新)
+      if (data.overnight || data.global_indices) renderOvernight(data.overnight, null, data.global_indices);
     })
     .catch(function(err) {
       console.error('Failed to load monitor status:', err);

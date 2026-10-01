@@ -162,6 +162,25 @@ async def init_tables():
         _pool=pool,
     )
 
+    # ---- users (登录用户表，密码明文存储方便修改) ----
+    await execute(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id          INT AUTO_INCREMENT PRIMARY KEY,
+            username    VARCHAR(50)  NOT NULL UNIQUE COMMENT '用户名',
+            password    VARCHAR(100) NOT NULL COMMENT '密码(明文)',
+            created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='登录用户'
+        """,
+        _pool=pool,
+    )
+
+    # ---- 种子用户 admin / hello9987 (幂等) ----
+    await execute(
+        "INSERT IGNORE INTO users (username, password) VALUES ('admin', 'hello9987')",
+        _pool=pool,
+    )
+
     # ---- candidate_pool (候选池：股票/ETF/基金/期指) ----
     await execute(
         """
@@ -568,3 +587,16 @@ async def update_candidate_names(naming: dict[str, str]) -> int:
         )
         total += n
     return total
+
+
+# ---------------------------------------------------------------------------
+# Users CRUD (登录鉴权)
+# ---------------------------------------------------------------------------
+
+async def get_user(username: str) -> dict | None:
+    """按用户名查询用户，不存在返回 None。"""
+    rows = await execute_dict(
+        "SELECT id, username, password FROM users WHERE username = %s",
+        (username,),
+    )
+    return rows[0] if rows else None

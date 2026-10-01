@@ -38,6 +38,15 @@ SINA_HEADERS = {"Referer": "http://finance.sina.com.cn"}
 
 # 东方财富期货接口 - 只请求 COBOT 交易所（美股期指）
 EASTMONEY_FUTURES_URL = "https://futsseapi.eastmoney.com/list/COBOT"
+
+EASTMONEY_GLOBAL_INDEX_URL = "http://push2.eastmoney.com/api/qt/clist/get"
+
+_SINA_GLOBAL_INDEX_MAP = {
+    "N225": "b_NKY",
+    "KS11": "b_KOSPI",
+}
+
+_last_global_index_cache: dict[str, dict] = {}
 EASTMONEY_PARAMS = {
     "orderBy": "dm",
     "sort": "desc",
@@ -64,6 +73,8 @@ _futures_source_roundrobin: list[str] = ["sina", "eastmoney"]  # 轮询顺序
 _futures_source_index: int = 0
 # 数据源健康状态：True=可用, False=不可用
 _futures_source_health: dict[str, bool] = {"sina": True, "eastmoney": True}
+_futures_source_recover: dict[str, float] = {}  # source -> monotonic ts when it can recover
+_FUTURES_SOURCE_COOLDOWN_SEC = 60.0
 
 # 代理封禁追踪 — 断路器
 # key = (proxy_url, source), value = {"fails": N, "banned_until": monotonic_ts}
@@ -82,8 +93,18 @@ def set_proxies(proxies: list[str]) -> None:
 
 
 def _get_next_futures_source() -> str:
-    """获取下一个期指数据源（轮询）。"""
+    """获取下一个期指数据源（轮询）。
+
+    不健康的数据源在冷却 60 秒后自动恢复，避免一次失败就永久跳过。
+    """
     global _futures_source_index, _futures_source_health
+
+    now = time.monotonic()
+    for source, ts in list(_futures_source_recover.items()):
+        if now >= ts:
+            _futures_source_health[source] = True
+            del _futures_source_recover[source]
+            logger.info("期指数据源 %s 冷却恢复，重新参与轮询", source)
 
     # 找一个健康的数据源
     for _ in range(len(_futures_source_roundrobin)):
@@ -95,6 +116,7 @@ def _get_next_futures_source() -> str:
     # 如果都不可用，重置状态并重试
     logger.warning("所有期指数据源都不可用，重置状态")
     _futures_source_health = {"sina": True, "eastmoney": True}
+    _futures_source_recover.clear()
     _futures_source_index = 0
     return "sina"
 
@@ -112,14 +134,16 @@ def _is_proxy_banned(proxy_url: str, source: str) -> bool:
     return True
 
 
-def _record_proxy_ban(proxy_url: str, source: str):
-    """记录一次封禁（403），设置指数退避冷却。"""
+def _record_proxy_ban(proxy_url: str, source: str, base_sec: float = 0, max_sec: float = 0):
+    """记录一次封禁，设置指数退避冷却。"""
     key = (proxy_url, source)
     ban = _proxy_bans.get(key, {"fails": 0, "banned_until": 0})
     ban["fails"] += 1
+    _base = base_sec or _PROXY_BAN_BASE_SEC
+    _max = max_sec or _PROXY_BAN_MAX_SEC
     cooldown = min(
-        _PROXY_BAN_BASE_SEC * (_PROXY_BAN_BACKOFF ** (ban["fails"] - 1)),
-        _PROXY_BAN_MAX_SEC,
+        _base * (_PROXY_BAN_BACKOFF ** (ban["fails"] - 1)),
+        _max,
     )
     ban["banned_until"] = time.monotonic() + cooldown
     _proxy_bans[key] = ban
@@ -232,12 +256,12 @@ async def _http_get(url: str, *, source: str = "", headers: dict | None = None, 
     return None
 
 
-async def _http_get_json(url: str, *, source: str = "", params: dict | None = None, retries: int = 1) -> dict | None:
+async def _http_get_json(url: str, *, source: str = "", params: dict | None = None, retries: int = 1, follow_redirects: bool = False) -> dict | None:
     """发一次 HTTP GET 获取 JSON，按 source 独立限速。"""
     last_proxy = None
     for attempt in range(1 + retries):
         proxy_url = await _acquire_proxy(source)
-        client_kwargs: dict = {"timeout": 10}
+        client_kwargs: dict = {"timeout": 10, "follow_redirects": follow_redirects}
         if proxy_url:
             client_kwargs["proxy"] = proxy_url
             mode = f"代理({source}) {proxy_url[:30]}..."
@@ -255,9 +279,13 @@ async def _http_get_json(url: str, *, source: str = "", params: dict | None = No
                     return resp.json()
                 if resp.status_code in (403, 407) and proxy_url:
                     _record_proxy_ban(proxy_url, source)
+                elif proxy_url and resp.status_code in (502, 503):
+                    _record_proxy_ban(proxy_url, source)
                 logger.warning("GET %s (%s) → HTTP %d", url[:60], mode, resp.status_code)
         except Exception as e:
             logger.warning("GET %s (%s) 失败: %s", url[:60], mode, e)
+            if proxy_url:
+                _record_proxy_ban(proxy_url, source)
 
         if attempt < retries:
             logger.info("重试 %s (第%d次, 换代理)", source, attempt + 1)
@@ -537,14 +565,56 @@ def _parse_eastmoney_futures(data: dict, futures_indices: list[str]) -> dict[str
 
 
 # ---------------------------------------------------------------------------
+# 东方财富全球指数
+# ---------------------------------------------------------------------------
+
+async def fetch_global_indices(codes: list[str]) -> list[dict]:
+    """读取全球指数缓存（由 _fetch_futures_sina 写入）。
+
+    纯内存操作，不发起任何 HTTP 请求。
+    缓存更新频率跟随期指路由中的新浪源。
+    """
+    if not codes:
+        return []
+
+    results: list[dict] = []
+    for c in codes:
+        if c in _last_global_index_cache:
+            results.append(_last_global_index_cache[c])
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # 期指数据获取 - 智能路由
 # ---------------------------------------------------------------------------
 
-async def _fetch_futures_sina(futures_indices: list[str]) -> dict[str, float | None] | None:
-    """使用新浪数据源获取期指。"""
-    symbols = ",".join(f"hf_{k}" for k in futures_indices if k in _SINA_TO_INTERNAL)
-    if not symbols:
+async def _fetch_futures_sina(
+    futures_indices: list[str],
+    global_index_codes: list[str] | None = None,
+) -> dict[str, float | None] | None:
+    """使用新浪数据源获取期指，同时顺带获取全球指数（合并为一次 HTTP 请求）。
+
+    成功时同时更新：
+    - 期指结果（返回值）
+    - _last_global_index_cache（模块级全球指数缓存）
+    """
+    global _last_global_index_cache
+
+    futures_symbols = ",".join(f"hf_{k}" for k in futures_indices if k in _SINA_TO_INTERNAL)
+
+    global_symbols: list[str] = []
+    if global_index_codes:
+        global_symbols = [
+            _SINA_GLOBAL_INDEX_MAP[c] for c in global_index_codes
+            if c in _SINA_GLOBAL_INDEX_MAP
+        ]
+
+    all_parts = [p for p in [futures_symbols, ",".join(global_symbols)] if p]
+    if not all_parts:
         return None
+
+    symbols = ",".join(all_parts)
 
     url = SINA_FUTURES_URL.format(symbols=symbols)
     raw = await _http_get(url, source="sina_futures", headers=SINA_HEADERS)
@@ -553,13 +623,65 @@ async def _fetch_futures_sina(futures_indices: list[str]) -> dict[str, float | N
         result = _parse_sina_futures(raw, futures_indices)
         active = sum(1 for v in result.values() if v is not None)
         logger.info("新浪期指: %d/%d 成功", active, len(futures_indices))
+
+        _parse_and_cache_global_indices(raw, global_index_codes)
         return result
 
     return None
 
 
+def _parse_and_cache_global_indices(raw: str, codes: list[str] | None) -> None:
+    """从新浪原始响应中解析全球指数，存入 _last_global_index_cache。"""
+    global _last_global_index_cache
+
+    if not codes:
+        return
+
+    valid_codes = [c for c in codes if c in _SINA_GLOBAL_INDEX_MAP]
+    if not valid_codes:
+        return
+
+    new_cache: dict[str, dict] = {}
+    for line in raw.split(";"):
+        line = line.strip()
+        if not line or '="' not in line:
+            continue
+        var_part, value_part = line.split('="', 1)
+        sina_code = var_part.split("hq_str_")[-1]
+        value_part = value_part.rstrip('"')
+        if not value_part:
+            continue
+
+        parts = value_part.split(",")
+        if len(parts) < 4:
+            continue
+
+        internal_code = None
+        for ic, sc in _SINA_GLOBAL_INDEX_MAP.items():
+            if sc == sina_code:
+                internal_code = ic
+                break
+        if not internal_code:
+            continue
+
+        name = parts[0]
+        price = _safe_float(parts[1])
+        change_pct = _safe_float(parts[3])
+        new_cache[internal_code] = {
+            "code": internal_code,
+            "name": name,
+            "price": price,
+            "pre_close": 0,
+            "change_pct": change_pct,
+        }
+        logger.info("全球指数 %s(%s): price=%.2f, change=%.2f%%", internal_code, name, price, change_pct)
+
+    if new_cache:
+        _last_global_index_cache = new_cache
+
+
 async def _fetch_futures_eastmoney(futures_indices: list[str]) -> dict[str, float | None] | None:
-    """使用东方财富数据源获取期指。"""
+    """使用东方财富数据源获取期指。全球指数缓存不受影响。"""
     # 只获取我们需要的期指对应的代码
     needed_codes = [
         code for code, internal in _EASTMONEY_TO_INTERNAL.items()
@@ -579,7 +701,10 @@ async def _fetch_futures_eastmoney(futures_indices: list[str]) -> dict[str, floa
     return None
 
 
-async def fetch_futures_with_routing(futures_indices: list[str]) -> dict[str, float | None]:
+async def fetch_futures_with_routing(
+    futures_indices: list[str],
+    global_index_codes: list[str] | None = None,
+) -> dict[str, float | None]:
     """使用智能路由获取期指数据。
 
     轮询策略：
@@ -587,10 +712,13 @@ async def fetch_futures_with_routing(futures_indices: list[str]) -> dict[str, fl
     2. 失败时降级到备用数据源
     3. 更新数据源健康状态
 
+    当 primary_source == "sina" 时，global_index_codes 会合并到同一次
+    HTTP 请求中，避免对 hq.sinajs.cn 重复请求。
+
     Returns:
         {NQ: float|None, ES: float|None, YM: float|None}
     """
-    if not futures_indices:
+    if not futures_indices and not global_index_codes:
         return {}
 
     primary_source = _get_next_futures_source()
@@ -598,9 +726,8 @@ async def fetch_futures_with_routing(futures_indices: list[str]) -> dict[str, fl
 
     logger.debug("期指路由: 优先=%s, 备用=%s", primary_source, backup_source)
 
-    # 1. 尝试优先数据源
     if primary_source == "sina":
-        result = await _fetch_futures_sina(futures_indices)
+        result = await _fetch_futures_sina(futures_indices, global_index_codes)
     else:
         result = await _fetch_futures_eastmoney(futures_indices)
 
@@ -608,23 +735,25 @@ async def fetch_futures_with_routing(futures_indices: list[str]) -> dict[str, fl
         _futures_source_health[primary_source] = True
         return result
 
-    # 2. 优先源失败，尝试备用源
     logger.warning("期指数据源 %s 失败，降级到 %s", primary_source, backup_source)
 
     if backup_source == "sina":
-        result = await _fetch_futures_sina(futures_indices)
+        result = await _fetch_futures_sina(futures_indices, global_index_codes)
     else:
         result = await _fetch_futures_eastmoney(futures_indices)
 
     if result:
         _futures_source_health[backup_source] = True
         _futures_source_health[primary_source] = False  # 标记优先源不可用
+        _futures_source_recover[primary_source] = time.monotonic() + _FUTURES_SOURCE_COOLDOWN_SEC
         return result
 
     # 3. 两个源都失败
     logger.error("所有期指数据源均失败")
     _futures_source_health["sina"] = False
     _futures_source_health["eastmoney"] = False
+    _futures_source_recover["sina"] = time.monotonic() + _FUTURES_SOURCE_COOLDOWN_SEC
+    _futures_source_recover["eastmoney"] = time.monotonic() + _FUTURES_SOURCE_COOLDOWN_SEC
     return {k: None for k in futures_indices}
 
 
@@ -845,21 +974,24 @@ async def fetch_etf_prev_day_changes(etf_codes: list[str]) -> dict[str, float]:
 # 候选池行情抓取 (股票/ETF/基金/指数 + 期指)
 # ---------------------------------------------------------------------------
 
-async def fetch_candidates(tencent_codes: list[str], futures_codes: list[str] | None = None) -> dict:
+async def fetch_candidates(tencent_codes: list[str], futures_codes: list[str] | None = None, global_index_codes: list[str] | None = None) -> dict:
     """抓取候选池行情数据。
 
     按数据源分组批量请求：
     1. 腾讯 API 批量获取 A 股品种（股票/ETF/基金/指数）
     2. 期指路由获取期货数据
+    3. 东方财富获取全球指数（如日经225）
 
     Args:
         tencent_codes: 腾讯数据源的代码列表（纯数字，如 ['600519', '513100']）
         futures_codes: 期指代码列表（如 ['NQ', 'ES', 'YM']），为 None 则不获取
+        global_index_codes: 全球指数代码列表（如 ['N225']），为 None 则不获取
 
     Returns:
         {
             "quotes": [{"code": "600519", "name": "...", "price": ..., ...}, ...],
             "futures": {"NQ": float|None, ...},
+            "global_indices": [{"code": "N225", ...}, ...],
             "errors": [...],
             "fetch_time": "HH:MM:SS"
         }
@@ -888,20 +1020,27 @@ async def fetch_candidates(tencent_codes: list[str], futures_codes: list[str] | 
             errors.append("候选池腾讯接口请求失败")
 
     futures_data: dict[str, float | None] = {}
-    if futures_codes:
-        futures_data = await fetch_futures_with_routing(futures_codes)
+    if futures_codes or global_index_codes:
+        futures_data = await fetch_futures_with_routing(
+            futures_codes or [], global_index_codes
+        )
+
+    global_indices: list[dict] = []
+    if global_index_codes:
+        global_indices = await fetch_global_indices(global_index_codes)
 
     elapsed = time.monotonic() - fetch_start
     fetch_time = datetime.now().strftime("%H:%M:%S")
 
     logger.info(
-        "候选池抓取完成: %d 条行情, %d 期指, 耗时 %.1fs",
-        len(quote_data), len(futures_data), elapsed,
+        "候选池抓取完成: %d 条行情, %d 期指, %d 全球指数, 耗时 %.1fs",
+        len(quote_data), len(futures_data), len(global_indices), elapsed,
     )
 
     return {
         "quotes": quote_data,
         "futures": futures_data,
+        "global_indices": global_indices,
         "errors": errors,
         "fetch_time": fetch_time,
     }

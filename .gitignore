@@ -13,3 +13,11 @@ venv/
 .mypy_cache/
 .idea/
 .claude/
+qdii.db
+uvicorn.log
+.codegraph/
+akshare-code/
+akshare-docs/
+juejin/
+.DS_Store
+tmpclaude*
