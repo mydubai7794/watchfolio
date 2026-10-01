@@ -4,3 +4,4 @@ aiomysql
 httpx[socks]
 pytest
 pytest-asyncio
+pillow

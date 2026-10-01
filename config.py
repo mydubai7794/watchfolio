@@ -17,7 +17,7 @@ DEFAULT_SAFE_REQ_PER_MIN = 20
 MIN_INTERVAL_SEC = 3.0  # 每 IP 每 3 秒最多一次请求
 
 # 服务端口
-SERVER_PORT = 8000
+SERVER_PORT = 8888
 
 # 交易时间段 [(start_h, start_m, end_h, end_m), ...]
 TRADING_SESSIONS = [

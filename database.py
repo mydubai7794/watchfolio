@@ -224,6 +224,74 @@ async def init_tables():
     await _alter_widen_columns(pool)
     await _alter_add_rec_columns(pool)
 
+    # ---- holdings (持仓列表) ----
+    await execute(
+        """
+        CREATE TABLE IF NOT EXISTS holdings (
+            id          INT AUTO_INCREMENT PRIMARY KEY,
+            symbol      VARCHAR(20)  NOT NULL UNIQUE COMMENT '代码 MU/SKHY/HK0000740297',
+            name        VARCHAR(40)  NOT NULL DEFAULT '' COMMENT '名称',
+            market      VARCHAR(10)  NOT NULL DEFAULT 'US' COMMENT 'US=美股 HKFUND=港股场外基金',
+            quantity    DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT '数量/份额',
+            cost_price  DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT '成本价(原币种)',
+            currency    VARCHAR(5)   NOT NULL DEFAULT 'USD' COMMENT 'USD/HKD',
+            enabled     TINYINT(1)   DEFAULT 1 COMMENT '1=启用',
+            sort_order  INT          DEFAULT 0 COMMENT '排序',
+            created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP,
+            updated_at  DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='持仓列表'
+        """,
+        _pool=pool,
+    )
+
+    # ---- portfolio_ticks (组合市值采样) ----
+    await execute(
+        """
+        CREATE TABLE IF NOT EXISTS portfolio_ticks (
+            id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+            ts             DATETIME(3) NOT NULL COMMENT '北京时间采样点',
+            trade_date     DATE NOT NULL COMMENT '美东交易日',
+            total_value_usd DECIMAL(16,2) NOT NULL DEFAULT 0 COMMENT '总资产USD',
+            day_pnl_usd    DECIMAL(16,2) NOT NULL DEFAULT 0 COMMENT '今日盈亏USD',
+            total_pnl_usd  DECIMAL(16,2) NOT NULL DEFAULT 0 COMMENT '持仓盈亏USD',
+            day_pnl_pct    DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '今日收益率%',
+            total_pnl_pct DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '累计收益率%',
+            INDEX idx_trade_ts (trade_date, ts)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='组合市值采样(盘中10s/扩展时段30s)'
+        """,
+        _pool=pool,
+    )
+
+    # ---- fund_nav_history (基金官方日频净值) ----
+    await execute(
+        """
+        CREATE TABLE IF NOT EXISTS fund_nav_history (
+            nav_date    DATE PRIMARY KEY COMMENT '净值日期',
+            nav         DECIMAL(12,4) NOT NULL DEFAULT 0 COMMENT '净值(HKD)',
+            nav_change_pct DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '日涨跌%'
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='基金官方日频净值(FT)'
+        """,
+        _pool=pool,
+    )
+
+    # ---- 种子持仓 (示例数据，幂等) ----
+    seed_holdings = [
+        ("MU", "美光科技", "US", 100, 900.0, "USD", 1),
+        ("SKHY", "SK海力士 ADR", "US", 100, 150.0, "USD", 2),
+        ("QQQM", "纳斯达克100ETF-Invesco", "US", 200, 250.0, "USD", 3),
+        ("SPYM", "标普500ETF-SPDR", "US", 300, 75.0, "USD", 4),
+        ("DRAM", "存储芯片ETF-Roundhill", "US", 200, 45.0, "USD", 5),
+        ("DISK", "存储芯片ETF-Tema", "US", 200, 30.0, "USD", 6),
+        ("HK0000740297", "邓普顿智选亚太股票入息基金 A(Mdis) HKD", "HKFUND", 5000, 13.0, "HKD", 7),
+    ]
+    for symbol, name, market, qty, cost, curr, sort in seed_holdings:
+        await execute(
+            "INSERT IGNORE INTO holdings (symbol, name, market, quantity, cost_price, currency, sort_order) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            (symbol, name, market, qty, cost, curr, sort),
+            _pool=pool,
+        )
+
     logger.info("数据库表初始化完成")
 
 # ---------------------------------------------------------------------------
@@ -600,3 +668,140 @@ async def get_user(username: str) -> dict | None:
         (username,),
     )
     return rows[0] if rows else None
+
+
+# ---------------------------------------------------------------------------
+# Holdings CRUD (持仓)
+# ---------------------------------------------------------------------------
+
+async def get_holdings(enabled_only: bool = False) -> list[dict]:
+    """返回持仓列表，按 sort_order 排序。"""
+    sql = "SELECT * FROM holdings"
+    if enabled_only:
+        sql += " WHERE enabled = 1"
+    sql += " ORDER BY sort_order, id"
+    rows = await execute_dict(sql)
+    for r in rows:
+        r["quantity"] = float(r["quantity"])
+        r["cost_price"] = float(r["cost_price"])
+    return rows
+
+
+async def upsert_holding(symbol: str, name: str, market: str, quantity: float,
+                         cost_price: float, currency: str) -> int:
+    """按 symbol UPSERT 持仓。"""
+    return await execute(
+        "INSERT INTO holdings (symbol, name, market, quantity, cost_price, currency) "
+        "VALUES (%s, %s, %s, %s, %s, %s) "
+        "ON DUPLICATE KEY UPDATE name=VALUES(name), market=VALUES(market), "
+        "quantity=VALUES(quantity), cost_price=VALUES(cost_price), currency=VALUES(currency)",
+        (symbol, name, market, quantity, cost_price, currency),
+    )
+
+
+async def update_holding(holding_id: int, name: str, market: str, quantity: float,
+                         cost_price: float, currency: str, enabled: int, sort_order: int) -> int:
+    """按 id 修改持仓。"""
+    return await execute(
+        "UPDATE holdings SET name=%s, market=%s, quantity=%s, cost_price=%s, "
+        "currency=%s, enabled=%s, sort_order=%s WHERE id=%s",
+        (name, market, quantity, cost_price, currency, enabled, sort_order, holding_id),
+    )
+
+
+async def delete_holding(holding_id: int) -> int:
+    """按 id 删除持仓。"""
+    return await execute("DELETE FROM holdings WHERE id = %s", (holding_id,))
+
+
+async def update_holding_names(naming: dict[str, str]) -> int:
+    """回写行情接口返回的名称。"""
+    total = 0
+    for symbol, name in naming.items():
+        if not name:
+            continue
+        n = await execute(
+            "UPDATE holdings SET name = %s WHERE symbol = %s AND name != %s",
+            (name, symbol, name),
+        )
+        total += n
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Portfolio ticks (组合采样)
+# ---------------------------------------------------------------------------
+
+async def save_portfolio_tick(ts, trade_date, total_value: float, day_pnl: float,
+                              total_pnl: float, day_pnl_pct: float, total_pnl_pct: float) -> int:
+    """保存一条组合市值采样。"""
+    return await execute(
+        "INSERT INTO portfolio_ticks (ts, trade_date, total_value_usd, day_pnl_usd, "
+        "total_pnl_usd, day_pnl_pct, total_pnl_pct) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        (ts, trade_date, _safe_decimal(total_value, 2), _safe_decimal(day_pnl, 2),
+         _safe_decimal(total_pnl, 2), _safe_decimal(day_pnl_pct), _safe_decimal(total_pnl_pct)),
+    )
+
+
+async def get_portfolio_intraday(trade_date) -> list[dict]:
+    """返回指定美东交易日的全部采样点（当日分时）。"""
+    return await execute_dict(
+        "SELECT ts, total_value_usd, day_pnl_usd FROM portfolio_ticks "
+        "WHERE trade_date = %s ORDER BY ts",
+        (trade_date,),
+    )
+
+
+async def get_portfolio_daily(days: int) -> list[dict]:
+    """返回近 N 天的日线（每美东交易日取最后一条采样）。"""
+    return await execute_dict(
+        """
+        SELECT t.trade_date AS date, t.total_value_usd AS total_value,
+               t.day_pnl_usd AS day_pnl, t.total_pnl_pct AS total_pnl_pct
+        FROM portfolio_ticks t
+        JOIN (SELECT trade_date, MAX(ts) AS mx FROM portfolio_ticks GROUP BY trade_date) m
+          ON t.trade_date = m.trade_date AND t.ts = m.mx
+        WHERE t.trade_date >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
+        ORDER BY t.trade_date
+        """,
+        (days,),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fund NAV (基金净值)
+# ---------------------------------------------------------------------------
+
+async def upsert_fund_nav(nav_date, nav: float, nav_change_pct: float) -> int:
+    """UPSERT 基金官方净值。"""
+    return await execute(
+        "INSERT INTO fund_nav_history (nav_date, nav, nav_change_pct) VALUES (%s, %s, %s) "
+        "ON DUPLICATE KEY UPDATE nav=VALUES(nav), nav_change_pct=VALUES(nav_change_pct)",
+        (nav_date, _safe_decimal(nav), _safe_decimal(nav_change_pct)),
+    )
+
+
+async def get_latest_fund_nav() -> dict | None:
+    """返回最新净值与前一日净值。"""
+    rows = await execute_dict(
+        "SELECT nav_date, nav, nav_change_pct FROM fund_nav_history ORDER BY nav_date DESC LIMIT 2"
+    )
+    if not rows:
+        return None
+    latest = rows[0]
+    prev = float(rows[1]["nav"]) if len(rows) > 1 else 0.0
+    return {
+        "nav_date": latest["nav_date"],
+        "nav": float(latest["nav"]),
+        "nav_change_pct": float(latest["nav_change_pct"]),
+        "prev_nav": prev,
+    }
+
+
+async def get_fund_nav_history(days: int) -> list[dict]:
+    """返回近 N 天基金净值历史。"""
+    return await execute_dict(
+        "SELECT nav_date, nav, nav_change_pct FROM fund_nav_history "
+        "WHERE nav_date >= DATE_SUB(CURDATE(), INTERVAL %s DAY) ORDER BY nav_date",
+        (days,),
+    )
