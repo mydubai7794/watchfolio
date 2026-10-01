@@ -65,9 +65,8 @@ class LoginInput(BaseModel):
 # App & globals
 # ---------------------------------------------------------------------------
 
-# 登录会话: token -> {"username": str, "expires": float}
-# 简易内存会话，重启服务需重新登录
-_sessions: dict[str, dict] = {}
+# 登录会话: 存储在 MySQL sessions 表（token -> {username, expires}），
+# 服务重启后会话不丢，过期由 DB 层校验
 SESSION_TTL = 30 * 24 * 3600  # 30 天有效期
 
 # 验证码: captcha_id -> {"answer": int, "expires": float}
@@ -79,25 +78,30 @@ _login_attempts: dict[str, list[float]] = {}
 _captcha_attempts: dict[str, list[float]] = {}
 
 
-def _create_session(username: str) -> str:
+def _is_expired(expires) -> bool:
+    """判断会话是否过期。expires 兼容 datetime（DB 返回）与 float（时间戳）。"""
+    if isinstance(expires, datetime):
+        return datetime.now() > expires
+    return time.time() > expires
+
+
+async def _create_session(username: str) -> str:
+    """生成 token 并写入 DB sessions 表。"""
     token = secrets.token_urlsafe(32)
-    _sessions[token] = {
-        "username": username,
-        "expires": time.time() + SESSION_TTL,
-    }
+    await db.create_session(token, username, SESSION_TTL)
     return token
 
 
-def _check_session(request: Request) -> bool:
-    """检查请求是否携带有效会话 token。"""
+async def _check_session(request: Request) -> bool:
+    """检查请求是否携带有效会话 token（查 DB sessions 表）。"""
     token = request.cookies.get("session_token")
     if not token:
         return False
-    session = _sessions.get(token)
+    session = await db.get_session(token)
     if not session:
         return False
-    if time.time() > session["expires"]:
-        _sessions.pop(token, None)
+    # DB 层 get_session 已删除过期行，这里仅兜底防御过期数据
+    if _is_expired(session["expires"]):
         return False
     return True
 
@@ -167,7 +171,7 @@ async def auth_middleware(request: Request, call_next):
     # 放行登录相关路径
     if _is_auth_path(path):
         # 已登录用户访问根路径 → 跳转主页
-        if path == "/" and _check_session(request):
+        if path == "/" and await _check_session(request):
             return RedirectResponse(url="/static/index.html", status_code=302)
         return await call_next(request)
 
@@ -176,7 +180,7 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
 
     # 其余路径必须登录
-    if not _check_session(request):
+    if not await _check_session(request):
         # API 请求返回 401，页面请求跳转登录
         if path.startswith("/api/"):
             return JSONResponse(
@@ -371,7 +375,7 @@ async def login(data: LoginInput, request: Request):
             status_code=401,
             content={"ok": False, "message": "用户名或密码错误"},
         )
-    token = _create_session(user["username"])
+    token = await _create_session(user["username"])
     resp = JSONResponse(content={"ok": True, "username": user["username"]})
     resp.set_cookie(
         key="session_token",
@@ -389,7 +393,7 @@ async def logout(request: Request):
     """登出，清除会话。"""
     token = request.cookies.get("session_token")
     if token:
-        _sessions.pop(token, None)
+        await db.delete_session(token)
     resp = JSONResponse(content={"ok": True})
     resp.delete_cookie(key="session_token", path="/")
     return resp
@@ -398,9 +402,10 @@ async def logout(request: Request):
 @app.get("/api/session")
 async def session_check(request: Request):
     """检查当前会话是否有效。"""
-    if _check_session(request):
-        token = request.cookies.get("session_token")
-        return {"ok": True, "username": _sessions[token]["username"]}
+    token = request.cookies.get("session_token")
+    session = await db.get_session(token) if token else None
+    if session and not _is_expired(session["expires"]):
+        return {"ok": True, "username": session["username"]}
     return JSONResponse(status_code=401, content={"ok": False, "message": "未登录"})
 
 

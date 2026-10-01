@@ -1,5 +1,7 @@
 """异步 MySQL CRUD 模块（aiomysql）"""
 import logging
+from datetime import datetime, timedelta
+
 import aiomysql
 from config import DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_NAME, DB_POOL_SIZE
 
@@ -178,6 +180,19 @@ async def init_tables():
     # ---- 种子用户 admin / hello9987 (幂等) ----
     await execute(
         "INSERT IGNORE INTO users (username, password) VALUES ('admin', 'hello9987')",
+        _pool=pool,
+    )
+
+    # ---- sessions (登录会话，支持服务重启后会话不丢) ----
+    await execute(
+        """
+        CREATE TABLE IF NOT EXISTS sessions (
+            token      VARCHAR(64)  PRIMARY KEY COMMENT '会话token',
+            username   VARCHAR(64)  NOT NULL COMMENT '登录用户名',
+            expires    DATETIME     NOT NULL COMMENT '过期时间',
+            created_at DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间'
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='登录会话'
+        """,
         _pool=pool,
     )
 
@@ -687,6 +702,39 @@ async def get_user(username: str) -> dict | None:
         (username,),
     )
     return rows[0] if rows else None
+
+
+# ---------------------------------------------------------------------------
+# Sessions CRUD (登录会话)
+# ---------------------------------------------------------------------------
+
+async def create_session(token: str, username: str, ttl: int) -> int:
+    """写入会话（expires = 当前时间 + ttl 秒）。"""
+    expires = datetime.now() + timedelta(seconds=ttl)
+    return await execute(
+        "INSERT INTO sessions (token, username, expires) VALUES (%s, %s, %s)",
+        (token, username, expires),
+    )
+
+
+async def get_session(token: str) -> dict | None:
+    """按 token 查会话，过期则删除并返回 None（过期即失效）。"""
+    rows = await execute_dict(
+        "SELECT username, expires FROM sessions WHERE token = %s",
+        (token,),
+    )
+    if not rows:
+        return None
+    if rows[0]["expires"] < datetime.now():
+        # 已过期：顺手清理，视为无会话
+        await execute("DELETE FROM sessions WHERE token = %s", (token,))
+        return None
+    return {"username": rows[0]["username"], "expires": rows[0]["expires"]}
+
+
+async def delete_session(token: str) -> int:
+    """按 token 删除会话（登出）。"""
+    return await execute("DELETE FROM sessions WHERE token = %s", (token,))
 
 
 # ---------------------------------------------------------------------------

@@ -23,7 +23,6 @@ def _clean_state():
     server._captchas.clear()
     server._captcha_attempts.clear()
     server._login_attempts.clear()
-    server._sessions.clear()
 
 
 def test_captcha_ok():
@@ -73,11 +72,17 @@ def test_captcha_rate_limit():
     assert "频繁" in r31.json()["message"]
 
 
-def test_market_validation():
+def _fake_valid_session(token: str = "tester"):
+    """构造 DB 会话查询桩：返回有效会话。"""
+    async def fake_get_session(t):
+        return {"username": token, "expires": time.time() + 3600}
+    return fake_get_session
+
+
+def test_market_validation(monkeypatch):
     """持仓新增 market 非法值 → 400，不入库。"""
-    token = "test-token-market"
-    server._sessions[token] = {"username": "tester", "expires": time.time() + 3600}
-    client.cookies.set("session_token", token)
+    monkeypatch.setattr(server.db, "get_session", _fake_valid_session())
+    client.cookies.set("session_token", "test-token-market")
     try:
         r = client.post("/api/portfolio/holding", json={"symbol": "AAPL", "market": "xxx"})
         assert r.status_code == 400
@@ -107,15 +112,15 @@ class TestNextFundNavRun:
         assert server._next_fund_nav_run(datetime(2026, 10, 1, 23, 59)) == datetime(2026, 10, 2, 14, 0)
 
 
-def _login_as(token: str):
-    """测试辅助：注入会话并设置 cookie。"""
-    server._sessions[token] = {"username": "tester", "expires": time.time() + 3600}
+def _login_as(monkeypatch, token: str):
+    """测试辅助：mock DB 会话查询返回有效会话，并设置 cookie。"""
+    monkeypatch.setattr(server.db, "get_session", _fake_valid_session())
     client.cookies.set("session_token", token)
 
 
-def test_cash_update_invalid_currency():
+def test_cash_update_invalid_currency(monkeypatch):
     """PUT /api/portfolio/cash 非法币种 → 400。"""
-    _login_as("test-token-cash-bad")
+    _login_as(monkeypatch, "test-token-cash-bad")
     try:
         r = client.put("/api/portfolio/cash", json={"currency": "XXX", "amount": 100})
         assert r.status_code == 400
@@ -133,7 +138,7 @@ def test_cash_update_ok(monkeypatch):
         return 1
 
     monkeypatch.setattr(server.db, "set_cash", fake_set_cash)
-    _login_as("test-token-cash-ok")
+    _login_as(monkeypatch, "test-token-cash-ok")
     try:
         r = client.put("/api/portfolio/cash", json={"currency": "usd", "amount": 100})
         assert r.status_code == 200
@@ -159,7 +164,7 @@ def test_holding_add_duplicate_deduct(monkeypatch):
 
     monkeypatch.setattr(server.db, "execute_dict", fake_execute_dict)
     monkeypatch.setattr(server.db, "upsert_holding", fake_upsert)
-    _login_as("test-token-dup-deduct")
+    _login_as(monkeypatch, "test-token-dup-deduct")
     try:
         r = client.post("/api/portfolio/holding",
                         json={"symbol": "MU", "market": "US", "quantity": 1,
@@ -187,7 +192,7 @@ def test_holding_add_deduct(monkeypatch):
     monkeypatch.setattr(server.db, "execute_dict", fake_execute_dict)
     monkeypatch.setattr(server.db, "upsert_holding", fake_upsert)
     monkeypatch.setattr(server.db, "deduct_cash", fake_deduct)
-    _login_as("test-token-add-deduct")
+    _login_as(monkeypatch, "test-token-add-deduct")
     try:
         r = client.post("/api/portfolio/holding",
                         json={"symbol": "NEW1", "market": "US", "quantity": 2,
@@ -196,3 +201,38 @@ def test_holding_add_deduct(monkeypatch):
         assert r.json()["cash_balance"] == 88.88
     finally:
         client.cookies.clear()
+
+
+def test_session_persisted_via_db(monkeypatch):
+    """登录成功后会话写入 DB 而非内存字典。"""
+    calls = []
+
+    async def fake_create(token, username, ttl):
+        calls.append((token, username, ttl))
+
+    monkeypatch.setattr(server.db, "create_session", fake_create)
+
+    async def fake_get_user(username):
+        # 桩掉 DB 用户查询，保持测试离线不连库
+        return {"username": username, "password": "hello9987"}
+
+    monkeypatch.setattr(server.db, "get_user", fake_get_user)
+    # 预置验证码后走完整登录流程
+    server._captchas["cid"] = {"answer": 7, "expires": time.time() + 60}
+    r = client.post("/api/login", json={
+        "username": "admin", "password": "hello9987",
+        "captcha_id": "cid", "captcha_answer": "7"})
+    assert r.status_code == 200
+    assert len(calls) == 1 and calls[0][1] == "admin"
+    assert calls[0][2] == server.SESSION_TTL
+    assert not hasattr(server, "_sessions") or not server._sessions
+
+
+def test_expired_token_rejected(monkeypatch):
+    """过期 token 401（DB 层过期校验）。"""
+    async def fake_get(token):
+        return {"username": "t", "expires": time.time() - 1}
+    monkeypatch.setattr(server.db, "get_session", fake_get)
+    r = client.get("/api/portfolio/overview",
+                   headers={"Authorization": "Bearer tok"})
+    assert r.status_code == 401
