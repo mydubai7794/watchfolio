@@ -132,7 +132,7 @@ function esc(str) {
   if (!str) return '';
   var div = document.createElement('div');
   div.appendChild(document.createTextNode(str));
-  return div.innerHTML;
+  return div.innerHTML.replace(/"/g, '&quot;');
 }
 
 // 全局拦截 fetch 响应，401 时跳转登录页
@@ -272,10 +272,11 @@ async function openEditor() {
   document.getElementById('editorMask').classList.add('show');
 }
 // 弹窗已打开时的重新拉取（保存/删除/新增成功后调用）：
-// 先确认，避免静默丢弃其他行未保存的修改；首次打开不走此确认
-async function reopenEditor() {
+// 先确认，避免静默丢弃其他行未保存的修改；首次打开不走此确认；
+// skipConfirm=true 用于删除后刷新（删除已有自身确认框，避免双重确认）
+async function reopenEditor(skipConfirm = false) {
   const mask = document.getElementById('editorMask');
-  if (mask.classList.contains('show') &&
+  if (!skipConfirm && mask.classList.contains('show') &&
       !confirm('其他行可能有未保存修改，刷新将丢弃，继续？')) return;
   await openEditor();
 }
@@ -317,7 +318,7 @@ async function delRow(id) {
     const d = await r.json();
     if (!r.ok || (d && d.ok === false)) { alert((d && d.message) || '操作失败'); return; }
   } catch (e) { alert('网络错误'); return; }
-  reopenEditor();
+  reopenEditor(true);
 }
 async function addHolding() {
   try {
