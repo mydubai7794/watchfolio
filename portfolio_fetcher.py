@@ -8,6 +8,8 @@
 - 新浪 fx_susdhkd：USD/HKD 汇率（失败兜底 7.80）
 """
 
+import asyncio
+import json
 import logging
 import re
 import time
@@ -27,9 +29,11 @@ ET_TZ = ZoneInfo("America/New_York")
 # ---------------------------------------------------------------------------
 
 TENCENT_US_URL = "http://qt.gtimg.cn/q={symbols}"
+TENCENT_MINUTE_URL = "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code={code}"
 SINA_US_URL = "https://hq.sinajs.cn/list={symbols}"
 SINA_HEADERS = {"Referer": "https://finance.sina.com.cn"}
 SINA_FX_URL = "https://hq.sinajs.cn/list=fx_susdhkd"
+SINA_OIL_URL = "https://hq.sinajs.cn/list=hf_OIL"
 EM_ULIST_URL = "http://push2.eastmoney.com/api/qt/ulist.np/get"
 EM_FIELDS = "f2,f3,f12,f13,f14,f18,f124"
 FT_PDS_URL = "https://www.franklintempleton.com.hk/api/pds/price-and-performance"
@@ -177,6 +181,36 @@ def parse_fx_usdhkd(raw: str) -> float:
         return 0.0
     v = _f(f[1])
     return v if 7.5 <= v <= 8.5 else 0.0
+
+
+def parse_sina_oil(raw: str) -> dict:
+    """解析新浪布伦特原油 hf_OIL：f[0]现价 f[2]昨收 f[13]名称，涨跌幅自算；字段不足返回 {}。"""
+    m = re.search(r'hf_OIL="([^"]*)"', raw or "")
+    if not m:
+        return {}
+    f = m.group(1).split(",")
+    # 守卫 14：大于最大访问索引 13（name=f[13]），截断行不入结果
+    if len(f) < 14 or not f[0]:
+        return {}
+    price, pre = float(f[0]), float(f[2] or 0)
+    return {"price": price, "pre_close": pre,
+            "change_pct": (price - pre) / pre * 100 if pre > 0 else 0.0, "name": f[13]}
+
+
+def parse_tencent_minute(raw: str) -> list[tuple[str, float]]:
+    """解析腾讯分时接口为 [(HHMM, 价格)]；JSON 非法/结构缺失返回 []。"""
+    try:
+        d = json.loads(raw)["data"]
+        code = next(iter(d))
+        rows = d[code]["data"]["data"]
+        out: list[tuple[str, float]] = []
+        for r in rows:
+            p = str(r).split()
+            if len(p) >= 2:
+                out.append((p[0], float(p[1])))
+        return out
+    except Exception:
+        return []
 
 
 def parse_ft_nav(data: dict) -> dict | None:
@@ -421,3 +455,81 @@ async def fetch_fund_nav(proxy_urls: list[str] | None = None) -> dict | None:
             last_err = str(e)
     logger.warning("FT 基金净值获取失败: %s", last_err)
     return None
+
+
+# ---------------------------------------------------------------------------
+# 市场参考看板（QQQ/SPY/SOXX/GLD/布油/TLT/恒指 + 分时 sparkline）
+# ---------------------------------------------------------------------------
+
+MARKET_PANEL = [  # (key, 腾讯代码, 展示名, 币种, sparkline 是否可用)
+    ("QQQ", "usQQQ", "纳指100", "USD", True),
+    ("SPY", "usSPY", "标普500", "USD", True),
+    ("SOXX", "usSOXX", "费城半导体", "USD", True),
+    ("GLD", "usGLD", "黄金", "USD", True),
+    ("BZ", "", "布伦特原油", "USD", False),      # 新浪 hf_OIL，无腾讯代码故无分时
+    ("TLT", "usTLT", "美债20Y+", "USD", True),   # US30Y 无稳定源，以 TLT 替代
+    ("HSI", "hkHSI", "恒生指数", "HKD", True),
+]
+
+
+def _downsample_minute(points: list[tuple[str, float]], limit: int = 60) -> list[float]:
+    """分时点均匀降采样到 <=limit 个，保留首尾，输出纯价格序列供 sparkline 使用。"""
+    if not points:
+        return []
+    if len(points) <= limit:
+        return [p[1] for p in points]
+    step = (len(points) - 1) / (limit - 1)
+    idxs = [round(i * step) for i in range(limit)]
+    return [points[i][1] for i in idxs]
+
+
+async def fetch_market_panel(session: str | None = None) -> list[dict]:
+    """抓市场看板：腾讯批量行情 + 新浪布伦特 + 分时 sparkline（降采样≤60点）。
+
+    单项失败不致命：price 置 None、spark 置空数组；返回
+    [{key,name,price,change_pct,currency,spark:[float,...]}]，name 用 MARKET_PANEL 中文展示名。
+    """
+    # 1. 腾讯批量：全部带腾讯代码的看板项一次拉取（us/hk 前缀混合）
+    tencent_codes = [code for _, code, _, _, _ in MARKET_PANEL if code]
+    prefixes = {c[2:]: c[:2] for c in tencent_codes}
+    quotes: dict[str, dict] = {}
+    if tencent_codes:
+        raw = await _get_text(TENCENT_US_URL.format(symbols=",".join(tencent_codes)))
+        if raw:
+            quotes = parse_tencent_quotes(raw, list(prefixes), prefixes)
+
+    # 2. 新浪布伦特原油一次（hf_OIL）
+    oil: dict = {}
+    raw_oil = await _get_text(SINA_OIL_URL, headers=SINA_HEADERS)
+    if raw_oil:
+        oil = parse_sina_oil(raw_oil)
+
+    # 3. sparkline：spark=True 的项并发拉腾讯分时接口并降采样（失败→空数组）
+    spark_map: dict[str, list[float]] = {}
+    spark_codes = [code for _, code, _, _, spark in MARKET_PANEL if spark and code]
+
+    async def _spark(code: str) -> tuple[str, list[float]]:
+        # _get_text 失败返回 None，parse_tencent_minute 对 None 返回 []，故不会抛出
+        return code, _downsample_minute(parse_tencent_minute(await _get_text(
+            TENCENT_MINUTE_URL.format(code=code)) or ""))
+
+    results = await asyncio.gather(*(_spark(c) for c in spark_codes), return_exceptions=True)
+    for r in results:
+        if not isinstance(r, Exception):
+            spark_map[r[0]] = r[1]
+
+    # 4. 组装输出：无行情的项 price/change_pct 置 None（前端隐藏涨跌），不致命
+    panel: list[dict] = []
+    for key, code, name, cur, spark in MARKET_PANEL:
+        price = change = None
+        if key == "BZ":
+            if oil.get("price"):
+                price, change = oil["price"], oil["change_pct"]
+        else:
+            q = quotes.get(code[2:])
+            if q and q.get("price"):
+                price, change = q["price"], q.get("change_pct")
+        panel.append({"key": key, "name": name, "price": price, "change_pct": change,
+                      "currency": cur,
+                      "spark": spark_map.get(code, []) if (spark and code) else []})
+    return panel

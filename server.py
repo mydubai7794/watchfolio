@@ -136,10 +136,11 @@ async def lifespan(app: FastAPI):
     global candidate_refresh_task
     candidate_refresh_task = asyncio.create_task(_candidate_refresh_loop())
 
-    global portfolio_task, fund_nav_task, fund_nav_cache
+    global portfolio_task, fund_nav_task, fund_nav_cache, market_task
     fund_nav_cache = await db.get_latest_fund_nav()
     fund_nav_task = asyncio.create_task(_fund_nav_loop())
     portfolio_task = asyncio.create_task(_portfolio_loop())
+    market_task = asyncio.create_task(_market_loop())
 
     yield
     global monitor_running
@@ -150,6 +151,8 @@ async def lifespan(app: FastAPI):
         portfolio_task.cancel()
     if fund_nav_task:
         fund_nav_task.cancel()
+    if market_task:
+        market_task.cancel()
     if candidate_refresh_task:
         candidate_refresh_task.cancel()
     if daily_task:
@@ -217,8 +220,10 @@ global_index_cache: dict = {}
 portfolio_cache: dict = {"ok": False, "positions": [], "summary": {}, "errors": []}
 fund_nav_cache: dict | None = None   # {"nav","prev_nav","nav_date","nav_change_pct"}
 fx_state: dict = {"rate": 7.80, "fallback": True, "time": ""}
+market_cache: list[dict] = []        # 市场参考看板缓存（QQQ/SPY/SOXX/GLD/布油/TLT/恒指）
 portfolio_task: Optional[asyncio.Task] = None
 fund_nav_task: Optional[asyncio.Task] = None
+market_task: Optional[asyncio.Task] = None
 
 
 # ---------------------------------------------------------------------------
@@ -1244,6 +1249,23 @@ async def _fund_nav_loop():
         await asyncio.sleep((nxt - now).total_seconds())
 
 
+async def _market_loop():
+    """市场参考看板采集：60s 周期刷新，异常钳制 120s 避免刷日志。"""
+    global market_cache
+    logger.info("市场看板采集循环启动")
+    while True:
+        interval = 60.0
+        try:
+            market_cache = await pf.fetch_market_panel()
+        except asyncio.CancelledError:
+            logger.info("市场看板采集循环已停止")
+            break
+        except Exception as e:
+            logger.exception("市场看板采集错误: %s", e)
+            interval = 120.0
+        await asyncio.sleep(interval)
+
+
 # ---------------------------------------------------------------------------
 # Portfolio API (持仓)
 # ---------------------------------------------------------------------------
@@ -1275,9 +1297,10 @@ class HoldingUpdateInput(BaseModel):
 
 @app.get("/api/portfolio/overview")
 async def portfolio_overview():
-    """持仓总览（读缓存，含汇总/持仓明细/时段/汇率）。"""
+    """持仓总览（读缓存，含汇总/持仓明细/时段/汇率/市场看板）。"""
     data = dict(portfolio_cache)
     data["fund"] = fund_nav_cache
+    data["market"] = market_cache
     return data
 
 

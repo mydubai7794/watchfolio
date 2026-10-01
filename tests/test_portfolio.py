@@ -1,4 +1,5 @@
 """持仓模块离线单元测试：时段/解析/盈亏计算（不发真实网络请求）"""
+import json
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -201,3 +202,30 @@ class TestBuildPositionsHk:
         p = positions[0]
         assert p["stale"] is True
         assert p["cost_usd"] == 1126.6 / 7.8
+
+
+class TestMarketPanelParsers:
+    def test_parse_sina_oil(self):
+        """新浪布伦特 hf_OIL：f[0]现价 f[2]昨收 f[13]名称，涨跌幅自算。"""
+        raw = 'var hq_str_hf_OIL="100.896,,100.790,100.810,101.880,96.550,00:32:51,98.030,97.660,0,8,2,2026-10-02,布伦特原油,358704";\n'
+        q = pf.parse_sina_oil(raw)
+        assert q["price"] == 100.896 and q["pre_close"] == 100.790
+        assert abs(q["change_pct"] - (100.896 - 100.790) / 100.790 * 100) < 1e-9
+        assert q["name"] == "布伦特原油"
+
+    def test_parse_sina_oil_bad(self):
+        """字段不足/无匹配时返回空 dict，不抛异常。"""
+        assert pf.parse_sina_oil("var hq_str_hf_OIL=\"1,2,3\";") == {}
+        assert pf.parse_sina_oil("") == {}
+
+    def test_parse_tencent_minute(self):
+        """腾讯分时接口 → [(HHMM, 价格)]。"""
+        raw = json.dumps({"code": 0, "data": {"usQQQ": {"data": {
+            "data": ["0930 738.00 100", "0931 738.50 200"], "date": ""}}}})
+        pts = pf.parse_tencent_minute(raw)
+        assert pts == [("0930", 738.0), ("0931", 738.5)]
+
+    def test_parse_tencent_minute_garbage(self):
+        """非法 JSON/结构缺失 → 空列表，不抛异常。"""
+        assert pf.parse_tencent_minute("not-json") == []
+        assert pf.parse_tencent_minute(json.dumps({"code": 0, "data": {}})) == []
