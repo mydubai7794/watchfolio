@@ -213,3 +213,9 @@ HKFUND 持仓：
 - 数据获取保守：所有外源请求遵守 ≥3s/(IP,源) 或更宽；东财兜底 ≤1次/分钟
 - 目录/文件全小写无连字符：`portfolio_fetcher.py`、`portfolio.html`
 - 部署后本地服务停掉，线上为唯一实例（DB 共用同一 MySQL，无数据迁移问题）
+
+## 十一、口径记录
+
+- portfolio_ticks 的 total_value_usd 记录**总资产（含现金折算）**：现金 USD 直加、HKD 按当时 USD/HKD 汇率折算后并入 total_value；今日盈亏/持仓盈亏仍为持仓口径（现金无盈亏）。
+- 现金变动当日的历史 tick **不追溯**（曲线仅从变更时点起反映新现金口径）；本次上线切换口径时，对 2026-10-01 全天 294 条 tick 已做一次性回补：每条 +485.77 USD（= 476.79 USD + 70.48 HKD / 7.8453，按当日实时汇率）。
+- 回补脚本 `/tmp/opencode/backfill_cash.py`（一次性，不进 git）；后续现金编辑（PUT /api/portfolio/cash）只影响当日及之后的 tick 曲线。

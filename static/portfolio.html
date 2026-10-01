@@ -118,7 +118,7 @@ th:first-child, td:first-child { text-align: left; }
       <input id="n_quantity" placeholder="数量" type="number" step="any">
       <input id="n_cost" placeholder="成本价" type="number" step="any">
       <select id="n_currency"><option>USD</option><option>HKD</option></select>
-      <label style="display:flex;align-items:center;gap:4px;color:#aaa;font-size:12px"><input type="checkbox" id="n_deduct" checked>扣现金</label>
+      <label style="display:flex;align-items:center;gap:4px;color:#aaa;font-size:12px"><input type="checkbox" id="n_deduct">扣现金</label>
       <button class="btn btn-primary" onclick="addHolding()">新增</button>
     </div>
     <div class="form-row" id="cashRow" style="margin-top:14px;border-top:1px solid #2a2a4a;padding-top:12px">
@@ -347,6 +347,7 @@ async function addHolding() {
         deduct_cash: document.getElementById('n_deduct').checked})});
     const d = await r.json();
     if (!r.ok || (d && d.ok === false)) { alert((d && d.message) || '操作失败'); return; }
+    if (d && d.cash_warning) { alert('持仓已保存，但扣减现金失败：' + d.cash_warning); }
   } catch (e) { alert('网络错误'); return; }
   reopenEditor();
 }

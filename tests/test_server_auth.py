@@ -105,3 +105,94 @@ class TestNextFundNavRun:
 
     def test_late_night(self):
         assert server._next_fund_nav_run(datetime(2026, 10, 1, 23, 59)) == datetime(2026, 10, 2, 14, 0)
+
+
+def _login_as(token: str):
+    """测试辅助：注入会话并设置 cookie。"""
+    server._sessions[token] = {"username": "tester", "expires": time.time() + 3600}
+    client.cookies.set("session_token", token)
+
+
+def test_cash_update_invalid_currency():
+    """PUT /api/portfolio/cash 非法币种 → 400。"""
+    _login_as("test-token-cash-bad")
+    try:
+        r = client.put("/api/portfolio/cash", json={"currency": "XXX", "amount": 100})
+        assert r.status_code == 400
+        assert "USD 或 HKD" in r.json()["message"]
+    finally:
+        client.cookies.clear()
+
+
+def test_cash_update_ok(monkeypatch):
+    """PUT /api/portfolio/cash 合法币种 → 200，set_cash 收到规整大写币种。"""
+    calls = {}
+
+    async def fake_set_cash(currency, amount):
+        calls["args"] = (currency, amount)
+        return 1
+
+    monkeypatch.setattr(server.db, "set_cash", fake_set_cash)
+    _login_as("test-token-cash-ok")
+    try:
+        r = client.put("/api/portfolio/cash", json={"currency": "usd", "amount": 100})
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+        assert calls["args"] == ("USD", 100)
+    finally:
+        client.cookies.clear()
+
+
+def test_holding_add_duplicate_deduct(monkeypatch):
+    """勾选扣现录入已存在 symbol → 400，且不执行 upsert（防二次扣现）。"""
+
+    async def fake_execute_dict(sql, args=None):
+        if "FROM holdings" in sql:
+            return [{"id": 1}]  # symbol 已存在
+        return []
+
+    state = {"upsert_called": False}
+
+    async def fake_upsert(*a, **kw):
+        state["upsert_called"] = True
+        return 1
+
+    monkeypatch.setattr(server.db, "execute_dict", fake_execute_dict)
+    monkeypatch.setattr(server.db, "upsert_holding", fake_upsert)
+    _login_as("test-token-dup-deduct")
+    try:
+        r = client.post("/api/portfolio/holding",
+                        json={"symbol": "MU", "market": "US", "quantity": 1,
+                              "cost_price": 100, "currency": "USD", "deduct_cash": True})
+        assert r.status_code == 400
+        assert "已存在" in r.json()["message"]
+        assert state["upsert_called"] is False
+    finally:
+        client.cookies.clear()
+
+
+def test_holding_add_deduct(monkeypatch):
+    """新 symbol + 扣现 → 200，响应含 cash_balance（扣减后余额）。"""
+
+    async def fake_execute_dict(sql, args=None):
+        return []  # 无已存在持仓
+
+    async def fake_upsert(*a, **kw):
+        return 1
+
+    async def fake_deduct(currency, amount):
+        assert currency == "USD" and amount == 100.0  # 2 × 50
+        return 88.88
+
+    monkeypatch.setattr(server.db, "execute_dict", fake_execute_dict)
+    monkeypatch.setattr(server.db, "upsert_holding", fake_upsert)
+    monkeypatch.setattr(server.db, "deduct_cash", fake_deduct)
+    _login_as("test-token-add-deduct")
+    try:
+        r = client.post("/api/portfolio/holding",
+                        json={"symbol": "NEW1", "market": "US", "quantity": 2,
+                              "cost_price": 50, "currency": "USD", "deduct_cash": True})
+        assert r.status_code == 200
+        assert r.json()["cash_balance"] == 88.88
+    finally:
+        client.cookies.clear()

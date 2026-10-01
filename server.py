@@ -1186,6 +1186,7 @@ async def _portfolio_loop():
             }
             # 休市不写 tick（避免日线聚合混入休市平线）
             if quotes and session != "closed":
+                # tick 口径：总资产(含现金折算)，现金变动当日需保持曲线连续
                 await db.save_portfolio_tick(
                     datetime.now(), et_date, summary["total_value"], summary["day_pnl"],
                     summary["total_pnl"], summary["day_pnl_pct"], summary["total_pnl_pct"])
@@ -1316,16 +1317,32 @@ async def holding_add(data: HoldingInput):
     mkt = data.market.strip().upper()
     if mkt not in ("US", "HK", "HKFUND"):
         return JSONResponse(status_code=400, content={"ok": False, "message": "market 必须为 US、HK 或 HKFUND"})
-    currency = data.currency.strip() or "USD"
+    # currency 枚举校验
+    cur = data.currency.strip().upper()
+    if cur not in ("USD", "HKD"):
+        return JSONResponse(status_code=400, content={"ok": False, "message": "currency 必须为 USD 或 HKD"})
+    # 勾选扣现时禁止对已存在 symbol 二次录入：upsert 覆盖会伴随再次扣现
+    if data.deduct_cash:
+        exist = await db.execute_dict("SELECT id FROM holdings WHERE symbol = %s", (symbol,))
+        if exist:
+            return JSONResponse(status_code=400, content={
+                "ok": False,
+                "message": "该代码已存在，重复录入会覆盖持仓并再次扣现；如需修正请用编辑功能"})
     await db.upsert_holding(symbol, data.name.strip(), mkt,
-                            data.quantity, data.cost_price, currency)
-    # 录入持仓时可选同步扣减现金（quantity×cost_price 原币种金额）
+                            data.quantity, data.cost_price, cur)
+    # 录入持仓时可选同步扣减现金（quantity×cost_price 原币种金额）；扣现失败不影响持仓保存
     if data.deduct_cash and data.quantity > 0 and data.cost_price > 0:
-        mkt_currency = "USD" if mkt == "US" else currency
-        balance = await db.deduct_cash(mkt_currency, data.quantity * data.cost_price)
+        mkt_currency = "USD" if mkt == "US" else cur
+        try:
+            balance = await db.deduct_cash(mkt_currency, data.quantity * data.cost_price)
+        except Exception as e:
+            logger.warning("录入 %s 扣减 %s 现金失败: %s", symbol, mkt_currency, e)
+            return {"ok": True, "cash_warning": str(e)}
         logger.info("录入 %s 扣减 %s 现金 %.2f，余额 %.2f",
                     symbol, mkt_currency, data.quantity * data.cost_price,
                     balance if balance is not None else float("nan"))
+        if balance is not None:
+            return {"ok": True, "cash_balance": balance}
     return {"ok": True}
 
 
@@ -1335,8 +1352,12 @@ async def holding_update(holding_id: int, data: HoldingUpdateInput):
     mkt = data.market.strip().upper()
     if mkt not in ("US", "HK", "HKFUND"):
         return JSONResponse(status_code=400, content={"ok": False, "message": "market 必须为 US、HK 或 HKFUND"})
+    # currency 枚举校验
+    cur = data.currency.strip().upper()
+    if cur not in ("USD", "HKD"):
+        return JSONResponse(status_code=400, content={"ok": False, "message": "currency 必须为 USD 或 HKD"})
     affected = await db.update_holding(holding_id, data.name.strip(), mkt,
-                                       data.quantity, data.cost_price, data.currency.strip() or "USD",
+                                       data.quantity, data.cost_price, cur,
                                        data.enabled, data.sort_order)
     if affected:
         return {"ok": True}
