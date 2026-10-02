@@ -174,9 +174,9 @@ async def auth_middleware(request: Request, call_next):
 
     # 放行登录相关路径
     if _is_auth_path(path):
-        # 已登录用户访问根路径 → 跳转主页
+        # 已登录用户访问根路径 → 跳转持仓页（首选入口）
         if path == "/" and await _check_session(request):
-            return RedirectResponse(url="/static/index.html", status_code=302)
+            return RedirectResponse(url="/static/portfolio.html", status_code=302)
         return await call_next(request)
 
     # 放行 OPTIONS 预检
@@ -1554,9 +1554,10 @@ async def holding_delete(holding_id: int):
 
 @app.get("/")
 async def root(request: Request):
-    """根路径：已登录跳转主页，未登录跳转登录页。"""
-    if _check_session(request):
-        return RedirectResponse(url="/static/index.html")
+    """根路径：已登录跳转持仓页（首选入口），未登录跳转登录页。"""
+    # 注意 await：_check_session 为协程，漏 await 会恒真导致未登录也跳持仓页
+    if await _check_session(request):
+        return RedirectResponse(url="/static/portfolio.html")
     return RedirectResponse(url="/static/login.html")
 
 

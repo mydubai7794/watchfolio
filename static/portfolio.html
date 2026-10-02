@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<link rel="icon" href="data:,">
 <title>我的持仓</title>
 <style>
 /* ================= Fintech White =================
@@ -33,6 +34,8 @@ button { font-family: inherit; }
 .header-title { font-size: 17px; font-weight: 600; line-height: 1.2; }
 .link { color: var(--txt2); cursor: pointer; font-size: 13px; }
 .link:hover { color: var(--txt); }
+/* 同级导航链接：与标题并排的页签式入口（去返回箭头语义，不显次要） */
+.nav-peer { font-size: 14px; font-weight: 500; }
 .btn { border: none; border-radius: 999px; cursor: pointer; font-weight: 500; }
 .btn:hover { opacity: .85; }
 .btn-primary { background: var(--accent); color: #fff; padding: 8px 16px; font-size: 13px; }
@@ -106,13 +109,22 @@ button { font-family: inherit; }
 .ana-col { min-width: 0; }
 .ana-title { font-size: 12px; color: var(--txt2); margin-bottom: 12px; }
 .donut-flex { display: flex; gap: 16px; align-items: center; }
-.donut-cv { width: 200px; height: 200px; flex: none; }
+.donut-cv { width: 200px; height: 200px; flex: none; touch-action: pan-y; }
 .ana-legend { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .lg-item { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 1.5; }
 .lg-dot { width: 12px; height: 12px; border-radius: 4px; flex: none; }
 .lg-name { color: var(--txt); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .lg-pct { color: var(--txt2); font-size: 11px; line-height: 1.2; }
-.ana-cv { width: 100%; display: block; }
+.ana-cv { width: 100%; display: block; touch-action: pan-y; }
+/* 分析图 relative 容器：承载 canvas + 交互 tooltip（复用主图 .chart-tip 样式） */
+.ana-wrap { position: relative; }
+
+/* ---- 首屏骨架：overview 未返回前的灰占位块，首次数据渲染随 innerHTML 清空移除 ---- */
+.skel { background: #F5F5F7; border-radius: 12px; }
+
+/* 总资产数值刷新闪烁：300ms 透明度过渡提示（数值未变化不触发） */
+.val-flash { animation: valFlash .3s ease-out; }
+@keyframes valFlash { 0% { opacity: .35; } 100% { opacity: 1; } }
 
 /* ---- 持仓表（桌面） ---- */
 .table-wrap { overflow-x: auto; margin: 0 -24px -24px; padding: 0 24px 24px; }
@@ -206,7 +218,7 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
 <body>
 
 <header class="header">
-  <a class="link" href="/static/index.html">‹ 监控</a>
+  <a class="link nav-peer" href="/static/index.html">监控</a>
   <div class="header-title">我的持仓</div>
   <span class="pill" id="sessionBadge">--</span>
   <button class="btn btn-primary" onclick="openEditor()">编辑持仓</button>
@@ -251,7 +263,12 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
       <div class="card-note">参考行情 · 60s 更新</div>
     </div>
     <div class="card-note" id="nightHint" style="display:none;margin-bottom:8px">夜盘时段行情暂不可用，价格定格于盘后收盘</div>
-    <div class="market-grid" id="marketGrid"></div>
+    <div class="market-grid" id="marketGrid">
+      <!-- 首屏骨架占位：overview 返回后由 renderMarket 整体替换 -->
+      <div class="skel" style="height:78px"></div>
+      <div class="skel" style="height:78px"></div>
+      <div class="skel" style="height:78px"></div>
+    </div>
   </section>
 
   <!-- 资产走势：tab 胶囊组 + 信息条 + 无轴图表 -->
@@ -283,17 +300,26 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
       <div class="ana-col">
         <div class="ana-title">资产构成</div>
         <div class="donut-flex">
-          <canvas id="donutCv" class="donut-cv"></canvas>
+          <div class="ana-wrap">
+            <canvas id="donutCv" class="donut-cv"></canvas>
+            <div class="chart-tip" id="donutTip"></div>
+          </div>
           <div class="ana-legend" id="donutLegend"></div>
         </div>
       </div>
       <div class="ana-col">
         <div class="ana-title">持仓收益率</div>
-        <canvas id="pnlBarCv" class="ana-cv"></canvas>
+        <div class="ana-wrap">
+          <canvas id="pnlBarCv" class="ana-cv"></canvas>
+          <div class="chart-tip" id="pnlBarCvTip"></div>
+        </div>
       </div>
       <div class="ana-col">
         <div class="ana-title">当日贡献</div>
-        <canvas id="contribCv" class="ana-cv"></canvas>
+        <div class="ana-wrap">
+          <canvas id="contribCv" class="ana-cv"></canvas>
+          <div class="chart-tip" id="contribCvTip"></div>
+        </div>
       </div>
     </div>
   </section>
@@ -317,9 +343,17 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
           <th class="sortable" onclick="sortBy('cost_price')">成本价 <span class="arrow" id="ar_cost_price"></span></th>
           <th class="sortable" onclick="sortBy('quantity')">数量 <span class="arrow" id="ar_quantity"></span></th>
         </tr></thead>
-        <tbody></tbody>
+        <tbody>
+          <!-- 首屏骨架占位：overview 返回后由 renderPositions 整体替换 -->
+          <tr><td colspan="9" style="padding:12px 0 0"><div class="skel" style="height:88px"></div></td></tr>
+        </tbody>
       </table>
-      <div class="mobile-list" id="mobileList"></div>
+      <div class="mobile-list" id="mobileList">
+        <!-- 首屏骨架占位（移动端）：overview 返回后由 renderPositions 整体替换 -->
+        <div class="skel" style="height:56px;margin:10px 0"></div>
+        <div class="skel" style="height:56px;margin:10px 0"></div>
+        <div class="skel" style="height:56px;margin:10px 0"></div>
+      </div>
     </div>
   </section>
 
@@ -383,11 +417,11 @@ const SESSION_BADGE = {pre:'盘前 · 计入上一场', regular:'盘中', post:'
 const UP_COLOR = '#E5443B', DOWN_COLOR = '#00A870';
 const TXT = '#111114', TXT2 = '#8A8A8E', TXT3 = '#C7C7CC';
 const FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif';
-const F11 = '11px ' + FONT, F12 = '12px ' + FONT, F600_16 = '600 16px ' + FONT;
+const F11 = '11px ' + FONT, F12 = '12px ' + FONT, F600_13 = '600 13px ' + FONT, F600_16 = '600 16px ' + FONT;
 // 环形图蓝色系单色梯度（前 8 大持仓按市值降序），现金 #C7C7CC、其余合并 #8A8A8E
 const DONUT_ALPHAS = [.95, .83, .71, .59, .47, .35, .25, .15];
-// 主图内边距（无轴设计，仅留呼吸空间）
-const CH = { t: 14, b: 10, l: 6, r: 6 };
+// 主图内边距：b=32 = 折线绘图区底距 16 + 底部时间标签带 16（时间轴 Micro 11px 绘于 H-10 基线）
+const CH = { t: 14, b: 32, l: 6, r: 6 };
 // 金额千分位；涨跌必带 +/- 且与语义色同步
 const fmt = (v, d=2) => (v===null||v===undefined) ? '--' : Number(v).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
 const usd = v => (v===null||v===undefined) ? '--' : (v<0?'-$':'$') + fmt(Math.abs(v));
@@ -401,6 +435,7 @@ async function logout() {
 
 let lastOverview = null;      // 最近一次 overview 响应（排序/resize 重渲染用）
 let baseTotalCache = 0;       // 昨收总资产 = base_value + cash_usd（分时百分比基数）
+let lastTotalShown = null;    // 上帧总资产文案（数值变化闪烁提示的去抖基准）
 
 // canvas 高分屏初始化：按 devicePixelRatio 放大物理像素，ctx 缩放回 CSS 坐标
 function setupCanvas(cv, cssH) {
@@ -452,9 +487,11 @@ function renderMarket(d) {
   box.innerHTML = '';
   if (!d) return;
   const list = (d.market || []).slice();
-  // 美元/港元从 overview 汇率拼装（后端看板不含此项），fx 缺失时不展示
+  // 美元/港元从 overview 汇率拼装（后端看板不含此项），fx 缺失时不展示；
+  // fx_spark 为后端低频拉取的近 5 日走势（Yahoo HKD=X），缺失回退空数组隐藏 spark
   if (d.fx_usdhkd != null) {
-    list.push({key:'USDHKD', name:'美元/港元', price:d.fx_usdhkd, currency:'', change_pct:null, spark:[]});
+    list.push({key:'USDHKD', name:'美元/港元', price:d.fx_usdhkd, currency:'', change_pct:null,
+      spark: d.fx_spark || []});
   }
   list.forEach(m => {
     const card = document.createElement('div');
@@ -596,10 +633,18 @@ function renderOverview(d) {
   if (!d || !d.ok && !d.positions) return;
   lastOverview = d;
   const s = d.summary || {};
-  // 总资产 Display：语义色随当日盈亏
+  // 总资产 Display：语义色随当日盈亏；数值变化时 300ms 透明度闪烁提示刷新（首帧不闪）
+  // 注意先设 className 再追加 val-flash，避免 className 整体赋值把动画类覆盖掉
   const tv = document.getElementById('totalValue');
-  tv.textContent = usd(s.total_value);
+  const tvText = usd(s.total_value);
   tv.className = 'ov-display ' + cls(s.day_pnl);
+  if (lastTotalShown !== null && tvText !== lastTotalShown) {
+    tv.classList.remove('val-flash');
+    void tv.offsetWidth;   // 强制 reflow 重启动画
+    tv.classList.add('val-flash');
+  }
+  tv.textContent = tvText;
+  lastTotalShown = tvText;
   // 昨收总资产 = 持仓昨收口径 base_value + 现金；同时缓存作分时图百分比基数
   const prev = (s.base_value != null) ? s.base_value + (s.cash_usd || 0) : null;
   if (prev != null && prev > 0) baseTotalCache = prev;
@@ -706,6 +751,8 @@ function drawChart() {
   let lineColor;
   if (isIntradayMode()) lineColor = drawIntraday(ctx, pts, W, H);
   else lineColor = drawDaily(ctx, pts, W, H);
+  // 底部时间标签（canvas 内绘制，极轻量不抢层级）
+  drawTimeAxis(ctx, pts, W, H);
   // hover/touch 高亮：竖直参考线 + 4px 语义色圆点（白描边）
   if (hoverIdx >= 0 && pixPts[hoverIdx]) {
     const q = pixPts[hoverIdx];
@@ -715,6 +762,28 @@ function drawChart() {
     ctx.beginPath(); ctx.arc(q.px, q.py, 4, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 1.5; ctx.stroke();
   }
+}
+// 底部时间轴：按绘图宽自适应个数（max(3, floor(绘图宽/110))）等间隔取点，
+// Micro 11px #C7C7CC；首点左对齐/末点右对齐防溢出画布
+function drawTimeAxis(ctx, pts, W, H) {
+  if (pts.length < 2) return;
+  const plotW = W - CH.l - CH.r;
+  const n = Math.max(3, Math.floor(plotW / 110));
+  ctx.fillStyle = TXT3; ctx.font = F11; ctx.textBaseline = 'middle';
+  for (let k = 0; k < n; k++) {
+    const i = Math.round(k * (pts.length - 1) / (n - 1));
+    const x = CH.l + plotW * k / (n - 1);
+    // 首末点沿画布边缘对齐，中间居中，避免文字溢出
+    ctx.textAlign = k === 0 ? 'left' : (k === n - 1 ? 'right' : 'center');
+    ctx.fillText(fmtTick(pts[i].x), k === 0 ? CH.l : (k === n - 1 ? W - CH.r : x), H - 10);
+  }
+}
+// 时间标签文案：24h 跨日窗口 "MM-DD HH:MM"、当日 "HH:MM"、日线 date "YYYY-MM-DD" → "MM-DD"
+function fmtTick(x) {
+  const s = String(x);
+  if (chartMode === 'h24') return s.slice(0, 11);
+  if (chartMode === 'intraday') return s.slice(0, 5);
+  return s.slice(5, 10);
 }
 // 分时图：画当日盈亏 p，0 轴 #C7C7CC 虚线基准、对称 y 域、2px 线 + 渐变填充。
 // 24h 跨日窗口按 ts 日期前缀分段：断线处 moveTo 重起（不画跨日斜线），各段渐变独立闭合到 0 轴
@@ -734,13 +803,21 @@ function drawIntraday(ctx, pts, W, H) {
   const grad = ctx.createLinearGradient(0, CH.t, 0, H - CH.b);
   grad.addColorStop(0, up ? 'rgba(229,68,59,.12)' : 'rgba(0,168,112,.12)');
   grad.addColorStop(1, up ? 'rgba(229,68,59,0)' : 'rgba(0,168,112,0)');
-  // 按 ts 前 5 字符（"MM-DD"）日期变化切分为连续段，避免跨日出现斜线
+  // 跨日断线仅当 ts 带日期前缀（"MM-DD HH:MM:SS"，24h/Nh 跨日窗口）时启用：
+  // 当日窗口 ts 为 "HH:MM:SS"，前 5 字符是 "HH:MM"，若同样按其切分会在每小时份变化处
+  // 误判为跨日断线，导致整张图碎裂成多段（历史 bug）。当日模式必须整线连续绘制
+  const crossDay = /^\d{2}-\d{2} /.test(String(pts[0].x));
   const segs = [];
-  let start = 0;
-  for (let i = 1; i <= pts.length; i++) {
-    if (i === pts.length || String(pts[i].x).slice(0, 5) !== String(pts[start].x).slice(0, 5)) {
-      segs.push([start, i - 1]);
-      start = i;
+  if (!crossDay) {
+    segs.push([0, pts.length - 1]);
+  } else {
+    // 按 ts 前 5 字符（"MM-DD"）日期变化切分为连续段，避免跨日出现斜线
+    let start = 0;
+    for (let i = 1; i <= pts.length; i++) {
+      if (i === pts.length || String(pts[i].x).slice(0, 5) !== String(pts[start].x).slice(0, 5)) {
+        segs.push([start, i - 1]);
+        start = i;
+      }
     }
   }
   // 各段渐变填充：独立闭合到本段首尾的 0 轴
@@ -870,7 +947,10 @@ function updateChartInfo() {
 }
 
 // ===== 分析看板（Canvas 手绘，零依赖） =====
-// ① 环形占比图：各持仓市值 + 现金，前 8 大其余合并「其他」，蓝色系单色梯度，中心总资产
+// ① 环形占比图：各持仓市值 + 现金，前 8 大其余合并「其他」，蓝色系单色梯度，中心总资产。
+// 交互：mousemove/touchstart 角度+半径命中扇区 → 外扩 4px 高亮 + 中心文字联动 + HTML tooltip；
+// 右侧图例 hover 联动同一高亮；命中状态存 donutState，同目标防抖不重绘
+let donutState = null;   // {cv, items, total, displayTotal, W, H, cx, cy, ro, ri, arcs:[{a0,a1}], hover}
 function drawDonut(d) {
   const cv = document.getElementById('donutCv');
   const ctx = setupCanvas(cv);
@@ -892,47 +972,143 @@ function drawDonut(d) {
   const total = items.reduce((t, x) => t + x.value, 0);
   const legend = document.getElementById('donutLegend');
   if (!(total > 0)) {
+    donutState = null;   // 空态清掉命中状态，防陈旧几何坐标误命中
     ctx.fillStyle = TXT3; ctx.font = F12; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText('暂无数据', W / 2, H / 2);
     legend.innerHTML = '<div class="lg-item" style="color:' + TXT3 + '">暂无数据</div>';
+    hideTipEl('donutTip');
     return;
   }
-  // 扇区绘制：白缝分隔，12 点方向起始
+  // 扇区角度表（12 点方向起始）：绘制与命中检测共用同一份几何
   let a0 = -Math.PI / 2;
-  items.forEach(it => {
+  const arcs = items.map(it => {
     const a1 = a0 + it.value / total * Math.PI * 2;
-    ctx.beginPath();
-    ctx.arc(W / 2, H / 2, ro, a0, a1);
-    ctx.arc(W / 2, H / 2, ri, a1, a0, true);
-    ctx.closePath();
-    ctx.fillStyle = it.color; ctx.fill();
-    ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 2; ctx.stroke();
+    const arc = {a0: a0, a1: a1};
     a0 = a1;
+    return arc;
   });
-  // 中心文字：Label 总资产 + Value 金额（整数，避免溢出内圈）
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillStyle = TXT2; ctx.font = F12;
-  ctx.fillText('总资产 (USD)', W / 2, H / 2 - 9);
-  ctx.fillStyle = TXT; ctx.font = F600_16;
-  ctx.fillText('$' + fmt(s.total_value, 0), W / 2, H / 2 + 11);
-  // 图例：色点 + 名称 + 占比%
-  legend.innerHTML = items.map(it =>
-    '<div class="lg-item"><i class="lg-dot" style="background:' + it.color + '"></i>' +
-    '<span class="lg-name">' + esc(it.name) + '</span>' +
-    '<span class="lg-pct">' + fmt(it.value / total * 100, 1) + '%</span></div>').join('');
+  // 命中区域重建：数据刷新/resize 后旧坐标作废，hover 归位 -1
+  donutState = {cv: cv, items: items, total: total, displayTotal: s.total_value,
+    W: W, H: H, cx: W / 2, cy: H / 2, ro: ro, ri: ri, arcs: arcs, hover: -1};
+  renderDonut();
+  renderDonutLegend();
 }
-// ②③ 横向条形图：名称左 / 0 轴内嵌条形中 / 数值右端（语义色）
-// key：取值字段；fmtVal：数值格式化；emptyText：空态文案
-function drawHBar(cvId, positions, key, fmtVal, emptyText) {
+// 环形图渲染：hover 扇区沿角平分线外扩 4px；中心文字联动（默认总资产，hover 切该项名称/市值/占比）
+function renderDonut() {
+  const st = donutState; if (!st) return;
+  const ctx = setupCanvas(st.cv);
+  const W = st.W, H = st.H;
+  ctx.clearRect(0, 0, W, H);
+  // 扇区绘制：白缝分隔
+  st.arcs.forEach((arc, i) => {
+    const mid = (arc.a0 + arc.a1) / 2;
+    const off = (i === st.hover) ? 4 : 0;   // 命中扇区沿角平分线外扩 4px
+    const cx = st.cx + Math.cos(mid) * off, cy = st.cy + Math.sin(mid) * off;
+    ctx.beginPath();
+    ctx.arc(cx, cy, st.ro, arc.a0, arc.a1);
+    ctx.arc(cx, cy, st.ri, arc.a1, arc.a0, true);
+    ctx.closePath();
+    ctx.fillStyle = st.items[i].color; ctx.fill();
+    ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 2; ctx.stroke();
+  });
+  // 中心文字
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  if (st.hover >= 0) {
+    const it = st.items[st.hover];
+    ctx.fillStyle = TXT2; ctx.font = F12;
+    ctx.fillText(fitText(ctx, it.name, st.ri * 2 - 10), st.cx, st.cy - 14);
+    ctx.fillStyle = TXT; ctx.font = F600_16;
+    ctx.fillText(fmt(it.value, 0), st.cx, st.cy + 5);
+    ctx.fillStyle = TXT2; ctx.font = F11;
+    ctx.fillText(fmt(it.value / st.total * 100, 1) + '%', st.cx, st.cy + 23);
+  } else {
+    ctx.fillStyle = TXT2; ctx.font = F12;
+    ctx.fillText('总资产 (USD)', st.cx, st.cy - 9);
+    ctx.fillStyle = TXT; ctx.font = F600_16;
+    ctx.fillText('$' + fmt(st.displayTotal != null ? st.displayTotal : st.total, 0), st.cx, st.cy + 11);
+  }
+}
+// 图例渲染：色点 + 名称 + 占比%；hover 联动对应扇区高亮（mouseenter/leave，重建后重绑）
+function renderDonutLegend() {
+  const st = donutState; if (!st) return;
+  const legend = document.getElementById('donutLegend');
+  legend.innerHTML = st.items.map((it, i) =>
+    '<div class="lg-item" data-i="' + i + '"><i class="lg-dot" style="background:' + it.color + '"></i>' +
+    '<span class="lg-name">' + esc(it.name) + '</span>' +
+    '<span class="lg-pct">' + fmt(it.value / st.total * 100, 1) + '%</span></div>').join('');
+  Array.prototype.forEach.call(legend.querySelectorAll('.lg-item'), el => {
+    const i = Number(el.dataset.i);
+    el.addEventListener('mouseenter', () => setDonutHover(i, null));
+    el.addEventListener('mouseleave', () => setDonutHover(-1, null));
+  });
+}
+// 角度+半径命中检测：canvas 局部坐标 → 扇区下标；内孔/外环外返回 -1
+function donutHit(x, y) {
+  const st = donutState; if (!st) return -1;
+  const dx = x - st.cx, dy = y - st.cy;
+  const dist = Math.hypot(dx, dy);
+  if (dist < st.ri - 2 || dist > st.ro + 6) return -1;   // 内孔留 2px、外缘留 6px 触达容差
+  // atan2 ∈ (-π,π]，扇区从 -π/2 起始，统一平移到 [-π/2, 3π/2) 再按区间匹配
+  let ang = Math.atan2(dy, dx);
+  if (ang < -Math.PI / 2) ang += Math.PI * 2;
+  for (let i = 0; i < st.arcs.length; i++) {
+    if (ang >= st.arcs[i].a0 && ang < st.arcs[i].a1) return i;
+  }
+  return -1;
+}
+// 命中状态更新入口：同目标防抖不重绘；pos 为 client 坐标（tooltip 定位），null 表示隐藏 tooltip
+function setDonutHover(i, pos) {
+  const st = donutState; if (!st) return;
+  if (i !== st.hover) { st.hover = i; renderDonut(); }
+  if (i >= 0 && pos) showDonutTip(i, pos); else hideTipEl('donutTip');
+}
+// 环形图 tooltip：名称/市值/占比（复用主图 .chart-tip 白底阴影圆角 12；名称 esc 防 XSS）
+let lastDonutTipIdx = -1;
+function showDonutTip(i, pos) {
+  const st = donutState; if (!st || !st.items[i]) return;
+  const tip = document.getElementById('donutTip');
+  const wrap = tip.parentElement;
+  if (i !== lastDonutTipIdx) {
+    const it = st.items[i];
+    tip.innerHTML = '<div class="tip-time">' + esc(it.name) + '</div>' +
+      '<div class="tip-row"><span>市值</span><b>$' + fmt(it.value) + '</b></div>' +
+      '<div class="tip-row"><span>占比</span><b>' + fmt(it.value / st.total * 100, 1) + '%</b></div>';
+    lastDonutTipIdx = i;
+  }
+  tip.classList.add('show');
+  // 跟随指针，容器边界内自动翻转
+  const rect = st.cv.getBoundingClientRect();
+  let left = pos.cx - rect.left + 14;
+  if (left + tip.offsetWidth > wrap.clientWidth - 4) left = pos.cx - rect.left - tip.offsetWidth - 14;
+  if (left < 4) left = 4;
+  let top = pos.cy - rect.top - tip.offsetHeight - 10;
+  if (top < 4) top = pos.cy - rect.top + 14;
+  tip.style.left = left + 'px';
+  tip.style.top = top + 'px';
+}
+// 通用 tooltip 隐藏（按元素 id），并重置对应去抖下标
+function hideTipEl(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.remove('show');
+  if (id === 'donutTip') lastDonutTipIdx = -1;
+}
+// ②③ 横向条形图：名称左 / 0 轴内嵌条形中 / 数值右端（语义色）。
+// 交互：hover 行命中（y 范围整行检测，名称列同宽生效）→ 该条叠暗层加深 + 数值放大 + tooltip；
+// 布局度量存 hbarStates（resize/数据刷新时由 drawHBar 重建，hover 归位）
+const HB_ROW_H = 30;     // 单行高（px），与绘制/命中共用
+const hbarStates = {};   // cvId → {cv, rows, key, fmtVal, label, nameW, valW, barL, barR, zeroX, dom, W, H, hover, lastTipIdx}
+function drawHBar(cvId, positions, key, fmtVal, emptyText, label) {
   const cv = document.getElementById(cvId);
   const rows = (positions || []).filter(p => p[key] != null)
     .sort((a, b) => Math.abs(b[key]) - Math.abs(a[key]));
-  const ctx = setupCanvas(cv, rows.length ? rows.length * 30 + 6 : 56);
+  const ctx = setupCanvas(cv, rows.length ? rows.length * HB_ROW_H + 6 : 56);
   const W = cv._cssW, H = cv._cssH;
   ctx.clearRect(0, 0, W, H);
   if (!rows.length) {
+    hbarStates[cvId] = null;
     ctx.fillStyle = TXT3; ctx.font = F12; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(emptyText, W / 2, H / 2);
+    hideTipEl(cvId + 'Tip');
     return;
   }
   // 布局度量：名称列 / 数值列宽按内容自适应（设上限防挤压条形区）
@@ -950,36 +1126,119 @@ function drawHBar(cvId, positions, key, fmtVal, emptyText) {
   const dom = maxPos + maxNeg;
   const barL = nameW + 12, barR = W - valW - 12;
   const zeroX = dom > 0 ? barL + (barR - barL) * (maxNeg / dom) : barL;
+  // 命中区域重建：旧 hover 坐标随重建作废（hover 归位 -1）
+  hbarStates[cvId] = {cv: cv, rows: rows, key: key, fmtVal: fmtVal, label: label || '',
+    nameW: nameW, valW: valW, barL: barL, barR: barR, zeroX: zeroX, dom: dom,
+    W: W, H: H, hover: -1, lastTipIdx: -1};
+  renderHBar(cvId);
+}
+// 条形图渲染：hover 行条形叠 18% 暗层加深、右侧数值放大加粗（不引入新色）
+function renderHBar(cvId) {
+  const st = hbarStates[cvId]; if (!st) return;
+  const ctx = setupCanvas(st.cv, st.H);
+  const W = st.W, H = st.H, rows = st.rows;
+  ctx.clearRect(0, 0, W, H);
   // 0 轴基准竖线
   ctx.strokeStyle = TXT3; ctx.lineWidth = 1;
-  ctx.beginPath(); ctx.moveTo(zeroX, 3); ctx.lineTo(zeroX, H - 3); ctx.stroke();
-  const rowH = 30;
+  ctx.beginPath(); ctx.moveTo(st.zeroX, 3); ctx.lineTo(st.zeroX, H - 3); ctx.stroke();
   rows.forEach((r, i) => {
-    const cy = i * rowH + rowH / 2 + 3;
-    const v = r[key];
+    const cy = i * HB_ROW_H + HB_ROW_H / 2 + 3;
+    const v = r[st.key];
+    const hov = (i === st.hover);
     // 名称（左，12px 主文字色）
     ctx.font = F12; ctx.fillStyle = TXT; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
-    ctx.fillText(fitText(ctx, r.name || r.symbol, nameW - 6), 2, cy);
+    ctx.fillText(fitText(ctx, r.name || r.symbol, st.nameW - 6), 2, cy);
     // 条形（10px 高圆角，正红负绿）
-    const len = dom > 0 ? Math.abs(v) / dom * (barR - barL) : 0;
+    const len = st.dom > 0 ? Math.abs(v) / st.dom * (st.barR - st.barL) : 0;
     if (len > 0.5) {
-      const x0 = v >= 0 ? zeroX : zeroX - len;
+      const x0 = v >= 0 ? st.zeroX : st.zeroX - len;
       ctx.fillStyle = v >= 0 ? UP_COLOR : DOWN_COLOR;
       rr(ctx, x0, cy - 5, Math.max(len, 3), 10, 5);
       ctx.fill();
+      if (hov) {   // 命中行加深：叠主文字色 18% 暗层
+        rr(ctx, x0, cy - 5, Math.max(len, 3), 10, 5);
+        ctx.fillStyle = 'rgba(17,17,20,.18)'; ctx.fill();
+      }
     }
-    // 数值（右端，11px 语义色）
-    ctx.font = F11; ctx.fillStyle = v >= 0 ? UP_COLOR : DOWN_COLOR; ctx.textAlign = 'right';
-    ctx.fillText(fmtVal(v), W - 2, cy);
+    // 数值（右端，语义色；命中行 600 13px 放大）
+    ctx.font = hov ? F600_13 : F11;
+    ctx.fillStyle = v >= 0 ? UP_COLOR : DOWN_COLOR; ctx.textAlign = 'right';
+    ctx.fillText(st.fmtVal(v), W - 2, cy);
   });
 }
+// 行命中：y 范围整行检测（x 不限制 → 名称列命中同样生效）
+function hbarHit(cvId, y) {
+  const st = hbarStates[cvId]; if (!st) return -1;
+  const i = Math.floor((y - 3) / HB_ROW_H);
+  return (i >= 0 && i < st.rows.length) ? i : -1;
+}
+// 条形图命中状态更新：同目标防抖不重绘；pos 为 client 坐标，null 隐藏 tooltip
+function setHBarHover(cvId, i, pos) {
+  const st = hbarStates[cvId]; if (!st) return;
+  if (i !== st.hover) { st.hover = i; renderHBar(cvId); }
+  if (i >= 0 && pos) showHBarTip(cvId, i, pos); else hideTipEl(cvId + 'Tip');
+}
+// 条形图 tooltip：名称 + label 数值（语义色），复用主图 .chart-tip 样式；名称 esc 防 XSS
+function showHBarTip(cvId, i, pos) {
+  const st = hbarStates[cvId]; if (!st || !st.rows[i]) return;
+  const tip = document.getElementById(cvId + 'Tip');
+  const wrap = tip.parentElement;
+  if (st.lastTipIdx !== i) {
+    const r = st.rows[i];
+    const v = r[st.key];
+    tip.innerHTML = '<div class="tip-time">' + esc(r.name || r.symbol) + '</div>' +
+      '<div class="tip-row"><span>' + esc(st.label) + '</span><b class="' +
+      (v >= 0 ? 'text-red' : 'text-green') + '">' + st.fmtVal(v) + '</b></div>';
+    st.lastTipIdx = i;
+  }
+  tip.classList.add('show');
+  // 跟随指针，容器边界内自动翻转
+  const rect = st.cv.getBoundingClientRect();
+  let left = pos.cx - rect.left + 14;
+  if (left + tip.offsetWidth > wrap.clientWidth - 4) left = pos.cx - rect.left - tip.offsetWidth - 14;
+  if (left < 4) left = 4;
+  let top = pos.cy - rect.top - tip.offsetHeight - 10;
+  if (top < 4) top = pos.cy - rect.top + 14;
+  tip.style.left = left + 'px';
+  tip.style.top = top + 'px';
+}
+// 条形图事件绑定（mouse + touch，passive 不阻塞纵向滚动）
+function bindHBarEvents(cvId) {
+  const cv = document.getElementById(cvId);
+  const onMove = (clientX, clientY) => {
+    const r = cv.getBoundingClientRect();
+    setHBarHover(cvId, hbarHit(cvId, clientY - r.top), {cx: clientX, cy: clientY});
+  };
+  cv.addEventListener('mousemove', e => onMove(e.clientX, e.clientY));
+  cv.addEventListener('mouseleave', () => setHBarHover(cvId, -1, null));
+  cv.addEventListener('touchstart', e => { const t = e.touches[0]; if (t) onMove(t.clientX, t.clientY); }, {passive: true});
+  cv.addEventListener('touchmove', e => { const t = e.touches[0]; if (t) onMove(t.clientX, t.clientY); }, {passive: true});
+  cv.addEventListener('touchend', () => setHBarHover(cvId, -1, null));
+  cv.addEventListener('touchcancel', () => setHBarHover(cvId, -1, null));
+}
+bindHBarEvents('pnlBarCv');
+bindHBarEvents('contribCv');
+// 环形图事件绑定（mouse + touch）：命中检测 → 高亮/中心联动/tooltip
+(function bindDonutEvents() {
+  const cv = document.getElementById('donutCv');
+  const onMove = (clientX, clientY) => {
+    const r = cv.getBoundingClientRect();
+    setDonutHover(donutHit(clientX - r.left, clientY - r.top), {cx: clientX, cy: clientY});
+  };
+  cv.addEventListener('mousemove', e => onMove(e.clientX, e.clientY));
+  cv.addEventListener('mouseleave', () => setDonutHover(-1, null));
+  cv.addEventListener('touchstart', e => { const t = e.touches[0]; if (t) onMove(t.clientX, t.clientY); }, {passive: true});
+  cv.addEventListener('touchmove', e => { const t = e.touches[0]; if (t) onMove(t.clientX, t.clientY); }, {passive: true});
+  cv.addEventListener('touchend', () => setDonutHover(-1, null));
+  cv.addEventListener('touchcancel', () => setDonutHover(-1, null));
+})();
 function drawAnalysis(d) {
   if (!d) return;
   drawDonut(d);
   drawHBar('pnlBarCv', d.positions, 'position_pnl_pct',
-    v => sign(v) + fmt(Math.abs(v), 1) + '%', '暂无收益率数据');
+    v => sign(v) + fmt(Math.abs(v), 1) + '%', '暂无收益率数据', '持仓收益率');
   drawHBar('contribCv', d.positions, 'today_pnl',
-    v => sign(v) + '$' + fmt(Math.abs(v)), '暂无当日贡献');
+    v => sign(v) + '$' + fmt(Math.abs(v)), '暂无当日贡献', '当日贡献');
 }
 
 // ===== 轮询 =====
@@ -1086,7 +1345,8 @@ async function saveCash() {
 const val = id => document.getElementById(id).value.trim();
 
 // ===== 启动与全局事件 =====
-// resize 防抖重绘：走势图 + 分析图 + 市场 spark（全部依赖容器宽度）
+// resize 防抖重绘：走势图 + 分析图 + 市场 spark（全部依赖容器宽度）；
+// drawAnalysis 内部重建 donut/hbar 命中区域（hover 归位），并清残留交互 tooltip
 let rsTimer = null;
 window.addEventListener('resize', () => {
   clearTimeout(rsTimer);
@@ -1094,6 +1354,7 @@ window.addEventListener('resize', () => {
     renderMarket(lastOverview);
     drawChart();
     drawAnalysis(lastOverview);
+    hideTipEl('donutTip'); hideTipEl('pnlBarCvTip'); hideTipEl('contribCvTip');
   }, 120);
 });
 refresh(); loadChart();

@@ -227,7 +227,7 @@ async function doLogin(event) {
     var data = await resp.json();
 
     if (resp.ok && data.ok) {
-      window.location.href = '/static/index.html';
+      window.location.href = '/static/portfolio.html';
     } else {
       errorMsgEl.textContent = data.message || '登录失败';
       loginBtn.disabled = false;
@@ -243,13 +243,13 @@ async function doLogin(event) {
   return false;
 }
 
-// 已登录用户直接跳转主页
+// 已登录用户直接跳转持仓页（首选入口）
 (function checkSession() {
   fetch('/api/session', { credentials: 'include' })
     .then(function(r) { return r.json(); })
     .then(function(data) {
       if (data.ok) {
-        window.location.href = '/static/index.html';
+        window.location.href = '/static/portfolio.html';
       }
     })
     .catch(function() {});
