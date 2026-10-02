@@ -221,6 +221,7 @@ global_index_cache: dict = {}
 portfolio_cache: dict = {"ok": False, "positions": [], "summary": {}, "errors": []}
 fund_nav_cache: dict | None = None   # {"nav","prev_nav","nav_date","nav_change_pct"}
 fx_state: dict = {"rate": 7.80, "fallback": True, "time": ""}
+fx_spark: list[float] = []           # USD/HKD 近5日走势（Yahoo HKD=X，随汇率刷新一并拉取）
 market_cache: list[dict] = []        # 市场参考看板缓存（QQQ/SPY/SOXX/HSI/BZ/GC/DXY/US30Y/US10Y/VIX）
 
 # 一场口径状态机（模块级，进程生命周期内持久；重启后冷启动自愈，09:30 开盘刷新基准）。
@@ -1308,8 +1309,22 @@ def _next_fund_nav_run(now: datetime) -> datetime:
     return next((t for t in targets if t > now), targets[0] + timedelta(days=1))
 
 
+async def _refresh_fx_spark(proxies: list[str]) -> None:
+    """拉取 USD/HKD 近5日走势写入 fx_spark 全局（Yahoo HKD=X，失败置空数组不致命）。
+
+    走势为 5 日日线、随汇率刷新（每天北京 14:00/20:00 各一轮）一并拉取即可保持新鲜，
+    无需更高频；失败轮（30 分钟重试）重复拉取的请求量也很低，故不再额外限频。
+    """
+    global fx_spark
+    try:
+        fx_spark = await pf.fetch_fx_spark(proxy_urls=proxies)
+    except Exception as e:
+        logger.warning("USD/HKD 走势获取失败: %s", e)
+        fx_spark = []
+
+
 async def _fund_nav_loop():
-    """基金净值+汇率：启动立即执行，此后每天北京时间 14:00/20:00；失败 30 分钟后重试。"""
+    """基金净值+汇率+港元走势：启动立即执行，此后每天北京时间 14:00/20:00；失败 30 分钟后重试。"""
     global fund_nav_cache, fx_state
     logger.info("基金净值/汇率任务启动")
     while True:
@@ -1320,6 +1335,8 @@ async def _fund_nav_loop():
             rate, fallback = await pf.fetch_fx_usdhkd(proxy_urls=proxies)
             fx_state = {"rate": rate, "fallback": fallback,
                         "time": datetime.now().strftime("%m-%d %H:%M")}
+            # 汇率刷新处一并拉 USD/HKD 走势（低频日线，随轮更新）
+            await _refresh_fx_spark(proxies)
             nav = await pf.fetch_fund_nav(proxies)
             if nav:
                 await db.upsert_fund_nav(nav["nav_date"], nav["nav"], nav["change_pct"])
@@ -1395,6 +1412,7 @@ async def portfolio_overview():
     data = dict(portfolio_cache)
     data["fund"] = fund_nav_cache
     data["market"] = market_cache
+    data["fx_spark"] = fx_spark
     return data
 
 

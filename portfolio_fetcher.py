@@ -43,7 +43,11 @@ YAHOO_HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                    "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"),
 }
-YAHOO_PANEL_SYMBOLS = {"US30Y": "^TYX", "US10Y": "^TNX", "VIX": "^VIX"}
+# Yahoo v8 chart 映射：US30Y/US10Y/VIX 主价+spark 均取 Yahoo；
+# BZ/GC/DXY 仅取 spark（主价以腾讯/新浪为准）；USDHKD 供 server fx_spark 低频拉取
+YAHOO_PANEL_SYMBOLS = {"US30Y": "^TYX", "US10Y": "^TNX", "VIX": "^VIX",
+                       "BZ": "BZ=F", "GC": "GC=F", "DXY": "DX-Y.NYB",
+                       "USDHKD": "HKD=X"}
 FT_PDS_URL = "https://www.franklintempleton.com.hk/api/pds/price-and-performance"
 FT_HEADERS = {
     "Content-Type": "application/json",
@@ -767,9 +771,9 @@ MARKET_PANEL = [  # (key, 腾讯代码(空=新浪DINIW或Yahoo见YAHOO_PANEL_SYM
     ("SPY", "usSPY", "标普500", "USD", True),
     ("SOXX", "usSOXX", "费城半导体", "USD", True),
     ("HSI", "hkHSI", "恒生指数", "HKD", True),
-    ("BZ", "hf_OIL", "布伦特原油", "USD", False),   # 腾讯 hf_ 混排；新浪 hf_OIL 兜底
-    ("GC", "hf_GC", "COMEX黄金", "USD", False),     # 腾讯 hf_ 混排；新浪 hf_GC 兜底
-    ("DXY", "", "美元指数", "", False),             # 新浪 DINIW（f[1]价 f[3]昨收 f[9]名称）
+    ("BZ", "hf_OIL", "布伦特原油", "USD", True),    # 主价腾讯 hf_ 混排(新浪兜底)；spark 走 Yahoo BZ=F
+    ("GC", "hf_GC", "COMEX黄金", "USD", True),      # 主价腾讯 hf_ 混排(新浪兜底)；spark 走 Yahoo GC=F
+    ("DXY", "", "美元指数", "", True),              # 主价新浪 DINIW；spark 走 Yahoo DX-Y.NYB
     ("US30Y", "", "美债30Y", "%", True),            # Yahoo ^TYX，单位百分点
     ("US10Y", "", "美债10Y", "%", True),            # Yahoo ^TNX，单位百分点
     ("VIX", "", "恐慌指数", "", True),              # Yahoo ^VIX
@@ -824,9 +828,10 @@ async def fetch_market_panel(proxy_urls: list[str] | None = None) -> list[dict]:
 
     数据分工：
     - QQQ/SPY/SOXX/HSI：腾讯 us/hk 波浪线行情 + minute 分时 spark（降采样≤60点）
-    - BZ/GC：腾讯 hf_ 逗号行（与股指同一混排请求）；新浪 hf_OIL/hf_GC 兜底腾讯失败项
-    - DXY：新浪 DINIW
-    - US30Y/US10Y/VIX：Yahoo v8 chart（代理池优先，全失败直连重试），spark 用 adjclose 日线
+    - BZ/GC：主价腾讯 hf_ 逗号行（与股指同一混排请求），新浪 hf_OIL/hf_GC 兜底；
+      走势 spark 走 Yahoo BZ=F/GC=F 日线（仅取 spark，主价不从 Yahoo 取）
+    - DXY：主价新浪 DINIW；走势 spark 走 Yahoo DX-Y.NYB 日线（仅取 spark）
+    - US30Y/US10Y/VIX：Yahoo v8 chart（代理池优先，全失败直连重试），主价+spark 同源
     单项失败不致命：price/change_pct 置 None（前端隐藏涨跌）、spark 置空数组。
     返回 [{key,name,price,change_pct,currency,spark:[float,...]}]，name 用 MARKET_PANEL 中文展示名。
     """
@@ -849,12 +854,15 @@ async def fetch_market_panel(proxy_urls: list[str] | None = None) -> list[dict]:
         sina_hf["BZ"] = _parse_sina_hf(raw_sina, "OIL")
         sina_hf["GC"] = _parse_sina_hf(raw_sina, "GC")
 
-    # 3. Yahoo v8 chart 并发 3 个（^TYX/^TNX/^VIX）：代理池优先、直连兜底
+    # 3. Yahoo v8 chart 并发 6 个（^TYX/^TNX/^VIX 主价+spark；BZ=F/GC=F/DX-Y.NYB 仅 spark）：
+    #    代理池优先、直连兜底；USDHKD 不在面板并发内（server 循环经 fetch_fx_spark 低频拉取）
+    panel_yahoo_keys = [k for k in YAHOO_PANEL_SYMBOLS if k != "USDHKD"]
+
     async def _yahoo(key: str) -> tuple[str, dict]:
         return key, await _fetch_yahoo_chart(YAHOO_PANEL_SYMBOLS[key], proxy_urls)
 
     yahoo_map: dict[str, dict] = {}
-    results = await asyncio.gather(*(_yahoo(k) for k in YAHOO_PANEL_SYMBOLS),
+    results = await asyncio.gather(*(_yahoo(k) for k in panel_yahoo_keys),
                                    return_exceptions=True)
     for r in results:
         if not isinstance(r, Exception):
@@ -879,15 +887,22 @@ async def fetch_market_panel(proxy_urls: list[str] | None = None) -> list[dict]:
     for key, code, name, cur, spark in MARKET_PANEL:
         price = change = None
         spark_data: list[float] = []
+        # Yahoo chart 结果：US30Y/US10Y/VIX 主价+spark 同源；BZ/GC/DXY 仅取 spark
+        yq = yahoo_map.get(key) or {}
         if key == "DXY":
+            # 主价新浪 DINIW；走势 spark 用 Yahoo 日线（主价不从 Yahoo 取）
             q = sina_dxy
+            if spark:
+                spark_data = (yq.get("spark") or [])[-60:]
         elif key in ("BZ", "GC"):
-            # 腾讯 hf 行优先，失败用新浪 hf 兜底
+            # 腾讯 hf 行优先，失败用新浪 hf 兜底；走势 spark 用 Yahoo 日线
             q = quotes.get(code_sym.get(code, "")) or {}
             if not q.get("price"):
                 q = sina_hf.get(key) or {}
-        elif key in YAHOO_PANEL_SYMBOLS:
-            q = yahoo_map.get(key) or {}
+            if spark:
+                spark_data = (yq.get("spark") or [])[-60:]
+        elif key in ("US30Y", "US10Y", "VIX"):
+            q = yq
             # 收益率类（美债30Y/10Y）price 保留 3 位小数（前端再 fmt）
             if q.get("price") and key in ("US30Y", "US10Y"):
                 q = {**q, "price": round(q["price"], 3)}
@@ -902,3 +917,12 @@ async def fetch_market_panel(proxy_urls: list[str] | None = None) -> list[dict]:
         panel.append({"key": key, "name": name, "price": price, "change_pct": change,
                       "currency": cur, "spark": spark_data})
     return panel
+
+
+async def fetch_fx_spark(proxy_urls: list[str] | None = None) -> list[float]:
+    """抓 USD/HKD 近 5 日日线走势（Yahoo HKD=X，走代理池）：仅取 spark 字段。
+
+    供 server _fund_nav_loop 随汇率刷新低频拉取；chart 失败返回空数组（不致命）。
+    """
+    q = await _fetch_yahoo_chart(YAHOO_PANEL_SYMBOLS["USDHKD"], proxy_urls)
+    return (q.get("spark") or [])[-60:]

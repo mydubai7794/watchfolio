@@ -4,6 +4,7 @@
 - TestClient 不用 with 上下文，避免 lifespan 执行
 - 涉及 DB 的分支用 monkeypatch 桩掉
 """
+import asyncio
 import time
 from datetime import datetime, timedelta
 
@@ -314,3 +315,37 @@ def test_expired_token_datetime_rejected(monkeypatch):
         assert r.status_code == 401
     finally:
         client.cookies.clear()
+
+
+def test_overview_fx_spark(monkeypatch):
+    """overview 顶层下发 fx_spark（USD/HKD 近5日走势，前端拼 USDHKD 方块用）。"""
+    monkeypatch.setattr(server.db, "get_session", _fake_valid_session("fx-user"))
+    server.fx_spark = [7.81, 7.82, 7.80]
+    client.cookies.set("session_token", "tok")
+    try:
+        r = client.get("/api/portfolio/overview")
+        assert r.status_code == 200
+        assert r.json()["fx_spark"] == [7.81, 7.82, 7.80]
+    finally:
+        client.cookies.clear()
+        server.fx_spark = []
+
+
+def test_refresh_fx_spark(monkeypatch):
+    """_refresh_fx_spark：成功写入全局；异常置空数组不抛出（不致命）。"""
+    async def fake_ok(proxy_urls=None):
+        assert proxy_urls == ["p1"]
+        return [7.80, 7.81]
+
+    monkeypatch.setattr(server.pf, "fetch_fx_spark", fake_ok)
+    server.fx_spark = []
+    asyncio.run(server._refresh_fx_spark(["p1"]))
+    assert server.fx_spark == [7.80, 7.81]
+
+    async def fake_fail(proxy_urls=None):
+        raise RuntimeError("yahoo down")
+
+    monkeypatch.setattr(server.pf, "fetch_fx_spark", fake_fail)
+    asyncio.run(server._refresh_fx_spark([]))
+    assert server.fx_spark == []
+    server.fx_spark = []

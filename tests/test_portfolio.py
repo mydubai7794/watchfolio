@@ -721,3 +721,86 @@ class TestFetchOvernightQuotes:
 
     def test_accepts_proxy_urls(self):
         assert asyncio.run(pf.fetch_overnight_quotes(["MU"], proxy_urls=["p1"])) == {}
+
+
+SINA_PANEL_RAW = (
+    'var hq_str_DINIW="00:45:25,102.1406,102.1406,101.4743,7389,101.4825,'
+    '102.1766,101.4377,102.1406,美元指数,2026-10-02";\n'
+    'var hq_str_hf_OIL="66.10,66.05,,,66.20,66.00,65.90,65.50,0.00,0.00,'
+    '2026-10-02,0:00:00,0,布伦特原油,0,0";\n'
+    'var hq_str_hf_GC="3860.5,3855.0,,,3865.0,3850.0,3848.0,3840.0,0.00,'
+    '0.00,2026-10-02,0:00:00,0,COMEX黄金,0,0";\n'
+)
+
+
+class TestMarketPanelYahooSpark:
+    """看板 BZ/GC/DXY 走势补齐：Yahoo v8 chart 仅作 spark 源（主价仍以腾讯/新浪为准），
+    以及 USD/HKD 汇率走势 fetch_fx_spark（server fx_spark 下发、前端拼 USDHKD 方块用）。"""
+
+    def test_yahoo_symbols_mapping(self):
+        """YAHOO_PANEL_SYMBOLS 含 4 项新增映射：BZ/GC/DXY 走势 + USDHKD 汇率走势。"""
+        assert pf.YAHOO_PANEL_SYMBOLS["BZ"] == "BZ=F"
+        assert pf.YAHOO_PANEL_SYMBOLS["GC"] == "GC=F"
+        assert pf.YAHOO_PANEL_SYMBOLS["DXY"] == "DX-Y.NYB"
+        assert pf.YAHOO_PANEL_SYMBOLS["USDHKD"] == "HKD=X"
+
+    def test_market_panel_spark_marks(self):
+        """MARKET_PANEL 的 BZ/GC/DXY spark 标记为 True（走势可用）。"""
+        marks = {key: spark for key, _, _, _, spark in pf.MARKET_PANEL}
+        assert marks["BZ"] is True
+        assert marks["GC"] is True
+        assert marks["DXY"] is True
+
+    def test_fetch_spark_from_yahoo_price_not_overridden(self, monkeypatch):
+        """BZ/GC/DXY spark 来自 Yahoo chart；主价保持腾讯/新浪源不被 Yahoo 覆盖。
+
+        腾讯混排返回空（BZ/GC 走新浪 hf 兜底），Yahoo fake 故意返回 1.0 低价
+        与独立 spark 序列：三项 spark 必须等于 fake 序列，price 必须等于新浪主源。
+        """
+        pulled: list[str] = []
+
+        async def fake_get_text(url, headers=None, timeout=10.0):
+            return ""    # 腾讯混排/分时全空：BZ/GC 主价走新浪 hf 兜底
+
+        async def fake_resilient(url, headers=None, proxy_urls=None, timeout=10.0):
+            return SINA_PANEL_RAW
+
+        async def fake_yahoo(symbol, proxy_urls=None):
+            pulled.append(symbol)
+            return {"price": 1.0, "pre_close": 1.0, "change_pct": 0.0,
+                    "spark": [1.0, 2.0, 3.0]}
+
+        monkeypatch.setattr(pf, "_get_text", fake_get_text)
+        monkeypatch.setattr(pf, "_get_text_resilient", fake_resilient)
+        monkeypatch.setattr(pf, "_fetch_yahoo_chart", fake_yahoo)
+        panel = asyncio.run(pf.fetch_market_panel(proxy_urls=["p1"]))
+        got = {row["key"]: row for row in panel}
+        # spark 三项来自 Yahoo fake 序列
+        assert got["BZ"]["spark"] == [1.0, 2.0, 3.0]
+        assert got["GC"]["spark"] == [1.0, 2.0, 3.0]
+        assert got["DXY"]["spark"] == [1.0, 2.0, 3.0]
+        # 主价不被 Yahoo price=1.0 覆盖（BZ/GC=新浪 hf，DXY=新浪 DINIW）
+        assert got["BZ"]["price"] == 66.10
+        assert got["GC"]["price"] == 3860.5
+        assert got["DXY"]["price"] == 102.1406
+        # 面板 Yahoo 拉取集合：3 个原主价项 + 3 个新 spark 项；
+        # 不含 HKD=X（汇率走势由 server 循环经 fetch_fx_spark 低频拉取）
+        assert set(pulled) == {"^TYX", "^TNX", "^VIX", "BZ=F", "GC=F", "DX-Y.NYB"}
+
+    def test_fetch_fx_spark(self, monkeypatch):
+        """fetch_fx_spark：Yahoo HKD=X 仅取 spark 字段，代理清单透传。"""
+        async def fake_ok(symbol, proxy_urls=None):
+            assert symbol == "HKD=X" and proxy_urls == ["p1"]
+            return {"price": 7.8, "pre_close": 7.8, "change_pct": 0.0,
+                    "spark": [7.81, 7.82, 7.80]}
+
+        monkeypatch.setattr(pf, "_fetch_yahoo_chart", fake_ok)
+        assert asyncio.run(pf.fetch_fx_spark(proxy_urls=["p1"])) == [7.81, 7.82, 7.80]
+
+    def test_fetch_fx_spark_fail(self, monkeypatch):
+        """chart 失败（空 dict）→ 返回空数组，不抛异常。"""
+        async def fake_fail(symbol, proxy_urls=None):
+            return {}
+
+        monkeypatch.setattr(pf, "_fetch_yahoo_chart", fake_fail)
+        assert asyncio.run(pf.fetch_fx_spark()) == []
