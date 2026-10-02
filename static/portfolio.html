@@ -472,7 +472,7 @@ function fitText(ctx, text, maxW) {
 // 看板小数位规则：美债收益率 3 位、恒指 1 位、汇率 4 位、其余 2 位
 function mktDecimals(m) {
   if (m.key === 'US30Y' || m.key === 'US10Y') return 3;
-  if (m.key === 'USDHKD') return 4;
+  if (m.key === 'USDHKD' || m.key === 'USDCNH') return 4;
   if (m.key === 'HSI') return 1;
   return 2;
 }
@@ -488,7 +488,8 @@ function renderMarket(d) {
   if (!d) return;
   const list = (d.market || []).slice();
   // 美元/港元从 overview 汇率拼装（后端看板不含此项），fx 缺失时不展示；
-  // fx_spark 为后端低频拉取的近 5 日走势（Yahoo HKD=X），缺失回退空数组隐藏 spark
+  // fx_spark 为后端低频拉取的近 5 日走势（Yahoo HKD=X，维持日线口径）；
+  // 看板其余 11 项 spark 为后端当日分时落库累积（闭市回退上一时段全程）
   if (d.fx_usdhkd != null) {
     list.push({key:'USDHKD', name:'美元/港元', price:d.fx_usdhkd, currency:'', change_pct:null,
       spark: d.fx_spark || []});
@@ -496,7 +497,7 @@ function renderMarket(d) {
   list.forEach(m => {
     const card = document.createElement('div');
     card.className = 'mkt-card';
-    const hasSpark = m.spark && m.spark.length > 2;   // 数据 >2 点才画
+    const hasSpark = m.spark && m.spark.length >= 5;   // 分时 ≥5 点才画线，<5 显示占位留白
     const note = (m.key === 'US30Y' || m.key === 'US10Y') ? '<i class="mkt-note">收益率%</i>' : '';
     card.innerHTML = `<div class="mkt-head"><span class="mkt-name">${esc(m.name)}${note}</span>
         <span class="mkt-pct ${cls(m.change_pct)}">${m.change_pct===null||m.change_pct===undefined?'':sign(m.change_pct)+fmt(m.change_pct)+'%'}</span></div>

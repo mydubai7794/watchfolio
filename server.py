@@ -222,7 +222,8 @@ portfolio_cache: dict = {"ok": False, "positions": [], "summary": {}, "errors": 
 fund_nav_cache: dict | None = None   # {"nav","prev_nav","nav_date","nav_change_pct"}
 fx_state: dict = {"rate": 7.80, "fallback": True, "time": ""}
 fx_spark: list[float] = []           # USD/HKD 近5日走势（Yahoo HKD=X，随汇率刷新一并拉取）
-market_cache: list[dict] = []        # 市场参考看板缓存（QQQ/SPY/SOXX/HSI/BZ/GC/DXY/US30Y/US10Y/VIX）
+market_cache: list[dict] = []        # 市场参考看板缓存（QQQ/SPY/SOXX/HSI/BZ/GC/DXY/US30Y/US10Y/VIX/USDCNH，
+                                     # spark 为 market_ticks 当日分时累积，闭市回退上一时段全程）
 
 # 一场口径状态机（模块级，进程生命周期内持久；重启后冷启动自愈，09:30 开盘刷新基准）。
 # 维护逻辑已提取为纯函数 pf.update_session_state（无 IO、可离线测试），此处仅持有状态：
@@ -1358,16 +1359,64 @@ async def _fund_nav_loop():
         await asyncio.sleep((nxt - now).total_seconds())
 
 
+_MINUTE_TTL_SEC = 180.0   # 看板分时每标的拉取节流（Yahoo chart ~9/180s ≈ 3/min，少请求多数据）
+
+
+def due_minute_keys(minute_due: dict[str, float], now_mono: float,
+                    keys: list[str], ttl: float) -> list[str]:
+    """返回 TTL 到期需拉取分时的看板 keys（纯函数，供 _market_loop 与单测）。"""
+    return [k for k in keys if now_mono - minute_due.get(k, 0.0) >= ttl]
+
+
 async def _market_loop():
-    """市场参考看板采集：60s 周期刷新，异常钳制 120s 避免刷日志。"""
+    """市场参考看板采集：主价 60s 快轮（腾讯/新浪混排）+ 分时 180s/标的 TTL 慢轮
+    （fetch_day_minutes → market_ticks 落库累积；US30Y/US10Y/VIX 主价与分时一次
+    请求两用顺带刷新）；spark 统一读库（当日分时/闭市回退上一时段全程）；
+    Yahoo 失败项当轮跳过不重试（下轮 TTL 到期再试）；异常钳制 120s。"""
     global market_cache
     logger.info("市场看板采集循环启动")
+    minute_due: dict[str, float] = {}   # key → 上次分时拉取 monotonic 时刻（TTL 节流）
+    yahoo_day: dict[str, dict] = {}     # US30Y/US10Y/VIX 主价缓存（分时轮顺带刷新）
     while True:
         interval = 60.0
         try:
             # Yahoo 链路国内直连不稳：仿 _fund_nav_loop 从代理池取存活代理透传
             proxies = [r["url"] for r in await db.get_alive_proxies()]
-            market_cache = await pf.fetch_market_panel(proxy_urls=proxies)
+            now_mono = time.monotonic()
+
+            # ---- 分时慢轮：TTL 到期的标的并发拉当日分时并落库（INSERT IGNORE 幂等）----
+            due = due_minute_keys(minute_due, now_mono, pf.DAY_MINUTE_KEYS, _MINUTE_TTL_SEC)
+            for key in due:
+                minute_due[key] = now_mono   # 失败也占位：当轮跳过，下轮 TTL 到期再试
+
+            async def _refresh_minutes(key: str) -> None:
+                if key in ("US30Y", "US10Y", "VIX"):
+                    # 收益率/恐慌指数主价与分时同源：一次请求两用，顺带刷新主价缓存
+                    q = await pf.fetch_yahoo_day_minutes(pf.YAHOO_DAY_SYMBOLS[key], proxies)
+                    if q.get("minutes"):
+                        await db.save_market_ticks(key, q["minutes"])
+                        yahoo_day[key] = q
+                else:
+                    pts = await pf.fetch_day_minutes(key, proxy_urls=proxies)
+                    if pts:
+                        await db.save_market_ticks(key, pts)
+
+            results = await asyncio.gather(*(_refresh_minutes(k) for k in due),
+                                           return_exceptions=True)
+            for key, r in zip(due, results):
+                if isinstance(r, Exception):
+                    logger.warning("看板分时 %s 拉取失败(下轮重试): %s", key, r)
+
+            # ---- spark 读库（每标的当日全程分时，降采样 ≤60 点）+ 主价快轮组装 ----
+            spark_map: dict[str, list[float]] = {}
+            for key in pf.DAY_MINUTE_KEYS:
+                try:
+                    spark_map[key] = [p for _, p in await db.get_market_day_spark(key)]
+                except Exception as e:
+                    logger.warning("看板分时 %s 读库失败: %s", key, e)
+                    spark_map[key] = []
+            market_cache = await pf.fetch_market_panel(
+                proxy_urls=proxies, yahoo_day=yahoo_day, spark_map=spark_map)
         except asyncio.CancelledError:
             logger.info("市场看板采集循环已停止")
             break

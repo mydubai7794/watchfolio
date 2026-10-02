@@ -351,6 +351,20 @@ def test_refresh_fx_spark(monkeypatch):
     server.fx_spark = []
 
 
+def test_due_minute_keys_ttl():
+    """分时拉取 TTL 节流（纯函数）：到期项入选、未到期跳过、首次(缺 key)视为到期。"""
+    keys = ["QQQ", "SPY", "HSI"]
+    # 冷启动：minute_due 空 → 全部到期
+    assert server.due_minute_keys({}, 1000.0, keys, 180.0) == ["QQQ", "SPY", "HSI"]
+    due = {"QQQ": 1000.0, "SPY": 900.0, "HSI": 830.0}
+    # now=1000：三项距上次分别 0s/100s/170s，均 <180s → 全部跳过
+    assert server.due_minute_keys(due, 1000.0, keys, 180.0) == []
+    # now=1010：仅 HSI 距上次 180s 恰好到期
+    assert server.due_minute_keys(due, 1010.0, keys, 180.0) == ["HSI"]
+    # now=1190：三项距上次 ≥190s → 全部到期
+    assert server.due_minute_keys(due, 1190.0, keys, 180.0) == ["QQQ", "SPY", "HSI"]
+
+
 class TestRootRedirect:
     """root 跳转回归：已登录 / → 302 持仓页（首选入口）；未登录 / → 跳登录页；
     已登录经 middleware 访问受保护路径正常到达目标（无二次重定向）。

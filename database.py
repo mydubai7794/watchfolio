@@ -290,6 +290,19 @@ async def init_tables():
         _pool=pool,
     )
 
+    # ---- market_ticks (市场看板当日分时，累积落库) ----
+    await execute(
+        """
+        CREATE TABLE IF NOT EXISTS market_ticks (
+            symbol VARCHAR(16)   NOT NULL COMMENT '看板标的 key(QQQ/BZ/USDCNH 等)',
+            ts     DATETIME      NOT NULL COMMENT '数据源原时区 naive 时间(不做时区换算)',
+            price  DECIMAL(18,6) NOT NULL COMMENT '价格',
+            UNIQUE KEY uk_sym_ts (symbol, ts)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='市场看板当日分时(累积, spark 数据源)'
+        """,
+        _pool=pool,
+    )
+
     # ---- 种子持仓 (示例数据，幂等) ----
     seed_holdings = [
         ("MU", "美光科技", "US", 100, 900.0, "USD", 1),
@@ -848,6 +861,48 @@ async def get_portfolio_daily(days: int) -> list[dict]:
         """,
         (days,),
     )
+
+
+# ---------------------------------------------------------------------------
+# Market ticks (市场看板当日分时)
+# ---------------------------------------------------------------------------
+
+async def save_market_ticks(symbol: str, points: list[tuple]) -> int:
+    """批量写入看板分时点（INSERT IGNORE 幂等：同 symbol+ts 重复拉取自动去重）。
+
+    points: [(naive datetime, price)]，price 经 _safe_decimal 防 NaN/Inf。
+    """
+    if not points:
+        return 0
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                "INSERT IGNORE INTO market_ticks (symbol, ts, price) VALUES (%s, %s, %s)",
+                [(symbol, ts, _safe_decimal(p, 6)) for ts, p in points],
+            )
+            return cur.rowcount
+
+
+async def get_market_day_spark(symbol: str, max_points: int = 60) -> list[tuple[str, float]]:
+    """取该标的库内最大 ts 所在自然日的全程分时（升序），等距降采样 ≤max_points。
+
+    「自然日」以数据本身最大 ts 切分（数据源原时区 naive，不做时区换算）：盘中
+    标的自然为开盘→当前，闭市标的自然为上一交易时段全程。返回 [(ts_str, price)]，
+    首尾点必保留。
+    """
+    rows = await execute_dict(
+        "SELECT ts, price FROM market_ticks "
+        "WHERE symbol = %s AND DATE(ts) = "
+        "(SELECT DATE(MAX(ts)) FROM market_ticks WHERE symbol = %s) ORDER BY ts",
+        (symbol, symbol),
+    )
+    pts = [(str(r["ts"]), float(r["price"])) for r in rows]
+    if len(pts) <= max_points:
+        return pts
+    step = (len(pts) - 1) / (max_points - 1)
+    idxs = sorted({round(i * step) for i in range(max_points)})
+    return [pts[i] for i in idxs]
 
 
 # ---------------------------------------------------------------------------

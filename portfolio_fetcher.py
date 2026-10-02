@@ -6,6 +6,10 @@
 - 东财 ulist 批量：兜底（仅常规价，105=NASDAQ/106=NYSE/107=AMEX/116=港股，易封 IP，≤1次/分钟）
 - FT 官网 GraphQL：基金官方日频净值（fundid=31402/shclcode=2B）
 - 新浪 fx_susdhkd：USD/HKD 汇率（失败兜底 7.80）
+- 新浪 fx_susdcnh：USD/CNH 离岸人民币汇率（看板第 11 项主价）
+- Yahoo v8 chart 当日分时（1d/5m 含盘前盘后）：看板 spark 数据源，落库累积；
+  闭市时段天然返回上一交易时段全程（实测腾讯 minute 美股闭市仅 1 点、不支持
+  hf_ 期货代码，故美股 ETF/期货/汇率/美债/VIX 分时一律走 Yahoo）
 """
 
 import asyncio
@@ -13,7 +17,7 @@ import json
 import logging
 import re
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from urllib.parse import quote
 
 import httpx
@@ -34,20 +38,33 @@ TENCENT_MINUTE_URL = "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code={
 SINA_US_URL = "https://hq.sinajs.cn/list={symbols}"
 SINA_HEADERS = {"Referer": "https://finance.sina.com.cn"}
 SINA_FX_URL = "https://hq.sinajs.cn/list=fx_susdhkd"
-SINA_PANEL_URL = "https://hq.sinajs.cn/list=DINIW,hf_OIL,hf_GC"
+SINA_PANEL_URL = "https://hq.sinajs.cn/list=DINIW,hf_OIL,hf_GC,fx_susdcnh"
 EM_ULIST_URL = "http://push2.eastmoney.com/api/qt/ulist.np/get"
 EM_FIELDS = "f2,f3,f12,f13,f14,f18,f124"
-# Yahoo v8 chart（美债收益率/恐慌指数）：v7 quote 已封（Unauthorized），v8 需 UA 伪装 + 代理
+# Yahoo v8 chart 当日分时（5m K 线含盘前盘后）：range=5d 拉取后解析层只取最后一个
+# UTC 自然日——盘中即当日实时分时、闭市即上一交易时段全程；不用 range=1d 是因为
+# 实测 Yahoo 期货/美元指数在每日美东凌晨存在 1d 空窗 bug（BZ=F 返回 200 但 0 点，
+# 同刻 5d 有数）；旧 5d 日线 spark（YAHOO_CHART_URL）仅保留给 USDHKD fx_spark
 YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=5d"
+YAHOO_DAY_CHART_URL = ("https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
+                       "?interval=5m&range=5d&includePrePost=true")
 YAHOO_HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                    "(KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36"),
 }
-# Yahoo v8 chart 映射：US30Y/US10Y/VIX 主价+spark 均取 Yahoo；
-# BZ/GC/DXY 仅取 spark（主价以腾讯/新浪为准）；USDHKD 供 server fx_spark 低频拉取
-YAHOO_PANEL_SYMBOLS = {"US30Y": "^TYX", "US10Y": "^TNX", "VIX": "^VIX",
-                       "BZ": "BZ=F", "GC": "GC=F", "DXY": "DX-Y.NYB",
-                       "USDHKD": "HKD=X"}
+# Yahoo v8 chart 日线映射（仅剩 USDHKD：server 循环经 fetch_fx_spark 低频拉取 fx_spark）
+YAHOO_PANEL_SYMBOLS = {"USDHKD": "HKD=X"}
+# 看板当日分时 Yahoo 代码映射（QQQ/SPY/SOXX 美股 ETF、BZ/GC 电子盘期货、DXY 美元指数、
+# 美债收益率、VIX、USDCNH 离岸人民币；HSI 主走腾讯分钟线见 TENCENT_MINUTE_CODES，
+# 闭市/失败 fallback Yahoo ^HSI 在 fetch_day_minutes 内分流）
+YAHOO_DAY_SYMBOLS = {"QQQ": "QQQ", "SPY": "SPY", "SOXX": "SOXX",
+                     "BZ": "BZ=F", "GC": "GC=F", "DXY": "DX-Y.NYB",
+                     "US30Y": "^TYX", "US10Y": "^TNX", "VIX": "^VIX",
+                     "USDCNH": "CNH=X"}
+# 腾讯分时主源标的（minute 接口实测不支持 hf_ 期货代码，期货/美股 ETF 一律走 Yahoo 分时）
+TENCENT_MINUTE_CODES = {"HSI": "hkHSI"}
+# 看板分时拉取集合（当日分时落库累积的全部标的）：HSI 腾讯主源 + 其余 Yahoo 1d/5m
+DAY_MINUTE_KEYS = list(YAHOO_DAY_SYMBOLS) + list(TENCENT_MINUTE_CODES)
 FT_PDS_URL = "https://www.franklintempleton.com.hk/api/pds/price-and-performance"
 FT_HEADERS = {
     "Content-Type": "application/json",
@@ -327,6 +344,85 @@ def parse_tencent_minute(raw: str) -> list[tuple[str, float]]:
         return out
     except Exception:
         return []
+
+
+def tencent_minute_points(points: list[tuple[str, float]],
+                          now: datetime | None = None) -> list[tuple[datetime, float]]:
+    """腾讯分时 [(HHMM, price)] → [(当日 naive datetime, price)]（北京时区口径）。
+
+    HHMM 只含时分无日期，拼调用当日日期；若拼出的 ts 晚于当前时刻 5 分钟以上，
+    判定为跨日残留（腾讯闭市后 minute 数据仍属上一交易日，次日拉取会以昨日 HHMM
+    拼出未来时刻），整批丢弃返回 []，避免错误日期入库分裂自然日。
+    """
+    now = now or datetime.now()
+    day = now.date()
+    out: list[tuple[datetime, float]] = []
+    for hhmm, price in points:
+        try:
+            ts = datetime.combine(day, dtime(int(hhmm[:2]), int(hhmm[2:4])))
+        except (ValueError, IndexError):
+            return []
+        if ts > now + timedelta(minutes=5):
+            return []
+        out.append((ts, price))
+    return out
+
+
+def parse_yahoo_day_chart(raw: str) -> dict:
+    """解析 Yahoo v8 chart 当日分时响应（range=5d interval=5m 含盘前盘后）。
+
+    全量 5d 分时中只保留最后一个 UTC 自然日的点：盘中即当日实时分时、闭市即
+    上一交易时段全程（Globex 期货以 UTC 日切分恰为完整交易时段），并规避 Yahoo
+    期货/美元指数 range=1d 每日美东凌晨空窗 bug（实测 BZ=F 返回 200 但 0 点）。
+    pre_close 不取 meta.chartPreviousClose（5d 窗口下语义=5 日前收盘，实测导致
+    涨跌幅口径错误），改取最后 UTC 日之前的最后一个有效收盘点（=前一交易日收盘）。
+    返回 {"price": 现价(meta), "pre_close": 昨收, "change_pct": 自算,
+    "minutes": [(naive UTC datetime, price)]}——ts 统一 epoch→UTC naive（不做
+    时区换算，「自然日」切分以库内最大 ts 为准）；None 收盘点跳过；非法 JSON/结构
+    缺失返回 {}。
+    """
+    try:
+        r = json.loads(raw)["chart"]["result"][0]
+        meta = r["meta"]
+        price = float(meta["regularMarketPrice"])
+        ts_list = r.get("timestamp") or []
+        closes = (r["indicators"].get("quote") or [{}])[0].get("close") or []
+        all_pts: list[tuple[datetime, float]] = []
+        for t, c in zip(ts_list, closes):
+            if c:  # 未成交 5m 桶收盘为 None，跳过
+                all_pts.append((datetime.fromtimestamp(t, tz=timezone.utc)
+                                .replace(tzinfo=None), float(c)))
+        minutes: list[tuple[datetime, float]] = all_pts
+        prev_closes: list[float] = []
+        if all_pts:
+            last_day = all_pts[-1][0].date()
+            minutes = [(t, p) for t, p in all_pts if t.date() == last_day]
+            prev_closes = [p for t, p in all_pts if t.date() != last_day]
+        pre = prev_closes[-1] if prev_closes else float(meta.get("chartPreviousClose") or 0)
+        return {"price": price, "pre_close": pre,
+                "change_pct": (price - pre) / pre * 100 if pre > 0 else 0.0,
+                "minutes": minutes}
+    except Exception:
+        return {}
+
+
+def parse_fx_usdcnh(raw: str) -> dict:
+    """解析新浪 fx_susdcnh（美元/离岸人民币）：f[1]现价 f[3]昨收，涨跌幅自算。
+
+    布局与 fx_susdhkd 一致（实测昨收 f[3] 与涨跌额 f[11] 吻合：6.7068-6.7132=-0.0064）；
+    价格合理区间 5.0~8.0，字段不足/越界返回 {}。
+    """
+    m = re.search(r'var hq_str_fx_susdcnh="([^"]*)"', raw or "")
+    if not m:
+        return {}
+    f = m.group(1).split(",")
+    if len(f) < 12 or not f[1]:
+        return {}
+    price, pre = _f(f[1]), _f(f[3])
+    if not (5.0 <= price <= 8.0):
+        return {}
+    return {"price": price, "pre_close": pre,
+            "change_pct": (price - pre) / pre * 100 if pre > 0 else 0.0, "name": f[9]}
 
 
 def parse_ft_nav(data: dict) -> dict | None:
@@ -763,34 +859,25 @@ async def fetch_fund_nav(proxy_urls: list[str] | None = None) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# 市场参考看板（QQQ/SPY/SOXX/HSI/BZ/GC/DXY/US30Y/US10Y/VIX + sparkline）
+# 市场参考看板（QQQ/SPY/SOXX/HSI/BZ/GC/DXY/US30Y/US10Y/VIX/USDCNH + 当日分时 spark）
 # ---------------------------------------------------------------------------
 
-MARKET_PANEL = [  # (key, 腾讯代码(空=新浪DINIW或Yahoo见YAHOO_PANEL_SYMBOLS), 展示名, 币种, spark 数据源)
-    # 第 5 位 spark_source："tencent"=腾讯分时接口（仅股指，code 必须是 us/hk 股指代码）、
-    # "yahoo"=Yahoo v8 chart 日线、" "=无 spark。显式双源分流，hf_ 期货代码绝不进腾讯分时拉取
-    ("QQQ", "usQQQ", "纳指100", "USD", "tencent"),
-    ("SPY", "usSPY", "标普500", "USD", "tencent"),
-    ("SOXX", "usSOXX", "费城半导体", "USD", "tencent"),
-    ("HSI", "hkHSI", "恒生指数", "HKD", "tencent"),
-    ("BZ", "hf_OIL", "布伦特原油", "USD", "yahoo"),   # 主价腾讯 hf_ 混排(新浪兜底)；spark 走 Yahoo BZ=F
-    ("GC", "hf_GC", "COMEX黄金", "USD", "yahoo"),     # 主价腾讯 hf_ 混排(新浪兜底)；spark 走 Yahoo GC=F
-    ("DXY", "", "美元指数", "", "yahoo"),             # 主价新浪 DINIW；spark 走 Yahoo DX-Y.NYB
-    ("US30Y", "", "美债30Y", "%", "yahoo"),           # Yahoo ^TYX，单位百分点
-    ("US10Y", "", "美债10Y", "%", "yahoo"),           # Yahoo ^TNX，单位百分点
-    ("VIX", "", "恐慌指数", "", "yahoo"),             # Yahoo ^VIX
+MARKET_PANEL = [  # (key, 腾讯代码(空=新浪DINIW/fx_susdcnh 或 Yahoo 主价), 展示名, 币种, spark 数据源)
+    # 第 5 位 spark_source："tencent"=腾讯分钟线主源（仅 HSI，点数<5 fallback Yahoo ^HSI）、
+    # "yahoo_day"=Yahoo 当日分时 1d/5m（闭市天然返回上一交易时段全程）。分时统一经
+    # fetch_day_minutes 拉取后由 server 落库 market_ticks 累积，看板 spark 读库组装
+    ("QQQ", "usQQQ", "纳指100", "USD", "yahoo_day"),  # 主价腾讯混排；分时 Yahoo QQQ（腾讯闭市仅 1 点）
+    ("SPY", "usSPY", "标普500", "USD", "yahoo_day"),  # 主价腾讯混排；分时 Yahoo SPY
+    ("SOXX", "usSOXX", "费城半导体", "USD", "yahoo_day"),  # 主价腾讯混排；分时 Yahoo SOXX
+    ("HSI", "hkHSI", "恒生指数", "HKD", "tencent"),   # 主价腾讯混排；分时腾讯 minute 主源
+    ("BZ", "hf_OIL", "布伦特原油", "USD", "yahoo_day"),   # 主价腾讯 hf_ 混排(新浪兜底)；分时 Yahoo BZ=F（腾讯 minute 不支持 hf_）
+    ("GC", "hf_GC", "COMEX黄金", "USD", "yahoo_day"),     # 主价腾讯 hf_ 混排(新浪兜底)；分时 Yahoo GC=F
+    ("DXY", "", "美元指数", "", "yahoo_day"),             # 主价新浪 DINIW；分时 Yahoo DX-Y.NYB
+    ("US30Y", "", "美债30Y", "%", "yahoo_day"),           # 主价+分时同源 Yahoo ^TYX，单位百分点
+    ("US10Y", "", "美债10Y", "%", "yahoo_day"),           # 主价+分时同源 Yahoo ^TNX，单位百分点
+    ("VIX", "", "恐慌指数", "", "yahoo_day"),             # 主价+分时同源 Yahoo ^VIX
+    ("USDCNH", "", "美元人民币", "", "yahoo_day"),        # 主价新浪 fx_susdcnh；分时 Yahoo CNH=X
 ]
-
-
-def _downsample_minute(points: list[tuple[str, float]], limit: int = 60) -> list[float]:
-    """分时点均匀降采样到 <=limit 个，保留首尾，输出纯价格序列供 sparkline 使用。"""
-    if not points:
-        return []
-    if len(points) <= limit:
-        return [p[1] for p in points]
-    step = (len(points) - 1) / (limit - 1)
-    idxs = [round(i * step) for i in range(limit)]
-    return [points[i][1] for i in idxs]
 
 
 def _split_tencent_code(code: str) -> tuple[str, str]:
@@ -825,15 +912,70 @@ async def _fetch_yahoo_chart(symbol: str, proxy_urls: list[str] | None = None) -
     return {}
 
 
-async def fetch_market_panel(proxy_urls: list[str] | None = None) -> list[dict]:
-    """抓市场看板 10 项：腾讯混排批量 + 新浪(DINIW主用/hf兜底) + Yahoo chart(代理池) + sparkline。
+async def fetch_yahoo_day_minutes(symbol: str, proxy_urls: list[str] | None = None) -> dict:
+    """抓取 Yahoo v8 chart 当日分时（range=5d interval=5m 含盘前盘后，解析取最后
+    UTC 自然日），代理池优先。
 
-    数据分工（MARKET_PANEL 第 5 位 spark_source 显式声明来源）：
-    - QQQ/SPY/SOXX/HSI：腾讯 us/hk 波浪线行情 + minute 分时 spark（tencent，降采样≤60点）
-    - BZ/GC：主价腾讯 hf_ 逗号行（与股指同一混排请求），新浪 hf_OIL/hf_GC 兜底；
-      走势 spark 走 Yahoo BZ=F/GC=F 日线（yahoo，仅取 spark，主价不从 Yahoo 取）
-    - DXY：主价新浪 DINIW；走势 spark 走 Yahoo DX-Y.NYB 日线（yahoo，仅取 spark）
-    - US30Y/US10Y/VIX：Yahoo v8 chart（代理池优先，全失败直连重试），主价+spark 同源
+    代理候选取前 2 个、全失败重试一轮直连（复用 _fetch_yahoo_chart 候选模式）；
+    闭市时段解析结果天然为上一交易时段全程；失败返回 {}（调用方当轮跳过，
+    下轮 TTL 到期再试）。
+    """
+    url = YAHOO_DAY_CHART_URL.format(sym=quote(symbol, safe=""))
+    candidates = list(proxy_urls or [])[:2] + [None]
+    last_err = ""
+    for proxy in candidates:
+        try:
+            async with httpx.AsyncClient(timeout=15, proxy=proxy) as client:
+                resp = await client.get(url, headers=YAHOO_HEADERS)
+                if resp.status_code == 200:
+                    parsed = parse_yahoo_day_chart(resp.text)
+                    if parsed:
+                        return parsed
+                    last_err = "当日分时解析失败"
+                else:
+                    last_err = f"HTTP {resp.status_code}"
+        except Exception as e:
+            last_err = str(e)
+    logger.warning("Yahoo 当日分时 %s 获取失败: %s", symbol, last_err)
+    return {}
+
+
+async def fetch_day_minutes(key: str, proxy_urls: list[str] | None = None,
+                            now: datetime | None = None) -> list[tuple[datetime, float]]:
+    """看板标的当日分时统一入口，返回 [(naive ts, price)]（数据源原时区）。
+
+    - HSI：腾讯 minute 主源（盘中 1 分钟粒度最优）；点数 <5（闭市残留整批丢弃/
+      接口失败）fallback Yahoo ^HSI 分时；
+    - 其余标的：Yahoo 1d/5m 分时（QQQ/SPY/SOXX 闭市返回上一时段全程、BZ/GC 电子
+      盘近全天、USDCNH/DXY/美债/VIX 近全天；实测腾讯 minute 不支持 hf_ 期货代码、
+      美股闭市仅 1 点）。
+    key 无路由返回 []。now 透传 tencent_minute_points（腾讯 HHMM 拼日期的基准，
+    默认当前时刻，测试可注入）。
+    """
+    if key in TENCENT_MINUTE_CODES:
+        raw = await _get_text(TENCENT_MINUTE_URL.format(code=TENCENT_MINUTE_CODES[key]))
+        pts = tencent_minute_points(parse_tencent_minute(raw or ""), now=now)
+        if len(pts) >= 5:
+            return pts
+        return (await fetch_yahoo_day_minutes("^HSI", proxy_urls)).get("minutes", [])
+    sym = YAHOO_DAY_SYMBOLS.get(key)
+    if not sym:
+        return []
+    return (await fetch_yahoo_day_minutes(sym, proxy_urls)).get("minutes", [])
+
+
+async def fetch_market_panel(proxy_urls: list[str] | None = None,
+                             yahoo_day: dict[str, dict] | None = None,
+                             spark_map: dict[str, list[float]] | None = None) -> list[dict]:
+    """抓市场看板 11 项主价并组装 spark：腾讯混排批量 + 新浪(DINIW/fx_susdcnh 主用/
+    hf 兜底) + Yahoo 当日分时(US30Y/US10Y/VIX 主价，代理池) + spark 经 spark_map 注入。
+
+    数据分工：
+    - 主价：QQQ/SPY/SOXX/HSI/BZ/GC 腾讯混排（BZ/GC 新浪 hf 兜底）；DXY 新浪 DINIW；
+      USDCNH 新浪 fx_susdcnh（与 DINIW 同一次批量请求）；US30Y/US10Y/VIX 取
+      yahoo_day（server 分时轮一次请求主价+分时两用，缺失项内部并发补拉保独立可用）；
+    - spark：全部由 server 读库（market_ticks 当日分时累积）后经 spark_map 传入，
+      本函数不再直接拉分时（Yahoo 请求量从 6/60s 降至 ~9/180s）；缺项 spark 置 []。
     单项失败不致命：price/change_pct 置 None（前端隐藏涨跌）、spark 置空数组。
     返回 [{key,name,price,change_pct,currency,spark:[float,...]}]，name 用 MARKET_PANEL 中文展示名。
     """
@@ -846,79 +988,62 @@ async def fetch_market_panel(proxy_urls: list[str] | None = None) -> list[dict]:
     if raw:
         quotes = parse_tencent_quotes(raw, list(code_sym.values()), sym_prefix)
 
-    # 2. 新浪一次：DINIW 主用（美元指数）+ hf_OIL/hf_GC 兜底腾讯失败项
+    # 2. 新浪一次：DINIW 主用（美元指数）+ fx_susdcnh 主用（美元人民币）+ hf_OIL/hf_GC 兜底腾讯失败项
     sina_dxy: dict = {}
+    sina_cnh: dict = {}
     sina_hf: dict[str, dict] = {}
     raw_sina = await _get_text_resilient(SINA_PANEL_URL, headers=SINA_HEADERS,
                                          proxy_urls=proxy_urls)
     if raw_sina:
         sina_dxy = parse_sina_diniw(raw_sina)
+        sina_cnh = parse_fx_usdcnh(raw_sina)
         sina_hf["BZ"] = _parse_sina_hf(raw_sina, "OIL")
         sina_hf["GC"] = _parse_sina_hf(raw_sina, "GC")
 
-    # 3. Yahoo v8 chart 并发 6 个（^TYX/^TNX/^VIX 主价+spark；BZ=F/GC=F/DX-Y.NYB 仅 spark）：
-    #    代理池优先、直连兜底；USDHKD 不在面板并发内（server 循环经 fetch_fx_spark 低频拉取）
-    panel_yahoo_keys = [k for k in YAHOO_PANEL_SYMBOLS if k != "USDHKD"]
+    # 3. Yahoo 主价兜底：US30Y/US10Y/VIX 分时轮数据缺失时并发补拉（当日分时接口，
+    #    主价+分时一次请求）；正常轮 server 已传 yahoo_day，此处零请求
+    yahoo_day = dict(yahoo_day or {})
+    need_keys = [k for k in ("US30Y", "US10Y", "VIX")
+                 if not (yahoo_day.get(k) or {}).get("price")]
 
     async def _yahoo(key: str) -> tuple[str, dict]:
-        return key, await _fetch_yahoo_chart(YAHOO_PANEL_SYMBOLS[key], proxy_urls)
+        return key, await fetch_yahoo_day_minutes(YAHOO_DAY_SYMBOLS[key], proxy_urls)
 
-    yahoo_map: dict[str, dict] = {}
-    results = await asyncio.gather(*(_yahoo(k) for k in panel_yahoo_keys),
-                                   return_exceptions=True)
-    for r in results:
-        if not isinstance(r, Exception):
-            yahoo_map[r[0]] = r[1]
+    if need_keys:
+        results = await asyncio.gather(*(_yahoo(k) for k in need_keys),
+                                       return_exceptions=True)
+        for r in results:
+            if not isinstance(r, Exception):
+                yahoo_day[r[0]] = r[1]
 
-    # 4. sparkline：仅 spark_source="tencent" 的股指项并发拉腾讯分时接口并降采样（失败→空数组）；
-    #    BZ/GC 等 yahoo 源项的 spark 已在第 3 步 Yahoo chart 批量里，不进腾讯分时请求（消除死请求）
-    spark_map: dict[str, list[float]] = {}
-    spark_codes = [code for _, code, _, _, src in MARKET_PANEL if src == "tencent" and code]
-
-    async def _spark(code: str) -> tuple[str, list[float]]:
-        # _get_text 失败返回 None，parse_tencent_minute 对 None 返回 []，故不会抛出
-        return code, _downsample_minute(parse_tencent_minute(await _get_text(
-            TENCENT_MINUTE_URL.format(code=code)) or ""))
-
-    results = await asyncio.gather(*(_spark(c) for c in spark_codes), return_exceptions=True)
-    for r in results:
-        if not isinstance(r, Exception):
-            spark_map[r[0]] = r[1]
-
-    # 5. 组装输出：无行情的项 price/change_pct 置 None（前端隐藏涨跌），不致命
+    # 4. 组装输出：无行情的项 price/change_pct 置 None（前端隐藏涨跌），不致命；
+    #    spark 统一取 spark_map（server 读库当日分时，缺项为 []）
     panel: list[dict] = []
     for key, code, name, cur, spark_src in MARKET_PANEL:
         price = change = None
-        spark_data: list[float] = []
-        # Yahoo chart 结果：US30Y/US10Y/VIX 主价+spark 同源；BZ/GC/DXY 仅取 spark
-        yq = yahoo_map.get(key) or {}
         if key == "DXY":
-            # 主价新浪 DINIW；走势 spark 用 Yahoo 日线（主价不从 Yahoo 取）
+            # 主价新浪 DINIW
             q = sina_dxy
-            if spark_src == "yahoo":
-                spark_data = (yq.get("spark") or [])[-60:]
+        elif key == "USDCNH":
+            # 主价新浪 fx_susdcnh
+            q = sina_cnh
         elif key in ("BZ", "GC"):
-            # 腾讯 hf 行优先，失败用新浪 hf 兜底；走势 spark 用 Yahoo 日线
+            # 腾讯 hf 行优先，失败用新浪 hf 兜底
             q = quotes.get(code_sym.get(code, "")) or {}
             if not q.get("price"):
                 q = sina_hf.get(key) or {}
-            if spark_src == "yahoo":
-                spark_data = (yq.get("spark") or [])[-60:]
         elif key in ("US30Y", "US10Y", "VIX"):
-            q = yq
-            # 收益率类（美债30Y/10Y）price 保留 3 位小数（前端再 fmt）
+            # 主价+分时同源 Yahoo 当日分时；收益率类 price 保留 3 位小数（前端再 fmt）
+            q = yahoo_day.get(key) or {}
             if q.get("price") and key in ("US30Y", "US10Y"):
                 q = {**q, "price": round(q["price"], 3)}
-            if spark_src == "yahoo":
-                spark_data = (q.get("spark") or [])[-60:]
         else:
             q = quotes.get(code_sym.get(code, "")) or {}
-            if spark_src == "tencent":
-                spark_data = spark_map.get(code, [])
         if q.get("price"):
             price, change = q["price"], q.get("change_pct")
         panel.append({"key": key, "name": name, "price": price, "change_pct": change,
-                      "currency": cur, "spark": spark_data})
+                      "currency": cur,
+                      "spark": list((spark_map or {}).get(key) or [])})
     return panel
 
 

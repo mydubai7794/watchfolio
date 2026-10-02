@@ -1,7 +1,7 @@
 """持仓模块离线单元测试：时段/解析/盈亏计算（不发真实网络请求）"""
 import asyncio
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 import portfolio_fetcher as pf
@@ -734,78 +734,188 @@ SINA_PANEL_RAW = (
 
 
 class TestMarketPanelYahooSpark:
-    """看板 BZ/GC/DXY 走势补齐：Yahoo v8 chart 仅作 spark 源（主价仍以腾讯/新浪为准），
-    以及 USD/HKD 汇率走势 fetch_fx_spark（server fx_spark 下发、前端拼 USDHKD 方块用）。"""
+    """看板当日分时源（旧 5d 日线 spark 语义退役）：Yahoo 1d/5m 解析、腾讯 HHMM→ts
+    守卫、fetch_day_minutes 路由（HSI 腾讯主源 <5 点 fallback Yahoo）、新浪
+    fx_susdcnh 主价、fetch_market_panel 组装（spark 读库注入），以及 USD/HKD 汇率
+    走势 fetch_fx_spark（server fx_spark 下发、前端拼 USDHKD 方块用）。"""
 
-    def test_yahoo_symbols_mapping(self):
-        """YAHOO_PANEL_SYMBOLS 含 4 项新增映射：BZ/GC/DXY 走势 + USDHKD 汇率走势。"""
-        assert pf.YAHOO_PANEL_SYMBOLS["BZ"] == "BZ=F"
-        assert pf.YAHOO_PANEL_SYMBOLS["GC"] == "GC=F"
-        assert pf.YAHOO_PANEL_SYMBOLS["DXY"] == "DX-Y.NYB"
-        assert pf.YAHOO_PANEL_SYMBOLS["USDHKD"] == "HKD=X"
+    def test_day_symbols_mapping(self):
+        """YAHOO_DAY_SYMBOLS 当日分时映射齐备（期货/美元指数/收益率/VIX/离岸人民币）；
+        YAHOO_PANEL_SYMBOLS 精简为 USDHKD fx_spark 专用（5d 日线仅此一项保留）。"""
+        assert pf.YAHOO_DAY_SYMBOLS["BZ"] == "BZ=F"
+        assert pf.YAHOO_DAY_SYMBOLS["GC"] == "GC=F"
+        assert pf.YAHOO_DAY_SYMBOLS["DXY"] == "DX-Y.NYB"
+        assert pf.YAHOO_DAY_SYMBOLS["US30Y"] == "^TYX"
+        assert pf.YAHOO_DAY_SYMBOLS["US10Y"] == "^TNX"
+        assert pf.YAHOO_DAY_SYMBOLS["VIX"] == "^VIX"
+        assert pf.YAHOO_DAY_SYMBOLS["USDCNH"] == "CNH=X"
+        assert pf.YAHOO_PANEL_SYMBOLS == {"USDHKD": "HKD=X"}
 
     def test_market_panel_spark_marks(self):
-        """MARKET_PANEL spark 数据源显式化：股指走腾讯分时，BZ/GC/DXY/美债/VIX 走 Yahoo。
-
-        结构防呆：spark_source="tencent" 才发腾讯 minute 请求，hf_ 期货代码
-        （BZ/GC 主价）绝不进入分时拉取集合（消除对腾讯分时接口的死请求）。
-        """
+        """MARKET_PANEL spark_source 口径：HSI 腾讯分钟主源，其余 10 项 Yahoo 当日
+        分时；USDCNH 已作为第 11 项加入看板；旧 "yahoo" 5d 日线枚举退役。"""
         src = {key: s for key, _, _, _, s in pf.MARKET_PANEL}
-        assert src["QQQ"] == "tencent" and src["SPY"] == "tencent"
-        assert src["SOXX"] == "tencent" and src["HSI"] == "tencent"
-        assert src["BZ"] == "yahoo" and src["GC"] == "yahoo" and src["DXY"] == "yahoo"
-        assert src["US30Y"] == "yahoo" and src["US10Y"] == "yahoo" and src["VIX"] == "yahoo"
-        # 腾讯分时拉取集合只含 us/hk 股指代码，绝无 hf_ 前缀
-        tencent_spark_codes = [code for _, code, _, _, s in pf.MARKET_PANEL
-                               if s == "tencent" and code]
-        assert tencent_spark_codes == ["usQQQ", "usSPY", "usSOXX", "hkHSI"]
-        assert all(not c.startswith("hf_") for c in tencent_spark_codes)
+        assert len(pf.MARKET_PANEL) == 11 and "USDCNH" in src
+        assert src["HSI"] == "tencent"
+        assert src["QQQ"] == src["SPY"] == src["SOXX"] == "yahoo_day"
+        assert src["BZ"] == src["GC"] == src["DXY"] == "yahoo_day"
+        assert src["US30Y"] == src["US10Y"] == src["VIX"] == src["USDCNH"] == "yahoo_day"
+        assert "yahoo" not in set(src.values())
+        # 分时拉取集合：10 个 Yahoo 项 + HSI 腾讯主源，绝无 hf_ 前缀死请求
+        assert set(pf.DAY_MINUTE_KEYS) == set(pf.YAHOO_DAY_SYMBOLS) | {"HSI"}
+        assert pf.TENCENT_MINUTE_CODES == {"HSI": "hkHSI"}
 
-    def test_fetch_spark_from_yahoo_price_not_overridden(self, monkeypatch):
-        """BZ/GC/DXY spark 来自 Yahoo chart；主价保持腾讯/新浪源不被 Yahoo 覆盖。
+    def test_parse_yahoo_day_chart(self):
+        """Yahoo 5d/5m 解析：meta 主价/昨收 + None 收盘点跳过 + epoch→UTC naive
+        + 只保留最后一个 UTC 自然日（盘中=当日分时、闭市=上一时段全程，
+        并规避 Yahoo 期货 range=1d 凌晨空窗 bug）。"""
+        ts0 = int(datetime(2026, 9, 30, 8, 0, tzinfo=timezone.utc).timestamp())
+        ts1 = int(datetime(2026, 10, 1, 8, 0, tzinfo=timezone.utc).timestamp())
+        raw = json.dumps({"chart": {"result": [{
+            "meta": {"regularMarketPrice": 742.03, "chartPreviousClose": 739.77},
+            "timestamp": [ts0, ts0 + 300, ts1, ts1 + 300, ts1 + 600],
+            "indicators": {"quote": [{"close": [738.0, 739.0, None, 740.0, 742.03]}]}}]}})
+        q = pf.parse_yahoo_day_chart(raw)
+        # 昨收取最后 UTC 日之前的最后有效收盘点（739.0），而非 meta 的 5 日前收盘
+        assert q["price"] == 742.03 and q["pre_close"] == 739.0
+        assert abs(q["change_pct"] - (742.03 - 739.0) / 739.0 * 100) < 1e-9
+        # 前一 UTC 日(09-30) 2 点被过滤；最后 UTC 日(10-01) None 收盘桶跳过：3 桶 → 2 点
+        assert q["minutes"] == [(datetime(2026, 10, 1, 8, 5), 740.0),
+                                (datetime(2026, 10, 1, 8, 10), 742.03)]
 
-        腾讯混排返回空（BZ/GC 走新浪 hf 兜底），Yahoo fake 故意返回 1.0 低价
-        与独立 spark 序列：三项 spark 必须等于 fake 序列，price 必须等于新浪主源。
-        """
+    def test_parse_yahoo_day_chart_empty_day(self):
+        """5d 窗口全空（极端空窗）：返回结构但 minutes=[]，主价仍可用。"""
+        ts0 = int(datetime(2026, 10, 1, 8, 0, tzinfo=timezone.utc).timestamp())
+        raw = json.dumps({"chart": {"result": [{
+            "meta": {"regularMarketPrice": 102.2, "chartPreviousClose": 102.3},
+            "timestamp": [ts0], "indicators": {"quote": [{"close": [None]}]}}]}})
+        q = pf.parse_yahoo_day_chart(raw)
+        assert q["price"] == 102.2 and q["minutes"] == []
+
+    def test_parse_yahoo_day_chart_bad(self):
+        assert pf.parse_yahoo_day_chart("not-json") == {}
+        assert pf.parse_yahoo_day_chart('{"chart": {"result": []}}') == {}
+
+    def test_tencent_minute_points(self):
+        """腾讯分时 HHMM 拼当日日期 → naive datetime（北京时区口径）。"""
+        now = datetime(2026, 10, 2, 11, 46)
+        pts = pf.tencent_minute_points([("0930", 24099.73), ("0931", 24017.53)], now=now)
+        assert pts == [(datetime(2026, 10, 2, 9, 30), 24099.73),
+                       (datetime(2026, 10, 2, 9, 31), 24017.53)]
+
+    def test_tencent_minute_points_stale_batch_dropped(self):
+        """次日拉到上一交易日残留：HHMM 拼出未来时刻 → 整批丢弃（防错误日期入库）。"""
+        now = datetime(2026, 10, 2, 8, 0)
+        assert pf.tencent_minute_points([("0930", 24099.0), ("1600", 23946.0)], now=now) == []
+
+    def test_tencent_minute_points_bad_hhmm(self):
+        assert pf.tencent_minute_points([("9x30", 1.0)], now=datetime(2026, 10, 2, 11, 0)) == []
+
+    def test_parse_fx_usdcnh(self):
+        """新浪 fx_susdcnh：f[1] 现价 f[3] 昨收，涨跌幅自算（实测布局与 susdhkd 一致）。"""
+        raw = ('var hq_str_fx_susdcnh="11:46:24,6.706800,6.706900,6.713200,124,'
+               '6.713600,6.717400,6.705000,6.706800,离岸人民币（香港）,-0.100000,'
+               '-0.006400,0.001847,,6.995700,6.691300,,2026-10-02";')
+        q = pf.parse_fx_usdcnh(raw)
+        assert q["price"] == 6.7068 and q["pre_close"] == 6.7132
+        assert abs(q["change_pct"] - (6.7068 - 6.7132) / 6.7132 * 100) < 1e-9
+
+    def test_parse_fx_usdcnh_bad(self):
+        # 字段不足 / 价格越界 / 无匹配 → {}（看板该项 price 置 None 不致命）
+        assert pf.parse_fx_usdcnh('var hq_str_fx_susdcnh="11:46,6.70";') == {}
+        assert pf.parse_fx_usdcnh('var hq_str_fx_susdcnh="09:00,9.9,1,6.7,1,1,1,1,1,x,1,1";') == {}
+        assert pf.parse_fx_usdcnh("") == {}
+
+    def test_fetch_day_minutes_hsi_tencent_primary(self, monkeypatch):
+        """HSI：腾讯分时 ≥5 点主源直出，不触发 Yahoo fallback；HHMM 拼注入 now 日期。"""
+        async def fake_get_text(url, headers=None, timeout=10.0):
+            assert "code=hkHSI" in url
+            rows = [f"093{i} 2409{i}.5" for i in range(6)]
+            return json.dumps({"data": {"hkHSI": {"data": {"data": rows}}}})
+
+        async def fake_yahoo(sym, proxy_urls=None):
+            raise AssertionError("腾讯分时 ≥5 点不应触发 Yahoo fallback")
+
+        monkeypatch.setattr(pf, "_get_text", fake_get_text)
+        monkeypatch.setattr(pf, "fetch_yahoo_day_minutes", fake_yahoo)
+        pts = asyncio.run(pf.fetch_day_minutes("HSI", now=datetime(2026, 10, 2, 11, 0)))
+        assert pts[:2] == [(datetime(2026, 10, 2, 9, 30), 24090.5),
+                           (datetime(2026, 10, 2, 9, 31), 24091.5)]
+        assert len(pts) == 6
+
+    def test_fetch_day_minutes_hsi_fallback_yahoo(self, monkeypatch):
+        """HSI：腾讯分时 <5 点（闭市残留/失败）→ fallback Yahoo ^HSI 当日分时。"""
+        async def fake_get_text(url, headers=None, timeout=10.0):
+            return json.dumps({"data": {"hkHSI": {"data": {"data": ["0930 24099.5"]}}}})
+
         pulled: list[str] = []
+
+        async def fake_yahoo(sym, proxy_urls=None):
+            pulled.append(sym)
+            return {"minutes": [("t", 23946.0)]}
+
+        monkeypatch.setattr(pf, "_get_text", fake_get_text)
+        monkeypatch.setattr(pf, "fetch_yahoo_day_minutes", fake_yahoo)
+        pts = asyncio.run(pf.fetch_day_minutes("HSI", now=datetime(2026, 10, 2, 11, 0)))
+        assert pulled == ["^HSI"] and pts == [("t", 23946.0)]
+
+    def test_fetch_day_minutes_yahoo_route(self, monkeypatch):
+        """非 HSI 项按 YAHOO_DAY_SYMBOLS 路由（BZ→BZ=F）；未知 key 返回 []。"""
+        pulled: list[str] = []
+
+        async def fake_yahoo(sym, proxy_urls=None):
+            pulled.append(sym)
+            return {"minutes": [(datetime(2026, 10, 1, 8, 0), 66.1)]}
+
+        monkeypatch.setattr(pf, "fetch_yahoo_day_minutes", fake_yahoo)
+        assert asyncio.run(pf.fetch_day_minutes("BZ")) == [(datetime(2026, 10, 1, 8, 0), 66.1)]
+        assert pulled == ["BZ=F"]
+        assert asyncio.run(pf.fetch_day_minutes("NOPE")) == []
+
+    def test_market_panel_assembly(self, monkeypatch):
+        """组装：spark 由 spark_map 注入（缺项空数组）；主价分工不变——BZ/GC=新浪 hf
+        兜底、DXY=DINIW、USDCNH=fx_susdcnh、US30Y/US10Y/VIX=yahoo_day 缺失时内部补拉
+        Yahoo 当日分时；腾讯分时死请求已消除（主价轮不打 minute 接口）。"""
         minute_urls: list[str] = []
 
         async def fake_get_text(url, headers=None, timeout=10.0):
             if "minute/query" in url:
                 minute_urls.append(url)
-            return ""    # 腾讯混排/分时全空：BZ/GC 主价走新浪 hf 兜底
+            return ""    # 腾讯混排空：BZ/GC 主价走新浪 hf 兜底
 
         async def fake_resilient(url, headers=None, proxy_urls=None, timeout=10.0):
-            return SINA_PANEL_RAW
+            return SINA_PANEL_RAW + (
+                'var hq_str_fx_susdcnh="11:46:24,6.706800,6.706900,6.713200,124,'
+                '6.713600,6.717400,6.705000,6.706800,离岸人民币（香港）,-0.100000,'
+                '-0.006400,0.001847,,6.995700,6.691300,,2026-10-02";\n')
 
-        async def fake_yahoo(symbol, proxy_urls=None):
-            pulled.append(symbol)
-            return {"price": 1.0, "pre_close": 1.0, "change_pct": 0.0,
-                    "spark": [1.0, 2.0, 3.0]}
+        yahoo_calls: list[str] = []
+
+        async def fake_day(sym, proxy_urls=None):
+            yahoo_calls.append(sym)
+            return {"price": 5.6, "pre_close": 5.5, "change_pct": 1.8, "minutes": []}
 
         monkeypatch.setattr(pf, "_get_text", fake_get_text)
         monkeypatch.setattr(pf, "_get_text_resilient", fake_resilient)
-        monkeypatch.setattr(pf, "_fetch_yahoo_chart", fake_yahoo)
-        panel = asyncio.run(pf.fetch_market_panel(proxy_urls=["p1"]))
+        monkeypatch.setattr(pf, "fetch_yahoo_day_minutes", fake_day)
+        panel = asyncio.run(pf.fetch_market_panel(
+            proxy_urls=["p1"],
+            yahoo_day={"US30Y": {"price": 5.603, "pre_close": 5.5, "change_pct": 1.87}},
+            spark_map={"QQQ": [1.0, 2.0, 3.0, 4.0, 5.0]}))
         got = {row["key"]: row for row in panel}
-        # spark 三项来自 Yahoo fake 序列
-        assert got["BZ"]["spark"] == [1.0, 2.0, 3.0]
-        assert got["GC"]["spark"] == [1.0, 2.0, 3.0]
-        assert got["DXY"]["spark"] == [1.0, 2.0, 3.0]
-        # 主价不被 Yahoo price=1.0 覆盖（BZ/GC=新浪 hf，DXY=新浪 DINIW）
+        # spark 注入：传入项取库内序列，未传项为空数组
+        assert got["QQQ"]["spark"] == [1.0, 2.0, 3.0, 4.0, 5.0]
+        assert got["BZ"]["spark"] == [] and got["USDCNH"]["spark"] == []
+        # 主价分工：BZ/GC=新浪 hf 兜底、DXY=DINIW、USDCNH=fx_susdcnh
         assert got["BZ"]["price"] == 66.10
         assert got["GC"]["price"] == 3860.5
         assert got["DXY"]["price"] == 102.1406
-        # 面板 Yahoo 拉取集合：3 个原主价项 + 3 个新 spark 项；
-        # 不含 HKD=X（汇率走势由 server 循环经 fetch_fx_spark 低频拉取）
-        assert set(pulled) == {"^TYX", "^TNX", "^VIX", "BZ=F", "GC=F", "DX-Y.NYB"}
-        # 腾讯分时只请求 4 个股指代码，hf_ 期货代码不进分时接口（死请求回归防线）
-        assert minute_urls == [
-            "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=usQQQ",
-            "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=usSPY",
-            "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=usSOXX",
-            "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=hkHSI",
-        ]
+        assert got["USDCNH"]["price"] == 6.7068
+        # US30Y 已有 yahoo_day 数据（零补拉）；US10Y/VIX 缺失 → 内部补拉当日分时接口
+        assert yahoo_calls == ["^TNX", "^VIX"]
+        assert got["US30Y"]["price"] == 5.603 and got["US10Y"]["price"] == 5.6
+        # 腾讯分时死请求已消除：主价轮不再打 minute 接口
+        assert minute_urls == []
 
     def test_fetch_fx_spark(self, monkeypatch):
         """fetch_fx_spark：Yahoo HKD=X 仅取 spark 字段，代理清单透传。"""
