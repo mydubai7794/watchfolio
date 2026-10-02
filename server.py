@@ -222,6 +222,17 @@ portfolio_cache: dict = {"ok": False, "positions": [], "summary": {}, "errors": 
 fund_nav_cache: dict | None = None   # {"nav","prev_nav","nav_date","nav_change_pct"}
 fx_state: dict = {"rate": 7.80, "fallback": True, "time": ""}
 market_cache: list[dict] = []        # 市场参考看板缓存（QQQ/SPY/SOXX/HSI/BZ/GC/DXY/US30Y/US10Y/VIX）
+
+# 一场口径状态机（模块级，进程生命周期内持久；重启后冷启动自愈，09:30 开盘刷新基准）：
+# base_closes: {symbol: 场基准价}——regular 时段用腾讯昨收(f[4])每轮刷新（数据源保证
+#              =一场基准）；非 regular 沿用上一值；冷启动/重启落在非 regular 时段时
+#              退化用当轮 f[4]（次日凌晨该值语义可能已切换，存在隔夜偏差，09:30 自愈，
+#              logger.info 仅标注一次）
+# close_prices: {symbol: 常规收盘定格价}——regular 时段跟随实时价（定格于 16:00 最后
+#              一条）；post/closed(≥16:00) 取腾讯现价(f[3]，实测盘后保持收盘价)；
+#              次日凌晨(<04:00)/盘前取 f[4]（实测已切换为昨日常规收盘）
+# base_logged: 冷启动退化标注开关（每次进程生命周期仅标注一次）
+portfolio_session_state: dict = {"base_closes": {}, "close_prices": {}, "base_logged": False}
 portfolio_task: Optional[asyncio.Task] = None
 fund_nav_task: Optional[asyncio.Task] = None
 market_task: Optional[asyncio.Task] = None
@@ -1175,7 +1186,10 @@ async def _portfolio_loop():
     while True:
         interval = 600.0
         try:
-            session, et_date, et_now = pf.us_market_session()
+            session, _et_date, et_now = pf.us_market_session()
+            # us_market_session 的 et_now 为展示用字符串；状态机/归场需日历字段，
+            # 此处解析回美东时区 datetime（与该次调用同一时钟快照）
+            et_dt = datetime.strptime(et_now, "%Y-%m-%d %H:%M:%S").replace(tzinfo=pf.ET_TZ)
             interval = {"regular": 10.0, "pre": 30.0, "post": 30.0}.get(session, 600.0)
             holdings = await db.get_holdings(enabled_only=True)
             us_symbols = [h["symbol"] for h in holdings if h["market"] == "US"]
@@ -1192,7 +1206,56 @@ async def _portfolio_loop():
                     await db.update_holding_names({s: q["name"] for s, q in quotes.items() if q.get("name")})
                 except Exception:
                     pass
-            positions, summary = pf.build_positions(holdings, quotes, fund_nav_cache, fx_state["rate"])
+            # ---- 一场口径状态机维护（base=场基准 / close=常规收盘定格）----
+            # 美东 20:00-04:00 夜盘时段：尝试夜盘实时源插槽（当前恒 {}，结果为空
+            # 自然降级为 19:59 盘后价定格口径；未来接入夜盘源后自动合并为实时价）
+            if (et_dt.hour >= 20 or et_dt.hour < 4) and us_symbols:
+                overnight = await pf.fetch_overnight_quotes(us_symbols, proxy_urls=proxies)
+                for sym, oq in overnight.items():
+                    q = quotes.get(sym)
+                    if q and oq.get("price"):
+                        # 夜盘实时价即现价：覆盖 f[3] 并清除盘后定格扩展价，避免被旧值覆盖
+                        q["price"] = oq["price"]
+                        q["ext_price"] = 0.0
+                        q["ext_time"] = "夜盘"
+            base_closes: dict = portfolio_session_state["base_closes"]
+            close_prices: dict = portfolio_session_state["close_prices"]
+            et_hour = et_dt.hour
+            if session == "regular":
+                # regular：腾讯昨收(f[4])即一场基准，每轮刷新；收盘定格跟随实时价
+                # （定格于 16:00 最后一条采样），实时累计=定格、夜盘增量=0
+                for sym, q in quotes.items():
+                    if q.get("pre_close"):
+                        base_closes[sym] = q["pre_close"]
+                    if q.get("price"):
+                        close_prices[sym] = q["price"]
+            elif session == "post" or (session == "closed" and et_hour >= 16):
+                # post/晚间 closed：腾讯现价(f[3])实测保持 16:00 收盘价 → 收盘定格
+                for sym, q in quotes.items():
+                    if q.get("price"):
+                        close_prices[sym] = q["price"]
+            elif session == "pre" or (session == "closed" and et_hour < 4):
+                # 次日凌晨/盘前：腾讯昨收(f[4])实测已切换为昨日常规收盘 → 定格兜底
+                for sym, q in quotes.items():
+                    if q.get("pre_close"):
+                        close_prices[sym] = q["pre_close"]
+            if session != "regular":
+                # 非 regular 沿用已维护基准；冷启动/重启缺失时退化用当轮 f[4]
+                # （次日凌晨该值可能已是次日语义，存在隔夜偏差，09:30 开盘自愈）
+                missing = [s for s, q in quotes.items()
+                           if s not in base_closes and q.get("pre_close")]
+                for sym in missing:
+                    base_closes[sym] = quotes[sym]["pre_close"]
+                if missing and not portfolio_session_state["base_logged"]:
+                    logger.info("一场口径基准冷启动退化: 非 regular 时段用腾讯昨收充当场基准 "
+                                "(存在隔夜偏差, 09:30 开盘自愈): %s", missing)
+                    portfolio_session_state["base_logged"] = True
+            # 一场基准/定格传入纯函数层（overrides 优先，缺失退化 pre_close/实时价）
+            base_overrides = {s: b for s, b in base_closes.items() if b}
+            close_overrides = {s: c for s, c in close_prices.items() if c}
+            positions, summary = pf.build_positions(
+                holdings, quotes, fund_nav_cache, fx_state["rate"],
+                base_overrides=base_overrides, close_overrides=close_overrides)
             # 现金并入总资产（现金无盈亏，今日/持仓盈亏口径不变）
             cash_rows = await db.get_cash_accounts()
             cash_usd = sum(r["amount"] for r in cash_rows if r["currency"] == "USD") + \
@@ -1206,12 +1269,16 @@ async def _portfolio_loop():
             denom = summary["base_value"] + cash_usd
             if denom > 0:
                 summary["day_pnl_pct"] = summary["day_pnl"] / denom * 100
+            # 一场口径交易日：次日凌晨(<09:30)采样归上一交易场，24h 曲线连续累计不重置
+            session_key = pf.trading_session_key(et_dt)
             portfolio_cache = {
                 "ok": bool(quotes),
                 "fetch_time": datetime.now().strftime("%H:%M:%S"),
                 "session": session,
                 "et_now": et_now,
-                "trade_date": str(et_date),
+                "trade_date": str(session_key),
+                # 夜盘时段标记（美东 20:00-04:00）：前端据此提示"定格 19:59 盘后价"
+                "night_session": et_dt.hour >= 20 or et_dt.hour < 4,
                 "fx_usdhkd": fx_state["rate"],
                 "fx_fallback": fx_state["fallback"],
                 "fx_time": fx_state["time"],
@@ -1223,11 +1290,12 @@ async def _portfolio_loop():
             # 休市不写 tick（避免日线聚合混入休市平线）
             if quotes and session != "closed":
                 # tick 口径：总资产(含现金折算)，现金变动当日需保持曲线连续；
+                # trade_date 用一场口径 session_key（凌晨归上一场）；day_pnl=实时累计
                 # 写入口毛刺延迟确认：偏差超阈值的 tick 先暂存一轮不写库，下一轮
                 # 恢复到 last 附近→上轮为瞬时坏值丢弃；仍异常→确认为真实跳变
                 # （如开盘跳空），补写暂存 tick 保持曲线连续并接受本轮
                 p_now, v_now = summary["day_pnl"], summary["total_value"]
-                tick_row = (datetime.now(), et_date, v_now, p_now,
+                tick_row = (datetime.now(), session_key, v_now, p_now,
                             summary["total_pnl"], summary["day_pnl_pct"],
                             summary["total_pnl_pct"])
                 action = pf.decide_tick_action(

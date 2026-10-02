@@ -13,7 +13,7 @@ import json
 import logging
 import re
 import time
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from urllib.parse import quote
 
 import httpx
@@ -93,6 +93,23 @@ def us_market_session(now_et: datetime | None = None) -> tuple[str, date, str]:
         elif 16 * 60 <= minutes < 20 * 60:
             session = "post"
     return session, now.date(), now.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def trading_session_key(now_et: datetime) -> date:
+    """一场口径交易日（session_key=开盘日）：一场=美东开盘→下一次开盘。
+
+    - 工作日 >=09:30：当日已开盘，key=当日；
+    - 工作日 <09:30：盘前/凌晨属于上一场，key=上一工作日；
+    - 周末：回退到最近上一工作日（周六→周五、周日→周五，跨周末继续回退）。
+    用途：tick 归场（次日凌晨采样归上一交易场，24h 曲线连续累计不重置）。
+    """
+    d = now_et.date()
+    if now_et.weekday() < 5 and (now_et.hour, now_et.minute) >= (9, 30):
+        return d
+    d -= timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
 
 
 def should_fetch_ext(session: str, now_et: datetime) -> bool:
@@ -367,8 +384,19 @@ def decide_tick_action(last_p: float | None, last_v: float | None,
 
 
 def build_positions(holdings: list[dict], us_quotes: dict[str, dict],
-                    fund: dict | None, fx_usdhkd: float) -> tuple[list[dict], dict]:
-    """计算每持仓盈亏与组合汇总。
+                    fund: dict | None, fx_usdhkd: float,
+                    base_overrides: dict | None = None,
+                    close_overrides: dict | None = None) -> tuple[list[dict], dict]:
+    """计算每持仓盈亏与组合汇总（一场口径）。
+
+    一场=美东开盘→下一次开盘（session_key=开盘日），三数值恒等式：
+    day_pnl(实时累计) = close_pnl(收盘定格) + overnight_pnl(夜盘增量)。
+    - 实时累计 today_pnl = (最新价-场基准)×qty：盘后/夜盘实时价计入；
+      场基准 base_overrides[sym] 优先（_portfolio_loop 状态机维护的一场基准），
+      缺失退化 q["pre_close"]（腾讯昨收，regular 时段两者等价）；
+    - 收盘定格 close_price = close_overrides[sym]（常规收盘定格价），缺失退化
+      实时价（无定格信息时夜盘增量视为 0）；
+    - close_pnl = Σ(close_price-场基准)×qty/fx；overnight_pnl = day_pnl-close_pnl。
 
     us_quotes: parse_tencent_us 结果（ext_price 已合并）
     fund: {"nav": float, "prev_nav": float, "nav_date": date, "nav_change_pct": float} 或 None
@@ -377,6 +405,7 @@ def build_positions(holdings: list[dict], us_quotes: dict[str, dict],
     fx = fx_usdhkd if fx_usdhkd and 7.5 <= fx_usdhkd <= 8.5 else FX_FALLBACK
     positions: list[dict] = []
     total_value = total_cost = base_value = 0.0
+    close_pnl_total = 0.0
 
     for h in holdings:
         sym, qty, cost = h["symbol"], float(h["quantity"]), float(h["cost_price"])
@@ -386,15 +415,20 @@ def build_positions(holdings: list[dict], us_quotes: dict[str, dict],
                 positions.append(_position(h, 0.0, None, None, None, "fund", True,
                                            cost_usd=cost * qty / fx))
             else:
+                # 基金官方日频净值：场基准=prev_nav、收盘定格=当日净值（日更无夜盘，
+                # overnight 恒为 0），实时累计/定格两数值天然相等
                 nav, prev = fund["nav"], fund.get("prev_nav") or 0.0
                 value = nav * qty / fx
                 today = (nav - prev) * qty / fx if prev > 0 else 0.0
                 pnl = (nav - cost) * qty / fx
                 cost_usd = cost * qty / fx
                 base_value += prev * qty / fx if prev > 0 else value
+                close_pnl_total += today
                 positions.append(_position(h, nav, value, today, pnl, "fund", False,
                                            cost_usd=cost_usd, nav_date=str(fund.get("nav_date", "")),
-                                           nav_change_pct=fund.get("nav_change_pct")))
+                                           nav_change_pct=fund.get("nav_change_pct"),
+                                           close_price=nav,
+                                           live_change_pct=(nav - prev) / prev * 100 if prev > 0 else None))
         elif h["market"] == "HK":
             # 港股上市 ETF：腾讯 hk 前缀行情，HKD 计价按汇率折算 USD；无扩展时段(ext=regular)
             q = us_quotes.get(sym)
@@ -403,29 +437,46 @@ def build_positions(holdings: list[dict], us_quotes: dict[str, dict],
                 positions.append(_position(h, 0.0, None, None, None, "regular", True,
                                            cost_usd=cost * qty / fx))
             else:
+                # 一场口径：场基准 overrides 优先、收盘定格 overrides 优先，HKD 折算 USD
+                base = (base_overrides or {}).get(sym) or q["pre_close"]
                 price_now = q["price"]
                 value = price_now * qty / fx
-                today = (price_now - q["pre_close"]) * qty / fx if q["pre_close"] > 0 else 0.0
+                today = (price_now - base) * qty / fx if base > 0 else 0.0
                 pnl = (price_now - cost) * qty / fx
                 cost_usd = cost * qty / fx
-                base_value += q["pre_close"] * qty / fx if q["pre_close"] > 0 else value
+                close_price = (close_overrides or {}).get(sym) or price_now
+                close_pnl_i = (close_price - base) * qty / fx if base > 0 else 0.0
+                close_pnl_total += close_pnl_i
+                base_value += base * qty / fx if base > 0 else value
                 positions.append(_position(h, price_now, value, today, pnl, "regular", False,
                                            cost_usd=cost_usd, pre_close=q["pre_close"],
-                                           quote_time=q.get("quote_time", "")))
+                                           quote_time=q.get("quote_time", ""),
+                                           close_price=close_price,
+                                           live_change_pct=(price_now - base) / base * 100 if base > 0 else None))
         else:
             q = us_quotes.get(sym)
             if not q or not q.get("price"):
                 # 行情缺失(stale)：USD 成本口径不变(默认 cost*qty)，落入循环末尾统一累加
                 positions.append(_position(h, 0.0, None, None, None, "none", True))
             else:
+                # 一场口径：场基准 overrides 优先；最新价仍盘后扩展价优先（实时累计计入盘后夜盘）
+                base = (base_overrides or {}).get(sym) or q["pre_close"]
                 price_now = q["ext_price"] if q.get("ext_price") else q["price"]
                 ext = "pre/post" if q.get("ext_price") else "regular"
                 value = price_now * qty
-                today = (price_now - q["pre_close"]) * qty if q["pre_close"] > 0 else 0.0
+                today = (price_now - base) * qty if base > 0 else 0.0
                 pnl = (price_now - cost) * qty
-                base_value += q["pre_close"] * qty if q["pre_close"] > 0 else value
+                # 收盘定格：overrides 优先（post/closed 段状态机定格 16:00 收盘价），
+                # 缺失退化实时价（夜盘增量视为 0，恒等式保持成立）
+                close_price = (close_overrides or {}).get(sym) or price_now
+                close_pnl_i = (close_price - base) * qty if base > 0 else 0.0
+                close_pnl_total += close_pnl_i
+                base_value += base * qty if base > 0 else value
                 positions.append(_position(h, price_now, value, today, pnl, ext, False,
-                                           pre_close=q["pre_close"], quote_time=q.get("ext_time") or q.get("quote_time", "")))
+                                           pre_close=q["pre_close"],
+                                           quote_time=q.get("ext_time") or q.get("quote_time", ""),
+                                           close_price=close_price,
+                                           live_change_pct=(price_now - base) / base * 100 if base > 0 else None))
         p = positions[-1]
         total_value += p["value"]
         total_cost += p["cost_usd"]
@@ -441,12 +492,16 @@ def build_positions(holdings: list[dict], us_quotes: dict[str, dict],
         "total_pnl": total_pnl,
         "total_pnl_pct": total_pnl / total_cost * 100 if total_cost > 0 else 0.0,
         "base_value": base_value,
+        # 一场口径三数值：实时累计/收盘定格/夜盘增量（恒等式 day_pnl=close+overnight）
+        "close_pnl": close_pnl_total,
+        "overnight_pnl": day_pnl - close_pnl_total,
     }
     return positions, summary
 
 
 def _position(h: dict, price, value, today, pnl, ext, stale,
-              cost_usd=None, pre_close=None, quote_time="", nav_date="", nav_change_pct=None):
+              cost_usd=None, pre_close=None, quote_time="", nav_date="",
+              nav_change_pct=None, close_price=None, live_change_pct=None):
     """构造单持仓输出行（内部辅助）。金额保持原始浮点精度，不做 round。"""
     qty, cost = float(h["quantity"]), float(h["cost_price"])
     if cost_usd is None:
@@ -463,6 +518,9 @@ def _position(h: dict, price, value, today, pnl, ext, stale,
         "position_pnl": pnl if pnl is not None else None,
         "position_pnl_pct": pnl / cost_usd * 100 if (cost_usd > 0 and pnl is not None) else None,
         "cost_usd": cost_usd,
+        # 一场口径：常规收盘定格价与实时累计涨跌%（基准=base_overrides 优先）
+        "close_price": close_price,
+        "live_change_pct": live_change_pct,
         "ext": ext, "stale": stale,
         "quote_time": quote_time, "nav_date": nav_date, "nav_change_pct": nav_change_pct,
     }
@@ -579,6 +637,19 @@ async def fetch_quotes(us_symbols: list[str], hk_symbols: list[str],
 async def fetch_us_quotes(symbols: list[str], session: str | None = None) -> dict[str, dict]:
     """抓取美股行情（向后兼容包装：委托 fetch_quotes，无港股）。"""
     return await fetch_quotes(symbols, [], session)
+
+
+async def fetch_overnight_quotes(us_symbols: list[str],
+                                 proxy_urls: list[str] | None = None) -> dict[str, dict]:
+    """夜盘 ATS 实时行情抓取（美东 20:00-04:00 时段专用源插槽）。
+
+    当前恒返回 {}：美股夜盘撮合（ATS 盘后夜间时段）行情无稳定免费源（腾讯/新浪/
+    东财/Yahoo v8 均实测不提供），20:00-04:00 期间以 19:59 盘后价定格展示；未来
+    接入夜盘源（如 IBKR/Polygon 等）时在此返回 {symbol: {"price": 最新价}}，
+    _portfolio_loop 检测到非空结果会合并为实时价，结果为空自然降级定格口径。
+    proxy_urls 预留：未来夜盘源若需代理池透传（取法仿 _get_text_resilient）。
+    """
+    return {}
 
 
 async def fetch_fx_usdhkd(proxy_urls: list[str] | None = None) -> tuple[float, bool]:

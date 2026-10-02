@@ -510,3 +510,109 @@ class TestStripSpikePoints:
         # 少于 3 点：原样返回
         points = [{"ts": "1", "v": 1.0, "p": 1.0}]
         assert server._strip_spike_points(points) == points
+
+
+class TestTradingSessionKey:
+    """一场口径交易日（session_key=开盘日）：工作日≥09:30→当日；
+    工作日<09:30→上一工作日；周末→上一工作日（跨周末继续回退）。"""
+
+    def test_weekday_open(self):
+        # 周四 10:00（已开盘）→ 当日周四
+        assert pf.trading_session_key(datetime(2026, 10, 1, 10, 0, tzinfo=ET)) == date(2026, 10, 1)
+
+    def test_weekday_before_open(self):
+        # 周四 08:00（盘前凌晨，属上一场）→ 周三
+        assert pf.trading_session_key(datetime(2026, 10, 1, 8, 0, tzinfo=ET)) == date(2026, 9, 30)
+
+    def test_saturday(self):
+        # 周六 12:00 → 周五
+        assert pf.trading_session_key(datetime(2026, 10, 3, 12, 0, tzinfo=ET)) == date(2026, 10, 2)
+
+    def test_monday_early_morning(self):
+        # 周一 03:00 → 上周五（周日为周末，回退至最近工作日）
+        assert pf.trading_session_key(datetime(2026, 10, 5, 3, 0, tzinfo=ET)) == date(2026, 10, 2)
+
+    def test_weekday_open_exact_930(self):
+        # 工作日 09:30 整（开盘时刻含边界）→ 当日
+        assert pf.trading_session_key(datetime(2026, 10, 1, 9, 30, tzinfo=ET)) == date(2026, 10, 1)
+
+    def test_sunday_night(self):
+        # 周日 21:00 → 周五
+        assert pf.trading_session_key(datetime(2026, 10, 4, 21, 0, tzinfo=ET)) == date(2026, 10, 2)
+
+
+class TestBuildPositionsSessionPnl:
+    """一场口径三数值：实时累计(day_pnl/today_pnl)、收盘定格(close_pnl)、
+    夜盘增量(overnight_pnl=day_pnl-close_pnl)，恒等式必须成立。"""
+
+    H = [{"symbol": "MU", "name": "美光", "market": "US",
+          "quantity": 10, "cost_price": 50.0, "currency": "USD"}]
+    Q = {"MU": {"name": "美光", "price": 100.0, "pre_close": 95.0,
+                "ext_price": 110.0, "ext_time": "t", "change_pct": 0.0,
+                "currency": "USD", "quote_time": "t"}}
+
+    def test_three_values_identity(self):
+        # 盘后场景：腾讯昨收=95、场基准(base_overrides)=90、收盘定格(close_overrides)=100、
+        # 盘后实时价(ext_price)=110
+        positions, summary = pf.build_positions(
+            self.H, self.Q, None, 7.8,
+            base_overrides={"MU": 90.0}, close_overrides={"MU": 100.0})
+        mu = positions[0]
+        # 实时累计 = (盘后价 110 - 场基准 90) × 10 = 200（基准用 base_overrides 优先）
+        assert mu["today_pnl"] == (110.0 - 90.0) * 10
+        assert summary["day_pnl"] == (110.0 - 90.0) * 10
+        # live_change_pct 基于场基准 90
+        assert abs(mu["live_change_pct"] - (110.0 - 90.0) / 90.0 * 100) < 1e-9
+        # 收盘定格：position 带 close_price；定格盈亏 = (100-90)×10 = 100
+        assert mu["close_price"] == 100.0
+        assert summary["close_pnl"] == (100.0 - 90.0) * 10
+        # 夜盘增量 = 实时累计 - 收盘定格 = 200 - 100 = 100
+        assert summary["overnight_pnl"] == summary["day_pnl"] - summary["close_pnl"]
+
+    def test_no_overrides_fallback(self):
+        # 不传 overrides：基准退化 pre_close(95)、close 退化实时价(110)→
+        # overnight=0，与旧口径行为一致
+        positions, summary = pf.build_positions(self.H, self.Q, None, 7.8)
+        mu = positions[0]
+        assert mu["today_pnl"] == (110.0 - 95.0) * 10
+        assert mu["close_price"] == 110.0
+        assert summary["close_pnl"] == (110.0 - 95.0) * 10
+        assert summary["overnight_pnl"] == 0.0
+
+    def test_hk_overrides_fx(self):
+        # HK 持仓：三数值按汇率折算 USD，恒等式保持
+        h = [{"symbol": "03152", "name": "博时", "market": "HK",
+              "quantity": 2, "cost_price": 1000.0, "currency": "HKD"}]
+        q = {"03152": {"name": "博时", "price": 1050.0, "pre_close": 1049.0,
+                       "change_pct": 0.0, "high": 0.0, "low": 0.0,
+                       "currency": "HKD", "quote_time": "t",
+                       "ext_price": 0.0, "ext_time": ""}}
+        positions, summary = pf.build_positions(
+            h, q, None, 7.8,
+            base_overrides={"03152": 1040.0}, close_overrides={"03152": 1045.0})
+        p = positions[0]
+        assert p["today_pnl"] == (1050.0 - 1040.0) * 2 / 7.8
+        assert summary["close_pnl"] == (1045.0 - 1040.0) * 2 / 7.8
+        assert summary["overnight_pnl"] == summary["day_pnl"] - summary["close_pnl"]
+
+    def test_fund_close_is_nav(self):
+        # HKFUND：场基准=prev_nav，收盘定格=当日净值（基金日更，无夜盘）→ overnight=0
+        fund = {"nav": 15.50, "prev_nav": 15.62, "nav_date": date(2026, 9, 30),
+                "nav_change_pct": -0.77}
+        h = [{"symbol": "F1", "name": "邓普顿", "market": "HKFUND",
+              "quantity": 100, "cost_price": 13.0, "currency": "HKD"}]
+        positions, summary = pf.build_positions(h, {}, fund, 7.8)
+        p = positions[0]
+        assert p["close_price"] == 15.50
+        assert summary["close_pnl"] == (15.50 - 15.62) * 100 / 7.8
+        assert summary["overnight_pnl"] == 0.0
+
+
+class TestFetchOvernightQuotes:
+    """夜盘源插槽：当前无稳定免费源恒返回 {}，_portfolio_loop 合并后自然降级。"""
+
+    def test_returns_empty_dict(self):
+        assert asyncio.run(pf.fetch_overnight_quotes(["MU", "QQQ"])) == {}
+
+    def test_accepts_proxy_urls(self):
+        assert asyncio.run(pf.fetch_overnight_quotes(["MU"], proxy_urls=["p1"])) == {}

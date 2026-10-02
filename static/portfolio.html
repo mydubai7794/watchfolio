@@ -595,9 +595,11 @@ function renderOverview(d) {
   document.getElementById('cashVal').textContent = usd(s.cash_usd);
   document.getElementById('cashSub').textContent =
     (s.cash_usd != null && d.fx_usdhkd) ? '≈ HK$' + fmt(s.cash_usd * d.fx_usdhkd, 0) : '';
-  // session 徽章：文字化灰胶囊
+  // session 徽章：文字化灰胶囊；夜盘时段（美东 20:00-04:00）无免费实时源，
+  // 价格定格 19:59 盘后价，追加提示避免误读为实时行情
   const badge = document.getElementById('sessionBadge');
-  badge.textContent = SESSION_LABEL[d.session] || d.session || '--';
+  badge.textContent = (SESSION_LABEL[d.session] || d.session || '--')
+    + (d.night_session ? ' · 夜盘定格' : '');
   document.getElementById('fetchTime').textContent = d.fetch_time || '--:--:--';
   document.getElementById('fxInfo').textContent = 'USD/HKD ' + fmt(d.fx_usdhkd, 4) + (d.fx_fallback ? '(默认)' : '');
 
