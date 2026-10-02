@@ -43,9 +43,12 @@ SINA_PANEL_URL = "https://hq.sinajs.cn/list=DINIW,hf_OIL,hf_GC,fx_susdcnh"
 # 加密市场数据源（境外现货交易所公共行情端点）：免 key 7×24 有价，美股闭市时段
 # （夜盘/周末）代理价补全组合走势，中间价口径与底层夜盘价偏差实测 0.02%-0.1%
 # （详见《美股夜盘数据源研报.md》）；境内 IP 直连不可用，须经境外代理访问
-CRYPTO_EXCHANGE_INFO_URL = "https://api.binance.com/api/v3/exchangeInfo"
-CRYPTO_TICKER_URL = "https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
-CRYPTO_PING_URL = "https://api.binance.com/api/v3/ping"   # 代理境外可达性探测（weight 0）
+CRYPTO_EXCHANGE_INFO_URL = "https://data-api.binance.vision/api/v3/exchangeInfo"
+CRYPTO_TICKER_URL = "https://data-api.binance.vision/api/v3/ticker/24hr?symbol={symbol}"
+CRYPTO_PING_URL = "https://data-api.binance.vision/api/v3/ping"   # 代理境外可达性探测（weight 0）
+# 注：data-api.binance.vision 是该交易所官方公开行情镜像域名，主站 api.binance.com
+# 对机房 IP 段有 TLS 层封禁（实测 *REMOVED* 等境外出口 CONNECT 成功但握手被
+# reset），vision 域名不封且行情数据与主站完全一致
 # twelvedata 接口型美股/港股行情兜底（有 key 不 ban IP；免费 8 credits/min，
 # 批量请求 credits=symbol 数，故单次批量上限 8 并轮换指针覆盖全部持仓）
 TWELVEDATA_QUOTE_URL = "https://api.twelvedata.com/quote"
