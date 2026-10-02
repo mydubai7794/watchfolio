@@ -1192,7 +1192,7 @@ async def _monitor_loop():
 
 async def _portfolio_loop():
     """持仓行情采集：盘中10s/扩展时段30s/休市600s，成功才写 tick。"""
-    global portfolio_cache
+    global portfolio_cache, _crypto_direct_ok
     # tick 毛刺延迟确认状态（进程内存，重启即失效重建）：
     # last_tick_state：上一条已写入 tick 的 {p: day_pnl, v: total_value} 基准；
     # pending_tick：偏差超阈值被暂存待确认的 tick 行（下一轮恢复→丢弃，仍异常→补写确认）
@@ -1241,8 +1241,14 @@ async def _portfolio_loop():
             # 维持 19:59 盘后价定格口径
             overnight_used = 0
             if night_window and us_symbols:
-                ov_rows = await db.get_overseas_proxies()
-                ov_urls = [r["url"] for r in ov_rows] or proxies   # 境外优先，空回退通用池
+                # 直连优先（vision 行情镜像境内可达，实测 200）：加密市场数据源
+                # 探测循环确认直连可用时传空候选（免代理开销）；直连不可用时
+                # 境外分类代理优先，再回退通用池（fetcher 内逐候选尝试）
+                probe_ok = _crypto_direct_ok
+                ov_urls: list[str] = []
+                if not probe_ok:
+                    ov_rows = await db.get_overseas_proxies()
+                    ov_urls = [r["url"] for r in ov_rows] or proxies   # 境外优先，空回退通用池
                 overnight = await pf.fetch_overnight_quotes(us_symbols, proxy_urls=ov_urls)
                 for sym, oq in overnight.items():
                     q = quotes.get(sym)
@@ -1433,31 +1439,45 @@ def backfill_keys(last_map: dict[str, tuple | None], now_dt: datetime,
 
 _CRYPTO_PROBE_INTERVAL_SEC = 1800.0   # 境外代理分类探测周期（30min，低频省资源）
 _CRYPTO_PROBE_FIRST_DELAY_SEC = 90.0  # 首跑延迟（等代理池首轮抓取完成）
+_crypto_direct_ok = False             # 加密市场数据源直连可用性（探测循环维护）
 
 
 async def _crypto_probe_loop():
     """境外代理分类探测循环：给代理池打 region 标签。
 
-    加密市场数据源（境外现货交易所公共行情）境内 IP 直连不可用，须经境外代理访问。
-    每 30min 遍历存活代理，未分类(region=unknown)的逐个 GET CRYPTO_PING_URL
-    （weight 0，免 key）——成功标记 region='overseas'，失败保持 unknown（可能
-    只是临时抖动，下轮再测，不做永久否定标记）。已分类 overseas 的不重复探测。
+    加密市场数据源端点为交易所官方公开行情镜像域名（data-api.binance.vision），
+    实测境内服务器直连可达（主站 api.binance.com 才有境内墙+机房 IP 封禁）。
+    探测分两层：①服务器直连成功 → 数据源整体可用，代理无需境外分类（全部保持
+    unknown，夜盘走直连）；②直连失败时才逐个探测代理，GET CRYPTO_PING_URL
+    （weight 0，免 key）成功标记 region='overseas'（失败保持 unknown，下轮再测，
+    不做永久否定标记）。已分类 overseas 的不重复探测。
     """
     logger.info("境外代理分类探测循环启动 (间隔 %ss)", _CRYPTO_PROBE_INTERVAL_SEC)
     await asyncio.sleep(_CRYPTO_PROBE_FIRST_DELAY_SEC)
     while True:
         try:
-            rows = await db.get_alive_proxies()
-            unknown = [r for r in rows if r.get("region", "unknown") != "overseas"]
-            for r in unknown:
-                try:
-                    async with httpx.AsyncClient(timeout=8, proxy=r["url"]) as client:
-                        resp = await client.get(pf.CRYPTO_PING_URL)
-                    if resp.status_code == 200:
-                        await db.mark_proxy_region(r["id"], "overseas")
-                        logger.info("代理境外可达已标记 overseas: %s", r["url"])
-                except Exception:
-                    pass   # 探测失败保持 unknown，下轮再测
+            direct_ok = False
+            try:
+                async with httpx.AsyncClient(timeout=8) as client:
+                    resp = await client.get(pf.CRYPTO_PING_URL)
+                direct_ok = resp.status_code == 200
+            except Exception:
+                direct_ok = False
+            server._crypto_direct_ok = direct_ok
+            if direct_ok:
+                logger.info("加密市场数据源直连可用，代理无需境外分类")
+            else:
+                rows = await db.get_alive_proxies()
+                unknown = [r for r in rows if r.get("region", "unknown") != "overseas"]
+                for r in unknown:
+                    try:
+                        async with httpx.AsyncClient(timeout=8, proxy=r["url"]) as client:
+                            resp = await client.get(pf.CRYPTO_PING_URL)
+                        if resp.status_code == 200:
+                            await db.mark_proxy_region(r["id"], "overseas")
+                            logger.info("代理境外可达已标记 overseas: %s", r["url"])
+                    except Exception:
+                        pass   # 探测失败保持 unknown，下轮再测
         except asyncio.CancelledError:
             logger.info("境外代理分类探测循环已停止")
             break

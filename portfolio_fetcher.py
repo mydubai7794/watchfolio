@@ -867,11 +867,11 @@ async def fetch_crypto_prices(bmap: dict[str, str],
     """逐只拉加密市场数据源 24hr ticker，取买卖一中间价 (bid+ask)/2（研报 4.3 的稳健口径）。
 
     约 15 只=30 weight/轮，远低于 1200 weight/min/IP；单只失败/停牌跳过不致命。
-    请求按 proxy_urls 顺序逐个尝试（境外代理优先），全部失败则直连兜底。
+    请求直连优先（实测境内可达），失败按 proxy_urls 顺序逐个代理重试。
     返回 {美股代码: {"price": 中间价}}。
     """
     out: dict[str, dict] = {}
-    candidates = list(proxy_urls or [])[:2] + [None]
+    candidates = [None] + list(proxy_urls or [])[:2]
 
     async def _one(sym: str, pair: str) -> None:
         for proxy in candidates:
