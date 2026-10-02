@@ -1202,7 +1202,9 @@ async def _portfolio_loop():
             # 消除对 us_market_session 展示串的 strptime 反解析）
             et_dt = datetime.now(pf.ET_TZ)
             session, _et_date, et_now = pf.us_market_session(et_dt)
-            interval = {"regular": 10.0, "pre": 30.0, "post": 30.0}.get(session, 600.0)
+            # 夜盘/周末窗口：币安 bStocks 代理价补全时段（closed 但有活源）
+            night_window = (et_dt.hour >= 20 or et_dt.hour < 4) or et_dt.weekday() >= 5
+            interval = {"regular": 10.0, "pre": 30.0, "post": 30.0}.get(session, 60.0 if night_window else 600.0)
             holdings = await db.get_holdings(enabled_only=True)
             us_symbols = [h["symbol"] for h in holdings if h["market"] == "US"]
             hk_symbols = [h["symbol"] for h in holdings if h["market"] == "HK"]
@@ -1219,17 +1221,20 @@ async def _portfolio_loop():
                 except Exception:
                     pass
             # ---- 一场口径状态机维护（base=场基准 / close=常规收盘定格）----
-            # 美东 20:00-04:00 夜盘时段：尝试夜盘实时源插槽（当前恒 {}，结果为空
-            # 自然降级为 19:59 盘后价定格口径；未来接入夜盘源后自动合并为实时价）
-            if (et_dt.hour >= 20 or et_dt.hour < 4) and us_symbols:
+            # 夜盘/周末时段：币安 bStocks 代理价（7×24 有价，偏差 0.02%-0.1%）
+            # 覆盖美股现价 → 组合总值 24h 曲线连续；无对应交易对/失败的标的
+            # 自然缺省，维持 19:59 盘后价定格口径
+            overnight_used = 0
+            if night_window and us_symbols:
                 overnight = await pf.fetch_overnight_quotes(us_symbols, proxy_urls=proxies)
                 for sym, oq in overnight.items():
                     q = quotes.get(sym)
                     if q and oq.get("price"):
-                        # 夜盘实时价即现价：覆盖 f[3] 并清除盘后定格扩展价，避免被旧值覆盖
+                        # 夜盘代理价即现价：覆盖 f[3] 并清除盘后定格扩展价，避免被旧值覆盖
                         q["price"] = oq["price"]
                         q["ext_price"] = 0.0
                         q["ext_time"] = "夜盘"
+                        overnight_used += 1
             # 状态机纯函数（无 IO）：base_closes/close_prices/base_logged 就地更新；
             # 冷启动退化标注由 base_fallback 传递，日志在循环侧打（保持函数可离线测试）
             pf.update_session_state(portfolio_session_state, session, et_dt, quotes)
@@ -1263,8 +1268,12 @@ async def _portfolio_loop():
                 "session": session,
                 "et_now": et_now,
                 "trade_date": str(session_key),
-                # 夜盘时段标记（美东 20:00-04:00）：前端据此提示"定格 19:59 盘后价"
-                "night_session": et_dt.hour >= 20 or et_dt.hour < 4,
+                # 夜盘/周末标记（结构化）：active=币安代理价生效中，前端据此展示
+                # "夜盘·币安代理价"提示；全部标的无对应交易对时 active=False 退回定格提示
+                "night_session": {"active": overnight_used > 0,
+                                  "window": night_window,
+                                  "source": "binance_bstocks",
+                                  "note": "夜盘·币安代理价(允许微小偏差)"},
                 "fx_usdhkd": fx_state["rate"],
                 "fx_fallback": fx_state["fallback"],
                 "fx_time": fx_state["time"],
@@ -1273,8 +1282,9 @@ async def _portfolio_loop():
                 "cash": cash_rows,
                 "errors": [] if quotes else ["行情源暂不可用"],
             }
-            # 休市不写 tick（避免日线聚合混入休市平线）
-            if quotes and session != "closed":
+            # 常规时段写 tick；夜盘/周末（closed）在币安代理价生效时同样写 tick，
+            # 24h 曲线跨夜盘/周末连续累积（日线聚合取每场最后一条不受影响）
+            if quotes and (session != "closed" or overnight_used > 0):
                 # tick 口径：总资产(含现金折算)，现金变动当日需保持曲线连续；
                 # trade_date 用一场口径 session_key（凌晨归上一场）；day_pnl=实时累计
                 # 写入口毛刺延迟确认：偏差超阈值的 tick 先暂存一轮不写库，下一轮
@@ -1383,35 +1393,65 @@ async def _fund_nav_loop():
         await asyncio.sleep((nxt - now).total_seconds())
 
 
-_MINUTE_TTL_SEC = 180.0   # 看板分时每标的拉取节流（Yahoo chart ~9/180s ≈ 3/min，少请求多数据）
+_BACKFILL_MAX_AGE_SEC = 1800.0   # 分时 backfill 阈值：库内最新 tick 距今超 30 分钟才补拉一次全量
+_BACKFILL_COOLDOWN_SEC = 14400.0  # backfill 成功后冷却 4h（闭市标的价不变会持续满足条件，幂等补拉限频）
 
 
-def due_minute_keys(minute_due: dict[str, float], now_mono: float,
-                    keys: list[str], ttl: float) -> list[str]:
-    """返回 TTL 到期需拉取分时的看板 keys（纯函数，供 _market_loop 与单测）。"""
-    return [k for k in keys if now_mono - minute_due.get(k, 0.0) >= ttl]
+def backfill_keys(last_map: dict[str, tuple | None], now_dt: datetime,
+                  keys: list[str], max_age: float = _BACKFILL_MAX_AGE_SEC) -> list[str]:
+    """返回需要 backfill 分时的看板 keys（纯函数，供 _market_loop 与单测）。
+
+    判定：库内无该标的 tick，或最新 tick 距今超 max_age（服务重启/新标的/
+    数据断档）。常规时段分时完全由主价快照（60s 轮询价变即写）累积，
+    外部分时接口请求≈0——「少请求、多数据、回显全用库」原则。
+    """
+    out: list[str] = []
+    for k in keys:
+        last = last_map.get(k)
+        if last is None or last[0] is None:
+            out.append(k)
+            continue
+        ts = last[0]
+        age = (now_dt - ts).total_seconds() if ts.tzinfo is None else (
+            now_dt.replace(tzinfo=None) - ts).total_seconds()
+        if age > max_age:
+            out.append(k)
+    return out
 
 
 async def _market_loop():
-    """市场参考看板采集：主价 60s 快轮（腾讯/新浪混排）+ 分时 180s/标的 TTL 慢轮
-    （fetch_day_minutes → market_ticks 落库累积；US30Y/US10Y/VIX 主价与分时一次
-    请求两用顺带刷新）；spark 统一读库（当日分时/闭市回退上一时段全程）；
-    Yahoo 失败项当轮跳过不重试（下轮 TTL 到期再试）；异常钳制 120s。"""
+    """市场参考看板采集（主价快照存库模式）：
+
+    - 主价 60s 快轮（腾讯/新浪混排；US30Y/US10Y/VIX 主价与分时同源顺带刷新）
+      → **价变即写 market_ticks**（60s 粒度分时由主价轮询自然累积，闭市价不变
+      不堆重复点）；
+    - 分时 backfill：仅当某标的库内最新 tick 距今 >30min（重启/新标的/断档）
+      时拉一次全量分时补齐（Yahoo 5d/5m 或腾讯分钟线），常规时段分时请求≈0；
+    - spark 统一读库（当日全程，闭市回退上一交易时段）；异常钳制 120s。
+    """
     global market_cache
     logger.info("市场看板采集循环启动")
-    minute_due: dict[str, float] = {}   # key → 上次分时拉取 monotonic 时刻（TTL 节流）
-    yahoo_day: dict[str, dict] = {}     # US30Y/US10Y/VIX 主价缓存（分时轮顺带刷新）
+    yahoo_day: dict[str, dict] = {}     # US30Y/US10Y/VIX 主价缓存（backfill 轮顺带刷新）
+    backfill_at: dict[str, float] = {}  # key → 上次 backfill 成功的 monotonic 时刻（4h 冷却）
     while True:
         interval = 60.0
         try:
             # Yahoo 链路国内直连不稳：仿 _fund_nav_loop 从代理池取存活代理透传
             proxies = [r["url"] for r in await db.get_alive_proxies()]
+            now_utc = datetime.utcnow()
             now_mono = time.monotonic()
 
-            # ---- 分时慢轮：TTL 到期的标的并发拉当日分时并落库（INSERT IGNORE 幂等）----
-            due = due_minute_keys(minute_due, now_mono, pf.DAY_MINUTE_KEYS, _MINUTE_TTL_SEC)
-            for key in due:
-                minute_due[key] = now_mono   # 失败也占位：当轮跳过，下轮 TTL 到期再试
+            # ---- 分时 backfill：库内断档的标的并发拉一次全量分时并落库 ----
+            # 冷却 4h：闭市标的价不变（主价快照不写新 tick）会持续满足补拉条件，
+            # 幂等补拉限频（成功才计冷却，失败下轮重试）
+            last_map: dict[str, tuple | None] = {}
+            for key in pf.DAY_MINUTE_KEYS:
+                try:
+                    last_map[key] = await db.get_market_last_tick(key)
+                except Exception:
+                    last_map[key] = None
+            due = [k for k in backfill_keys(last_map, now_utc, pf.DAY_MINUTE_KEYS)
+                   if now_mono - backfill_at.get(k, 0.0) >= _BACKFILL_COOLDOWN_SEC]
 
             async def _refresh_minutes(key: str) -> None:
                 if key in ("US30Y", "US10Y", "VIX"):
@@ -1425,11 +1465,14 @@ async def _market_loop():
                     if pts:
                         await db.save_market_ticks(key, pts)
 
-            results = await asyncio.gather(*(_refresh_minutes(k) for k in due),
-                                           return_exceptions=True)
-            for key, r in zip(due, results):
-                if isinstance(r, Exception):
-                    logger.warning("看板分时 %s 拉取失败(下轮重试): %s", key, r)
+            if due:
+                results = await asyncio.gather(*(_refresh_minutes(k) for k in due),
+                                               return_exceptions=True)
+                for key, r in zip(due, results):
+                    if isinstance(r, Exception):
+                        logger.warning("看板分时 backfill %s 拉取失败(下轮重试): %s", key, r)
+                    else:
+                        backfill_at[key] = now_mono   # 成功才计冷却
 
             # ---- spark 读库（每标的当日全程分时，降采样 ≤60 点）+ 主价快轮组装 ----
             spark_map: dict[str, list[float]] = {}
@@ -1441,6 +1484,18 @@ async def _market_loop():
                     spark_map[key] = []
             market_cache = await pf.fetch_market_panel(
                 proxy_urls=proxies, yahoo_day=yahoo_day, spark_map=spark_map)
+
+            # ---- 主价快照存库：价与库内最新 tick 不同才写（UTC，价变即积累分时）----
+            for item in market_cache:
+                key, price = item.get("key"), item.get("price")
+                if price is None:
+                    continue
+                last = last_map.get(key)
+                try:
+                    if last is None or last[0] is None or last[1] != float(price):
+                        await db.save_market_ticks(key, [(now_utc, float(price))])
+                except Exception as e:
+                    logger.warning("主价快照 %s 写库失败: %s", key, e)
         except asyncio.CancelledError:
             logger.info("市场看板采集循环已停止")
             break

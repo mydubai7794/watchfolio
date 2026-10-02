@@ -905,10 +905,25 @@ async def save_market_ticks(symbol: str, points: list[tuple]) -> int:
             return cur.rowcount
 
 
+async def get_market_last_tick(symbol: str) -> tuple | None:
+    """取该标的库内最新一条分时 (ts, price)；无数据返回 None。
+
+    用途：①主价快照写入去重（价与最新 tick 相同则跳过，闭市不堆重复点）
+    ②分时 backfill 判定（最新 tick 距今超阈值才补拉一次全量分时）。
+    """
+    rows = await execute_dict(
+        "SELECT ts, price FROM market_ticks WHERE symbol = %s ORDER BY ts DESC LIMIT 1",
+        (symbol,),
+    )
+    if not rows:
+        return None
+    return rows[0]["ts"], float(rows[0]["price"])
+
+
 async def get_market_day_spark(symbol: str, max_points: int = 60) -> list[tuple[str, float]]:
     """取该标的库内最大 ts 所在自然日的全程分时（升序），等距降采样 ≤max_points。
 
-    「自然日」以数据本身最大 ts 切分（数据源原时区 naive，不做时区换算）：盘中
+    「自然日」以数据本身最大 ts 切分（全表统一 UTC naive 口径）：盘中
     标的自然为开盘→当前，闭市标的自然为上一交易时段全程。返回 [(ts_str, price)]，
     首尾点必保留。
     """

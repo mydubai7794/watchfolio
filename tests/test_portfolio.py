@@ -1,8 +1,11 @@
 """持仓模块离线单元测试：时段/解析/盈亏计算（不发真实网络请求）"""
 import asyncio
 import json
+import time
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
+
+import pytest
 
 import portfolio_fetcher as pf
 import server
@@ -714,13 +717,151 @@ class TestBuildPositionsSessionPnl:
 
 
 class TestFetchOvernightQuotes:
-    """夜盘源插槽：当前无稳定免费源恒返回 {}，_portfolio_loop 合并后自然降级。"""
+    """夜盘代理价（币安 bStocks）：resolve_bstock_map 映射/缓存/失败容错、
+    fetch_bstock_prices 中间价口径、fetch_overnight_quotes 插槽串联与降级。"""
 
-    def test_returns_empty_dict(self):
-        assert asyncio.run(pf.fetch_overnight_quotes(["MU", "QQQ"])) == {}
+    def test_resolve_bstock_map_filters_trading_pairs(self, monkeypatch):
+        """exchangeInfo 过滤 status=TRADING 的 代码+B+USDT 精确匹配，无对应缺省。"""
+        async def fake_client_get(self, url, **kw):
+            class R:
+                def json(self):
+                    return {"symbols": [
+                        {"symbol": "AMDBUSDT", "status": "TRADING"},
+                        {"symbol": "NVDABUSDT", "status": "TRADING"},
+                        {"symbol": "QQQBUSDT", "status": "BREAK"},        # 非交易状态剔除
+                        {"symbol": "BTCUSDT", "status": "TRADING"},      # 非 bStock 后缀不匹配
+                    ]}
+            return R()
 
-    def test_accepts_proxy_urls(self):
-        assert asyncio.run(pf.fetch_overnight_quotes(["MU"], proxy_urls=["p1"])) == {}
+        monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_client_get)
+        pf._bstock_map_cache.clear()
+        pf._bstock_map_ts = 0.0
+        m = asyncio.run(pf.resolve_bstock_map(["AMD", "NVDA", "QQQ", "MU"]))
+        assert m == {"AMD": "AMDBUSDT", "NVDA": "NVDABUSDT"}
+
+    def test_resolve_bstock_map_uses_cache_within_ttl(self, monkeypatch):
+        """24h TTL 内直接命中缓存不再请求 exchangeInfo。"""
+        calls = []
+
+        async def fake_client_get(self, url, **kw):
+            calls.append(url)
+            raise AssertionError("缓存命中不应发起请求")
+
+        pf._bstock_map_cache.clear()
+        pf._bstock_map_cache.update({"AMD": "AMDBUSDT"})
+        pf._bstock_map_ts = time.monotonic()
+        monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_client_get)
+        assert asyncio.run(pf.resolve_bstock_map(["AMD"])) == {"AMD": "AMDBUSDT"}
+        assert calls == []
+
+    def test_fetch_bstock_prices_mid_price(self, monkeypatch):
+        """24hr ticker 取 (bid+ask)/2 中间价；单只失败静默跳过不影响其余。"""
+        async def fake_client_get(self, url, **kw):
+            class R:
+                def json(self):
+                    if "AMDBUSDT" in url:
+                        return {"bidPrice": "620.02", "askPrice": "620.10"}
+                    raise RuntimeError("boom")
+            return R()
+
+        monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_client_get)
+        out = asyncio.run(pf.fetch_bstock_prices({"AMD": "AMDBUSDT", "MU": "MUBUSDT"}))
+        assert out == {"AMD": {"price": pytest.approx(620.06)}}
+
+    def test_fetch_overnight_quotes_degrades_to_empty(self, monkeypatch):
+        """映射为空（全部无对应交易对/接口失败）→ 恒 {}，自然降级定格口径。"""
+        async def fake_resolve(us_symbols):
+            return {}
+        monkeypatch.setattr(pf, "resolve_bstock_map", fake_resolve)
+        assert asyncio.run(pf.fetch_overnight_quotes(["QQQM"])) == {}
+
+    def test_fetch_overnight_quotes_wires_bstocks(self, monkeypatch):
+        """插槽串联：映射非空 → fetch_bstock_prices 结果直出。"""
+        async def fake_resolve(us_symbols):
+            return {"AMD": "AMDBUSDT"}
+
+        async def fake_prices(bmap):
+            assert bmap == {"AMD": "AMDBUSDT"}
+            return {"AMD": {"price": 620.06}}
+
+        monkeypatch.setattr(pf, "resolve_bstock_map", fake_resolve)
+        monkeypatch.setattr(pf, "fetch_bstock_prices", fake_prices)
+        assert asyncio.run(pf.fetch_overnight_quotes(["AMD"])) == {"AMD": {"price": 620.06}}
+
+
+class TestTwelveDataFallback:
+    """twelvedata 接口型兜底（替换东财 ulist）：批量 ≤8 只轮换覆盖、字段映射。"""
+
+    def _mock_quote_response(self, monkeypatch, resp_json):
+        async def fake_client_get(self, url, params=None, **kw):
+            assert url == pf.TWELVEDATA_QUOTE_URL and params.get("apikey") == pf.TWELVEDATA_API_KEY
+
+            class R:
+                def json(self):
+                    return resp_json
+            return R()
+        monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_client_get)
+
+    def test_batch_limit_and_rotation(self, monkeypatch):
+        """15 只持仓：单次批量 ≤8（免费 8 credits/min），轮换指针逐次覆盖全部。"""
+        syms = [f"S{i}" for i in range(15)]
+        self._mock_quote_response(monkeypatch, {
+            s: {"symbol": s, "name": f"n{s}", "close": "10.5", "previous_close": "10.0",
+                "percent_change": "5.0", "high": "11", "low": "9", "datetime": "2026-10-01"}
+            for s in syms})
+
+        async def no_text(url, headers=None, timeout=10.0):
+            return None   # 主源失败触发兜底
+        monkeypatch.setattr(pf, "_get_text", no_text)
+
+        pf._td_fail_streak = 3
+        pf._last_td_used = 0.0
+        pf._td_cursor = 0
+        q = asyncio.run(pf.fetch_quotes(syms, []))
+        assert len(q) == 8                       # 首批 8 只
+        assert set(q) == set(syms[:8])
+        assert 0 < pf._td_cursor < len(syms)     # 指针后移
+        pf._last_td_used = 0.0                   # 重置 60s 节流（测试立即触发第二批）
+        q2 = asyncio.run(pf.fetch_quotes(syms, []))
+        # 第二批 S8..S14 + 回绕 S0（批量恒 8，轮换指针取模环绕覆盖全部持仓）
+        assert set(q2) == set(syms[8:]) | {"S0"}
+
+    def test_field_mapping(self, monkeypatch):
+        """字段映射：close→price、previous_close→pre_close、percent_change→change_pct。"""
+        self._mock_quote_response(monkeypatch, {
+            "AMD": {"symbol": "AMD", "name": "Advanced Micro Devices Inc.",
+                    "close": "615.73", "previous_close": "611.76",
+                    "percent_change": "0.64894250", "high": "619.3",
+                    "low": "601.5", "datetime": "2026-10-01"}})
+
+        async def no_text(url, headers=None, timeout=10.0):
+            return None
+        monkeypatch.setattr(pf, "_get_text", no_text)
+
+        pf._td_fail_streak = 3
+        pf._last_td_used = 0.0
+        pf._td_cursor = 0
+        q = asyncio.run(pf.fetch_quotes(["AMD"], []))
+        assert q["AMD"]["price"] == 615.73
+        assert q["AMD"]["pre_close"] == 611.76
+        assert abs(q["AMD"]["change_pct"] - 0.648942) < 1e-6
+        assert q["AMD"]["currency"] == "USD"
+
+    def test_single_symbol_flat_response(self, monkeypatch):
+        """单 symbol 请求返回扁平对象（非字典包裹），统一解析。"""
+        self._mock_quote_response(monkeypatch, {
+            "symbol": "AMD", "name": "AMD", "close": "615.73",
+            "previous_close": "611.76", "percent_change": "0.64"})
+
+        async def no_text(url, headers=None, timeout=10.0):
+            return None
+        monkeypatch.setattr(pf, "_get_text", no_text)
+
+        pf._td_fail_streak = 3
+        pf._last_td_used = 0.0
+        pf._td_cursor = 0
+        q = asyncio.run(pf.fetch_quotes(["AMD"], []))
+        assert q["AMD"]["price"] == 615.73
 
 
 SINA_PANEL_RAW = (
@@ -827,7 +968,8 @@ class TestMarketPanelYahooSpark:
         assert pf.parse_fx_usdcnh("") == {}
 
     def test_fetch_day_minutes_hsi_tencent_primary(self, monkeypatch):
-        """HSI：腾讯分时 ≥5 点主源直出，不触发 Yahoo fallback；HHMM 拼注入 now 日期。"""
+        """HSI：腾讯分时 ≥5 点主源直出，不触发 Yahoo fallback；HHMM 拼注入 now 日期，
+        统一 -8h 转 UTC（market_ticks 全表同时区口径）。"""
         async def fake_get_text(url, headers=None, timeout=10.0):
             assert "code=hkHSI" in url
             rows = [f"093{i} 2409{i}.5" for i in range(6)]
@@ -839,8 +981,9 @@ class TestMarketPanelYahooSpark:
         monkeypatch.setattr(pf, "_get_text", fake_get_text)
         monkeypatch.setattr(pf, "fetch_yahoo_day_minutes", fake_yahoo)
         pts = asyncio.run(pf.fetch_day_minutes("HSI", now=datetime(2026, 10, 2, 11, 0)))
-        assert pts[:2] == [(datetime(2026, 10, 2, 9, 30), 24090.5),
-                           (datetime(2026, 10, 2, 9, 31), 24091.5)]
+        # 北京 09:30/09:31 → UTC 01:30/01:31
+        assert pts[:2] == [(datetime(2026, 10, 2, 1, 30), 24090.5),
+                           (datetime(2026, 10, 2, 1, 31), 24091.5)]
         assert len(pts) == 6
 
     def test_fetch_day_minutes_hsi_fallback_yahoo(self, monkeypatch):

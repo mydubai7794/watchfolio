@@ -17,6 +17,7 @@ import json
 import logging
 import re
 import time
+from decimal import Decimal
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from urllib.parse import quote
 
@@ -39,8 +40,15 @@ SINA_US_URL = "https://hq.sinajs.cn/list={symbols}"
 SINA_HEADERS = {"Referer": "https://finance.sina.com.cn"}
 SINA_FX_URL = "https://hq.sinajs.cn/list=fx_susdhkd"
 SINA_PANEL_URL = "https://hq.sinajs.cn/list=DINIW,hf_OIL,hf_GC,fx_susdcnh"
-EM_ULIST_URL = "http://push2.eastmoney.com/api/qt/ulist.np/get"
-EM_FIELDS = "f2,f3,f12,f13,f14,f18,f124"
+# 币安 bStocks（代币化美股）夜盘代理价：公共行情免 key，美股闭市时段补全走势，
+# 中间价口径与底层夜盘价偏差实测 0.02%-0.1%（详见《美股夜盘数据源研报.md》）
+BINANCE_EXCHANGE_INFO_URL = "https://api.binance.com/api/v3/exchangeInfo"
+BINANCE_TICKER_URL = "https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
+# twelvedata 接口型美股/港股行情兜底（有 key 不 ban IP；免费 8 credits/min，
+# 批量请求 credits=symbol 数，故单次批量上限 8 并轮换指针覆盖全部持仓）
+TWELVEDATA_QUOTE_URL = "https://api.twelvedata.com/quote"
+TWELVEDATA_API_KEY = "***REMOVED***"
+TWELVEDATA_BATCH = 8   # 单次兜底批量上限（对齐免费 8 credits/min 限额）
 # Yahoo v8 chart 当日分时（5m K 线含盘前盘后）：range=5d 拉取后解析层只取最后一个
 # UTC 自然日——盘中即当日实时分时、闭市即上一交易时段全程；不用 range=1d 是因为
 # 实测 Yahoo 期货/美元指数在每日美东凌晨存在 1d 空窗 bug（BZ=F 返回 200 但 0 点，
@@ -80,21 +88,18 @@ FT_FUND_QUERY = (
 FT_FUND_VARS = {"f": "31402", "s": "2B", "c": "HK", "l": "en_GB"}
 FX_FALLBACK = 7.80
 
-# 东财兜底市场号（105=NASDAQ 106=NYSE 107=AMEX 116=港股），未知美股符号默认 105
-EM_MARKET_MAP = {
-    "MU": "105", "SKHY": "105", "QQQ": "105", "QQQM": "105", "AMD": "105",
-    "AMKR": "105", "SMH": "105", "NVDA": "105", "LITE": "105",
-    "BABA": "106", "PCG": "106", "F": "106",
-    "SPYM": "107", "DRAM": "107", "DISK": "107",
-}
-EM_DEFAULT_MARKET = "105"
-EM_HK_MARKET = "116"  # 东财港股市场号（secid 格式 "116.03152"）
+# twelvedata 兜底节流：主源连续失败>=3轮才启用，且间隔>=60s；批量上限 8 只/次，
+# 轮换指针逐次覆盖全部持仓（免费 8 credits/min，超限会 429）
+_TD_FAIL_THRESHOLD = 3
+_TD_MIN_INTERVAL_SEC = 60.0
+_td_fail_streak = 0
+_last_td_used = 0.0
+_td_cursor = 0   # 兜底批量轮换指针（全部 symbol 列表中的起始下标）
 
-# 东财兜底节流：主源连续失败>=3轮才启用，且间隔>=60s
-_EM_FAIL_THRESHOLD = 3
-_EM_MIN_INTERVAL_SEC = 60.0
-_em_fail_streak = 0
-_last_em_used = 0.0
+# 币安 bStocks 映射缓存：{美股代码: 币安交易对}，exchangeInfo 低频刷新（24h TTL）
+_BSTOCK_MAP_TTL_SEC = 86400.0
+_bstock_map_cache: dict[str, str] = {}
+_bstock_map_ts = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -743,7 +748,7 @@ async def fetch_quotes(us_symbols: list[str], hk_symbols: list[str],
     proxy_urls 仅用于新浪扩展时段请求的直连失败重试（腾讯主源仍直连）；
     返回 {symbol: quote}，quote 含 price/pre_close/ext_price/ext_time 等。
     """
-    global _em_fail_streak, _last_em_used
+    global _td_fail_streak, _last_td_used, _td_cursor
     all_symbols = list(us_symbols) + list(hk_symbols)
     if not all_symbols:
         return {}
@@ -757,9 +762,9 @@ async def fetch_quotes(us_symbols: list[str], hk_symbols: list[str],
     quotes: dict[str, dict] = {}
     if raw:
         quotes = parse_tencent_quotes(raw, all_symbols, prefixes)
-        _em_fail_streak = 0
+        _td_fail_streak = 0
     else:
-        _em_fail_streak += 1
+        _td_fail_streak += 1
 
     # 扩展时段合并新浪盘前盘后价（仅美股；港股无扩展时段概念）。
     # closed 的晚间/凌晨窗口也拉取：新浪夜间返回当日最后盘后价，避免夜盘价格"倒退"
@@ -776,32 +781,40 @@ async def fetch_quotes(us_symbols: list[str], hk_symbols: list[str],
                     q["ext_price"] = e["ext_price"]
                     q["ext_time"] = e["ext_time"]
 
-    # 东财兜底：主源整体失败且连续>=3轮、距上次>=60s（美股/港股混合请求）
-    if not quotes and _em_fail_streak >= _EM_FAIL_THRESHOLD and time.monotonic() - _last_em_used >= _EM_MIN_INTERVAL_SEC:
-        _last_em_used = time.monotonic()
+    # twelvedata 兜底：主源整体失败且连续>=3轮、距上次>=60s；批量上限 8 只
+    # （免费 8 credits/min），轮换指针逐次覆盖全部持仓（美股/港股混合）
+    if not quotes and _td_fail_streak >= _TD_FAIL_THRESHOLD and time.monotonic() - _last_td_used >= _TD_MIN_INTERVAL_SEC:
+        _last_td_used = time.monotonic()
         hk_set = set(hk_symbols)
-        secids = ",".join(
-            f"{EM_HK_MARKET}.{s}" if s in hk_set else f"{EM_MARKET_MAP.get(s, EM_DEFAULT_MARKET)}.{s}"
-            for s in all_symbols
-        )
+        batch = [all_symbols[i % len(all_symbols)]
+                 for i in range(_td_cursor, _td_cursor + min(TWELVEDATA_BATCH, len(all_symbols)))]
+        _td_cursor = (_td_cursor + len(batch)) % len(all_symbols)
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(EM_ULIST_URL, params={
-                    "secids": secids, "fields": EM_FIELDS, "fltt": "2", "invt": "2"})
+                resp = await client.get(TWELVEDATA_QUOTE_URL, params={
+                    "symbol": ",".join(batch), "apikey": TWELVEDATA_API_KEY})
                 data = resp.json()
-                for item in (data.get("data") or {}).get("diff") or []:
-                    sym = item.get("f12")
-                    if sym in prefixes:
+                # 批量返回 {symbol: {...}}；单 symbol 返回扁平对象（统一为字典形态）
+                if isinstance(data, dict) and "symbol" in data and len(batch) == 1:
+                    items = {str(data.get("symbol") or batch[0]): data}
+                else:
+                    items = data if isinstance(data, dict) else {}
+                batch_set = set(batch)
+                for sym, item in items.items():
+                    sym = str(sym).split(":")[0]
+                    if sym in batch_set and item and _f(item.get("close")) > 0:
                         quotes[sym] = {
-                            "symbol": sym, "name": item.get("f14", ""),
-                            "price": _f(item.get("f2")), "pre_close": _f(item.get("f18")),
-                            "change_pct": _f(item.get("f3")), "high": 0.0, "low": 0.0,
-                            "currency": "HKD" if sym in hk_set else "USD", "quote_time": "",
+                            "symbol": sym, "name": item.get("name", ""),
+                            "price": _f(item.get("close")), "pre_close": _f(item.get("previous_close")),
+                            "change_pct": _f(item.get("percent_change")),
+                            "high": _f(item.get("high")), "low": _f(item.get("low")),
+                            "currency": "HKD" if sym in hk_set else "USD",
+                            "quote_time": item.get("datetime", ""),
                             "ext_price": 0.0, "ext_time": "",
                         }
-                logger.info("东财兜底: %d/%d", len(quotes), len(all_symbols))
+                logger.info("twelvedata 兜底: %d/%d (本批 %s)", len(quotes), len(all_symbols), batch)
         except Exception as e:
-            logger.warning("东财兜底失败: %s", e)
+            logger.warning("twelvedata 兜底失败: %s", e)
 
     return quotes
 
@@ -811,17 +824,69 @@ async def fetch_us_quotes(symbols: list[str], session: str | None = None) -> dic
     return await fetch_quotes(symbols, [], session)
 
 
+async def resolve_bstock_map(us_symbols: list[str]) -> dict[str, str]:
+    """解析美股代码 → 币安 bStocks 交易对映射（如 AMD→AMDBUSDT）。
+
+    exchangeInfo 全量拉取（weight 10）后过滤 status=TRADING 的 USDT 对，
+    规则：代码+"B"+"USDT" 精确匹配；结果缓存 24h（映射关系极少变化）。
+    失败返回上次缓存或空 dict（不写缓存，下轮重试）；无对应币安对的
+    持仓（如 QQQM/PCG/AMKR/F）自然缺省，夜盘维持定格口径。
+    """
+    global _bstock_map_cache, _bstock_map_ts
+    now_mono = time.monotonic()
+    if _bstock_map_cache and now_mono - _bstock_map_ts < _BSTOCK_MAP_TTL_SEC:
+        return {s: p for s, p in _bstock_map_cache.items() if s in set(us_symbols)}
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(BINANCE_EXCHANGE_INFO_URL)
+            data = resp.json()
+        pairs = {s["symbol"] for s in data.get("symbols", [])
+                 if s.get("status") == "TRADING" and s.get("symbol", "").endswith("USDT")}
+        mapping = {s: s + "BUSDT" for s in us_symbols if s + "BUSDT" in pairs}
+        if mapping:
+            _bstock_map_cache, _bstock_map_ts = mapping, now_mono
+        return mapping
+    except Exception as e:
+        logger.warning("币安 exchangeInfo 获取失败(用上次缓存): %s", e)
+        return {s: p for s, p in _bstock_map_cache.items() if s in set(us_symbols)}
+
+
+async def fetch_bstock_prices(bmap: dict[str, str]) -> dict[str, dict]:
+    """逐只拉币安 24hr ticker，取买卖一中间价 (bid+ask)/2（研报 4.3 建议的稳健口径）。
+
+    约 15 只=30 weight/轮，远低于 1200 weight/min/IP；单只失败/停牌跳过不致命。
+    返回 {美股代码: {"price": 中间价}}。
+    """
+    out: dict[str, dict] = {}
+
+    async def _one(sym: str, pair: str) -> None:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(BINANCE_TICKER_URL.format(symbol=pair))
+                t = resp.json()
+            mid = (Decimal(str(t.get("bidPrice", "0"))) + Decimal(str(t.get("askPrice", "0")))) / 2
+            if mid > 0:
+                out[sym] = {"price": float(mid)}
+        except Exception:
+            pass   # 单只失败静默跳过（下轮再试），不影响其余标的
+
+    await asyncio.gather(*(_one(s, p) for s, p in bmap.items()))
+    return out
+
+
 async def fetch_overnight_quotes(us_symbols: list[str],
                                  proxy_urls: list[str] | None = None) -> dict[str, dict]:
-    """夜盘 ATS 实时行情抓取（美东 20:00-04:00 时段专用源插槽）。
+    """夜盘/周末美股代理价抓取（币安 bStocks，7×24 有价）。
 
-    当前恒返回 {}：美股夜盘撮合（ATS 盘后夜间时段）行情无稳定免费源（腾讯/新浪/
-    东财/Yahoo v8 均实测不提供），20:00-04:00 期间以 19:59 盘后价定格展示；未来
-    接入夜盘源（如 IBKR/Polygon 等）时在此返回 {symbol: {"price": 最新价}}，
-    _portfolio_loop 检测到非空结果会合并为实时价，结果为空自然降级定格口径。
-    proxy_urls 预留：未来夜盘源若需代理池透传（取法仿 _get_text_resilient）。
+    美东闭市时段（夜盘 20:00-04:00 + 周末）以 bStocks 中间价近似夜盘价
+    （实测偏差 0.02%-0.1%，用户允许误差），_portfolio_loop 合并后组合总值
+    24h 曲线连续；无对应交易对/拉取失败的标的自然缺省，维持 19:59 盘后
+    价定格口径。proxy_urls 预留未用（币安境外直连）。
     """
-    return {}
+    bmap = await resolve_bstock_map(us_symbols)
+    if not bmap:
+        return {}
+    return await fetch_bstock_prices(bmap)
 
 
 async def fetch_fx_usdhkd(proxy_urls: list[str] | None = None) -> tuple[float, bool]:
@@ -942,13 +1007,14 @@ async def fetch_yahoo_day_minutes(symbol: str, proxy_urls: list[str] | None = No
 
 async def fetch_day_minutes(key: str, proxy_urls: list[str] | None = None,
                             now: datetime | None = None) -> list[tuple[datetime, float]]:
-    """看板标的当日分时统一入口，返回 [(naive ts, price)]（数据源原时区）。
+    """看板标的当日分时统一入口，返回 [(naive UTC ts, price)]。
 
-    - HSI：腾讯 minute 主源（盘中 1 分钟粒度最优）；点数 <5（闭市残留整批丢弃/
-      接口失败）fallback Yahoo ^HSI 分时；
+    - HSI：腾讯 minute 主源（盘中 1 分钟粒度最优；腾讯返回北京时区 HHMM，
+      统一 -8h 转 UTC 入库，与 Yahoo 分时/主价快照同一时区口径）；点数 <5
+      （闭市残留整批丢弃/接口失败）fallback Yahoo ^HSI 分时；
     - 其余标的：Yahoo 1d/5m 分时（QQQ/SPY/SOXX 闭市返回上一时段全程、BZ/GC 电子
       盘近全天、USDCNH/DXY/美债/VIX 近全天；实测腾讯 minute 不支持 hf_ 期货代码、
-      美股闭市仅 1 点）。
+      美股闭市仅 1 点），Yahoo epoch 转换已是 UTC 直用。
     key 无路由返回 []。now 透传 tencent_minute_points（腾讯 HHMM 拼日期的基准，
     默认当前时刻，测试可注入）。
     """
@@ -956,7 +1022,8 @@ async def fetch_day_minutes(key: str, proxy_urls: list[str] | None = None,
         raw = await _get_text(TENCENT_MINUTE_URL.format(code=TENCENT_MINUTE_CODES[key]))
         pts = tencent_minute_points(parse_tencent_minute(raw or ""), now=now)
         if len(pts) >= 5:
-            return pts
+            # 腾讯分钟线为北京时区：统一转 UTC（market_ticks 全表同一时区口径）
+            return [(ts - timedelta(hours=8), p) for ts, p in pts]
         return (await fetch_yahoo_day_minutes("^HSI", proxy_urls)).get("minutes", [])
     sym = YAHOO_DAY_SYMBOLS.get(key)
     if not sym:
