@@ -2,104 +2,128 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>电力交易平台</title>
 <style>
+/* ================= Fintech White =================
+   页面底 #F5F5F7 / 居中纯白卡片(无描边+轻阴影)
+   彩色仅两处：错误语义色(--up)、主操作(--accent)
+   圆角：卡片 16 / 胶囊按钮 999 / 输入框 12
+   间距只用 8/12/16/24/32 */
+:root {
+  --bg: #F5F5F7;
+  --card: #FFFFFF;
+  --txt: #111114; --txt2: #8A8A8E; --txt3: #C7C7CC;
+  --up: #E5443B; --down: #00A870; --accent: #2A6CF0;
+  --shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
 * { margin: 0; padding: 0; box-sizing: border-box; }
-
+html { -webkit-text-size-adjust: 100%; }
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  background: linear-gradient(135deg, #0f2027 0%, #203a43 50%, #2c5364 100%);
-  color: #e0e0e0;
+  background: var(--bg);
+  color: var(--txt);
+  font-size: 15px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif;
   min-height: 100vh;
   display: flex;
   align-items: center;
   justify-content: center;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
 }
 
 .login-container {
-  width: 100%;
-  max-width: 380px;
-  padding: 20px;
+  width: 92%;
+  max-width: 360px;
 }
 
 .login-card {
-  background: rgba(22, 33, 62, 0.85);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(233, 69, 96, 0.3);
-  border-radius: 12px;
+  background: var(--card);
+  border-radius: 16px;
   padding: 40px 32px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  box-shadow: var(--shadow);
 }
 
 .login-title {
   text-align: center;
-  font-size: 24px;
-  font-weight: bold;
-  color: #e94560;
-  margin-bottom: 8px;
-  letter-spacing: 2px;
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.2;
 }
 
 .login-subtitle {
   text-align: center;
-  font-size: 13px;
-  color: #888;
-  margin-bottom: 32px;
+  font-size: 12px;
+  color: var(--txt2);
+  margin-top: 4px;
+  margin-bottom: 24px;
 }
 
-.form-group {
-  margin-bottom: 20px;
-}
+.form-group { margin-bottom: 16px; }
 
 .form-label {
   display: block;
-  font-size: 13px;
-  color: #aaa;
+  font-size: 12px;
+  color: var(--txt2);
   margin-bottom: 8px;
 }
 
+/* 输入框：浅灰底、圆角 12、无描边，focus 蓝色 focus ring */
 .form-input {
   width: 100%;
-  padding: 12px 14px;
-  background: rgba(26, 26, 46, 0.8);
-  border: 1px solid #3a3a5a;
-  border-radius: 6px;
-  color: #e0e0e0;
-  font-size: 14px;
+  padding: 10px 14px;
+  background: var(--bg);
+  border: none;
+  border-radius: 12px;
+  color: var(--txt);
+  font-size: 15px;
+  font-family: inherit;
   outline: none;
-  transition: border-color 0.2s, box-shadow 0.2s;
+  transition: box-shadow 0.2s;
 }
 
 .form-input:focus {
-  border-color: #e94560;
-  box-shadow: 0 0 0 3px rgba(233, 69, 96, 0.15);
+  box-shadow: 0 0 0 2px rgba(42,108,240,.25);
 }
 
-.form-input::placeholder {
-  color: #555;
+.form-input::placeholder { color: var(--txt3); }
+
+/* 验证码行：输入框 + 点击刷新的图形验证码 */
+.captcha-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+.captcha-row .form-input { flex: 1; min-width: 0; }
+#captchaImg {
+  height: 40px;
+  border-radius: 12px;
+  cursor: pointer;
+  flex: none;
+  background: var(--bg);
 }
 
 .login-btn {
   width: 100%;
   padding: 12px;
-  background: linear-gradient(90deg, #e94560, #c73650);
+  background: var(--accent);
   border: none;
-  border-radius: 6px;
+  border-radius: 999px;
   color: #fff;
   font-size: 15px;
-  font-weight: 600;
+  font-weight: 500;
   cursor: pointer;
   transition: opacity 0.2s, transform 0.1s;
-  letter-spacing: 4px;
+  margin-top: 8px;
 }
 
-.login-btn:hover { opacity: 0.9; }
+.login-btn:hover { opacity: 0.85; }
 .login-btn:active { transform: scale(0.98); }
 .login-btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
+/* 错误提示：涨跌语义红 */
 .error-msg {
-  color: #e94560;
+  color: var(--up);
   font-size: 13px;
   text-align: center;
   min-height: 20px;
@@ -108,9 +132,13 @@ body {
 
 .footer-text {
   text-align: center;
-  font-size: 12px;
-  color: #555;
+  font-size: 11px;
+  color: var(--txt3);
   margin-top: 24px;
+}
+
+@media (max-width: 768px) {
+  .login-card { padding: 32px 20px; }
 }
 </style>
 </head>
@@ -148,11 +176,10 @@ body {
 
       <div class="form-group">
         <label class="form-label" for="captcha">验证码</label>
-        <div style="display:flex;gap:10px;align-items:center">
+        <div class="captcha-row">
           <input type="text" id="captcha" class="form-input" placeholder="计算结果" required
-                 style="flex:1" autocomplete="off">
-          <img id="captchaImg" alt="验证码" title="点击刷新"
-               style="height:40px;border-radius:4px;cursor:pointer;background:#1a1a2e">
+                 autocomplete="off">
+          <img id="captchaImg" alt="验证码" title="点击刷新">
         </div>
       </div>
 
