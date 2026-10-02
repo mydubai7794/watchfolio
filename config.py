@@ -1,12 +1,12 @@
 """全局配置"""
 import os
 
-# MySQL 连接
-DB_HOST = os.getenv("DB_HOST", "***REMOVED***")
-DB_PORT = int(os.getenv("DB_PORT", "3914"))
-DB_USER = os.getenv("DB_USER", "*REMOVED*")
-DB_PASS = os.getenv("DB_PASS", "***REMOVED***")
-DB_NAME = os.getenv("DB_NAME", "qdii")
+# MySQL 连接（敏感项优先读 QDII_ 前缀环境变量，缺省回退现值保持部署零影响）
+DB_HOST = os.getenv("QDII_DB_HOST", "***REMOVED***")
+DB_PORT = int(os.getenv("QDII_DB_PORT", "3914"))
+DB_USER = os.getenv("QDII_DB_USER", "*REMOVED*")
+DB_PASS = os.getenv("QDII_DB_PASS", "***REMOVED***")
+DB_NAME = os.getenv("QDII_DB_NAME", "qdii")
 DB_POOL_SIZE = 5
 
 # 得分模型默认权重

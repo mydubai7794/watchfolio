@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<link rel="icon" href="data:,">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%232A6CF0'/%3E%3Cpath d='M28 66 V46' stroke='%23fff' stroke-width='5' stroke-linecap='round'/%3E%3Crect x='21' y='50' width='14' height='14' rx='3' fill='%23fff'/%3E%3Cpath d='M52 58 V34' stroke='%23fff' stroke-width='5' stroke-linecap='round'/%3E%3Crect x='45' y='40' width='14' height='14' rx='3' fill='%23fff'/%3E%3Cpath d='M76 46 V20' stroke='%23fff' stroke-width='5' stroke-linecap='round'/%3E%3Crect x='69' y='26' width='14' height='16' rx='3' fill='%23fff'/%3E%3C/svg%3E">
 <title>我的持仓</title>
 <style>
 /* ================= Fintech White =================
@@ -74,7 +74,7 @@ button { font-family: inherit; }
 /* ---- 市场看板：桌面 5 列 / 平板 3 列 / 移动 2 列大格 ---- */
 .market-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
 .mkt-card { background: var(--bg); border-radius: 12px; padding: 12px;
-  display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  display: flex; flex-direction: column; gap: 6px; min-width: 0; position: relative; }
 .mkt-head { display: flex; justify-content: space-between; align-items: baseline; gap: 4px; }
 .mkt-name { font-size: 12px; color: var(--txt2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mkt-note { font-style: normal; font-size: 11px; color: var(--txt3); }
@@ -83,6 +83,12 @@ button { font-family: inherit; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mkt-price em { font-style: normal; font-size: 11px; font-weight: 400; color: var(--txt3); margin-left: 2px; }
 .mkt-spark { width: 100%; height: 36px; display: block; }
+/* 分时悬浮浮层：时间(北京时间)+价格，卡片内绝对定位防溢出 */
+.mkt-tip { position: absolute; display: none; transform: translateX(-50%);
+  background: var(--card); border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,.12);
+  padding: 3px 8px; pointer-events: none; z-index: 4; white-space: nowrap; }
+.mkt-tip i { font-style: normal; font-size: 11px; color: var(--txt2); margin-right: 6px; }
+.mkt-tip b { font-size: 12px; font-weight: 500; color: var(--txt); }
 
 /* ---- 图表白卡：tab 胶囊组 + 信息条 + canvas ---- */
 .seg { display: inline-flex; background: var(--bg); border-radius: 999px; padding: 3px; gap: 2px;
@@ -503,33 +509,68 @@ function renderMarket(d) {
         <span class="mkt-pct ${cls(m.change_pct)}">${m.change_pct===null||m.change_pct===undefined?'':sign(m.change_pct)+fmt(m.change_pct)+'%'}</span></div>
       <div class="mkt-price ${cls(m.change_pct)}">${m.price==null?'--':fmt(m.price, mktDecimals(m))}${mktSuffix(m)}</div>
       <canvas class="mkt-spark" ${hasSpark?'':'style="display:none"'}></canvas>`;
+    const tip = document.createElement('div');
+    tip.className = 'mkt-tip';
+    card.appendChild(tip);
     box.appendChild(card);
-    if (hasSpark) drawSpark(card.querySelector('canvas'), m.spark, (m.change_pct == null) || m.change_pct >= 0);
+    if (hasSpark) drawSpark(card.querySelector('canvas'), m.spark,
+      (m.change_pct == null) || m.change_pct >= 0, tip, mktDecimals(m));
   });
 }
-// sparkline：2px 折线 + 15%→0 渐变填充、无轴
-function drawSpark(cv, data, up) {
+// sparkline：2px 折线 + 15%→0 渐变填充 + 悬浮时间/价格浮层。
+// data 兼容两种格式：库内分时 [ts,price] 对（ts 为 UTC naive 字符串，浮层显示
+// 北京时间）与 fx_spark 纯价格序列（USDHKD 近5日日线，无时间戳只显价格）
+function drawSpark(cv, data, up, tip, dec) {
+  const pts = data.map(d => Array.isArray(d) ? {t: d[0] || null, v: +d[1]} : {t: null, v: +d});
   const ctx = setupCanvas(cv, 36);
   const W = cv._cssW, H = cv._cssH;
-  ctx.clearRect(0, 0, W, H);
   const color = up ? UP_COLOR : DOWN_COLOR;
-  const mn = Math.min(...data), mx = Math.max(...data), rg = (mx - mn) || 1;
+  const mn = Math.min(...pts.map(p => p.v)), mx = Math.max(...pts.map(p => p.v)), rg = (mx - mn) || 1;
   const padV = 5;
-  const px = i => 2 + (W - 4) * i / (data.length - 1);
+  const px = i => 2 + (W - 4) * i / (pts.length - 1);
   const py = v => padV + (H - 2 * padV) * (1 - (v - mn) / rg);
   // 渐变填充：线色 15% 透明 → 全透明
   const grad = ctx.createLinearGradient(0, 0, 0, H);
   grad.addColorStop(0, up ? 'rgba(229,68,59,.15)' : 'rgba(0,168,112,.15)');
   grad.addColorStop(1, up ? 'rgba(229,68,59,0)' : 'rgba(0,168,112,0)');
-  ctx.beginPath();
-  data.forEach((v, i) => i ? ctx.lineTo(px(i), py(v)) : ctx.moveTo(px(i), py(v)));
-  ctx.lineTo(px(data.length - 1), H); ctx.lineTo(px(0), H); ctx.closePath();
-  ctx.fillStyle = grad; ctx.fill();
-  // 折线 2px
-  ctx.beginPath();
-  data.forEach((v, i) => i ? ctx.lineTo(px(i), py(v)) : ctx.moveTo(px(i), py(v)));
-  ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
-  ctx.stroke();
+  const line = () => {
+    ctx.beginPath();
+    pts.forEach((p, i) => i ? ctx.lineTo(px(i), py(p.v)) : ctx.moveTo(px(i), py(p.v)));
+  };
+  function paint(hover) {
+    ctx.clearRect(0, 0, W, H);
+    line();
+    ctx.lineTo(px(pts.length - 1), H); ctx.lineTo(px(0), H); ctx.closePath();
+    ctx.fillStyle = grad; ctx.fill();
+    // 折线 2px
+    line();
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    ctx.stroke();
+    if (hover != null) {   // 悬浮指示：淡竖线 + 空心圆点
+      const x = px(hover), y = py(pts[hover].v);
+      ctx.strokeStyle = 'rgba(17,17,20,.22)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+      ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff'; ctx.fill();
+      ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+    }
+  }
+  paint(null);
+  // 悬浮交互：就近吸附数据点，浮层显示北京时间 + 价格（各标的沿用看板小数位）
+  cv.onmousemove = e => {
+    const i = Math.max(0, Math.min(pts.length - 1,
+      Math.round((Math.min(Math.max(e.offsetX, 2), W - 2) - 2) / (W - 4) * (pts.length - 1))));
+    paint(i);
+    const p = pts[i];
+    const t = p.t ? new Date(p.t.replace(' ', 'T') + 'Z')
+      .toLocaleString('zh-CN', {month: '2-digit', day: '2-digit', hour: '2-digit',
+                                minute: '2-digit', hour12: false}) : '';
+    tip.innerHTML = (t ? '<i>' + t + '</i>' : '') + '<b>' + fmt(p.v, dec) + '</b>';
+    tip.style.display = 'block';
+    tip.style.left = Math.max(50, Math.min(cv.offsetWidth - 50, px(i))) + 'px';
+    tip.style.bottom = cv.offsetTop + 2 + 'px';
+  };
+  cv.onmouseleave = () => { paint(null); tip.style.display = 'none'; };
 }
 
 // ===== 持仓表头排序（8 键 + null 沉底） =====
@@ -567,7 +608,7 @@ function nightBadge(p, session, night) {
   if (p.overnight_change_pct == null || p.overnight_change_pct === 0) return '';
   const inc = p.overnight_change_pct;
   const tone = inc > 0 ? ' pill-up' : (inc < 0 ? ' pill-down' : '');
-  return '<span class="pill tag' + tone + '">收' + sign(inc) + fmt(inc, 1) + '%</span>';
+  return '<span class="pill tag' + tone + '">收' + sign(inc) + fmt(inc, 2) + '%</span>';
 }
 
 // night_session 归一：兼容旧布尔与新结构 {active,window,source,note}

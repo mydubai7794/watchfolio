@@ -1,7 +1,8 @@
 """HSBC 成交邮件 → 解析 → 幂等落交易表 → 自动更新持仓与现金。
 
-链路：QQ 邮箱 IMAP 拉取 HSBC 成交通知邮件（只拉最近 1 天）→ parse_hsbc_trade
-解析关键字段（纯函数，繁体中文/全半角冒号/空格差异容错）→ apply_trade 幂等
+链路：QQ 邮箱 IMAP 拉取 HSBC 成交通知邮件（回溯窗口按上次成功轮询时刻
+自适应放大，停机多久补多久，宁多勿漏）→ parse_hsbc_trade 解析关键字段
+（纯函数，繁体中文/全半角冒号/空格差异容错）→ apply_trade 幂等
 编排：先插 trade_records（幂等锁）再更新 holdings 数量与 cash_accounts 余额。
 """
 import asyncio
@@ -9,6 +10,7 @@ import email
 import html as html_mod
 import imaplib
 import logging
+import os
 import re
 from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
@@ -23,11 +25,15 @@ logger = logging.getLogger(__name__)
 IMAP_HOST = "imap.qq.com"
 IMAP_PORT = 993
 IMAP_USER = "***REMOVED***"
-IMAP_PASSWORD = "***REMOVED***"
+# IMAP 授权码属敏感凭据：优先从环境变量读取，缺省回退现值保持部署零影响
+IMAP_PASSWORD = os.getenv("QDII_IMAP_PASSWORD", "***REMOVED***")
 HSBC_SENDER = "HSBC@notification.hsbc.com.hk"
 
 POLL_INTERVAL_SEC = 1800  # 轮询间隔 30 分钟
 FIRST_DELAY_SEC = 60      # 启动后首跑延迟
+
+# 上次成功轮询时刻的持久化 key（database.sys_config），停机恢复后据此放大回溯窗口
+LAST_POLL_KEY = "email_last_poll"
 
 # IMAP SEARCH SINCE 日期的英文月份缩写（%b 受 locale 影响，手动映射保证英文）
 _MONTHS_EN = ("", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
@@ -196,9 +202,11 @@ def _extract_text(msg) -> str:
 
 
 def fetch_hsbc_emails(days: int = 1) -> list[dict]:
-    """拉取最近 N 天 HSBC 成交邮件 → [{message_id, date, text}]；异常返回 []。
+    """拉取最近 N 天 HSBC 成交邮件 → [{message_id, date, text}]。
 
     只读操作（SEARCH + FETCH），不做任何标记/删除。
+    拉取失败（登录/网络/协议异常）抛出异常而非返回 []——调用方需区分
+    「无新邮件」与「拉取失败」：前者才允许推进轮询水位，后者保持水位下轮重试。
     """
     out: list[dict] = []
     imap = None
@@ -217,7 +225,8 @@ def fetch_hsbc_emails(days: int = 1) -> list[dict]:
             if status != "OK" or not msg_data or msg_data[0] is None:
                 continue
             msg = email.message_from_bytes(msg_data[0][1])
-            # 客户端日期过滤兜底（QQ IMAP 忽略 SEARCH SINCE，见 _is_recent 注释）
+            # 客户端日期过滤兜底（QQ IMAP 忽略 SEARCH SINCE，见 _is_recent 注释）；
+            # 窗口与 SEARCH SINCE 同用 days 参数，停机恢复放大时两处同步放宽
             dt = _parse_email_date(msg.get("Date", ""))
             if not _is_recent(dt, days):
                 continue
@@ -229,7 +238,7 @@ def fetch_hsbc_emails(days: int = 1) -> list[dict]:
         return out
     except Exception as e:
         logger.error("拉取 HSBC 邮件失败: %s", e)
-        return out
+        raise
     finally:
         if imap is not None:
             try:
@@ -330,9 +339,46 @@ async def apply_trade(trade: dict) -> dict:
                 "symbol": symbol}
 
 
+def _compute_backtrack_days(last_poll: str | None, default_days: int = 1) -> int:
+    """按上次成功轮询时刻计算本次回溯天数：宁多勿漏。
+
+    停机超 1 天后恢复时（如停 3 天）回溯 gap_days+1 天（=4），多拉的旧邮件
+    由 apply_trade 幂等（message_id/trade_no 去重）兜住，不怕重复处理。
+    last_poll 缺失或格式异常时回退 default_days（首跑/配置损坏的保守窗口）。
+    """
+    if not last_poll:
+        return default_days
+    try:
+        last = datetime.fromisoformat(last_poll)
+    except (TypeError, ValueError):
+        logger.warning("last_poll 配置值无法解析: %r，回退 %d 天窗口", last_poll, default_days)
+        return default_days
+    gap_days = (datetime.now() - last).days
+    return max(default_days, gap_days + 1)
+
+
 async def poll_once(days: int = 1) -> list[dict]:
-    """单轮处理：拉邮件 → 逐封解析 → 幂等应用，返回各封处理结果（供循环与测试）。"""
-    mails = await asyncio.to_thread(fetch_hsbc_emails, days)
+    """单轮处理：自适应回溯拉邮件 → 逐封解析 → 幂等应用，返回各封处理结果。
+
+    回溯天数 = max(days, (now - 上次成功轮询).days + 1)，修复停机超 1 天
+    成交邮件永久漏账的问题。仅当整轮无异常完成（即使 0 封新邮件）才把
+    last_poll 推进到当前时刻；拉取/解析链路异常时保持旧水位，下轮重试。
+    """
+    # 读取上次成功轮询时刻（读取失败不阻断本轮，回退保守窗口）
+    try:
+        last_poll = await db.get_config(LAST_POLL_KEY)
+    except Exception as e:
+        logger.warning("读取 %s 失败，回退 %d 天窗口: %s", LAST_POLL_KEY, days, e)
+        last_poll = None
+    backtrack_days = _compute_backtrack_days(last_poll, days)
+
+    try:
+        mails = await asyncio.to_thread(fetch_hsbc_emails, backtrack_days)
+    except Exception as e:
+        # 拉取失败：不推进水位，下轮以放大窗口重拉（幂等去重不怕重复）
+        logger.error("本轮 HSBC 邮件拉取失败，保持轮询水位不推进: %s", e)
+        return []
+
     results: list[dict] = []
     for mail in mails:
         trade = parse_hsbc_trade(mail.get("text", ""))
@@ -345,4 +391,8 @@ async def poll_once(days: int = 1) -> list[dict]:
         result = await apply_trade(trade)
         logger.info("HSBC 交易处理: %s", result)
         results.append(result)
+
+    # 整轮无异常完成才推进水位（回溯窗口随时间自动收敛回 1 天）
+    await db.set_config(LAST_POLL_KEY, datetime.now().isoformat(timespec="seconds"),
+                        remark="HSBC 成交邮件上次成功轮询时刻")
     return results

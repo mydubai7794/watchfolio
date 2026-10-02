@@ -30,7 +30,7 @@
 |----|------|------|------|
 | 腾讯 qt.gtimg.cn | A股ETF/美股/港股/看板混排（总线合并） | 直连 | 总线 3s 节流（监控 5s 驱动） |
 | 新浪 | 期指/外汇/盘前盘后扩展价 | 直连 403→代理容错 | 随轮 |
-| Yahoo v8 | 基金NAV兜底/美债VIX/spark | 代理优先→直连 | 60s + backfill 冷却 4h/重试 5min |
+| Yahoo v8 | 基金NAV兜底/美债VIX主价/USDHKD fx_spark | 代理优先→直连 | 三项主价 backfill 节奏（4h 冷却/5min 重试）+ fx_spark 低频 |
 | FT GraphQL | 基金 NAV 主源 | 直连 | 60s |
 | twelvedata | 美股兜底 + 冷启动锚点恢复（open/close） | 直连 | 8 credits/min，60s 节流 |
 | 加密市场数据源 | 收盘→开盘全段美股活价 | **直连可用**（data-api.binance.vision 镜像） | 闭市 60s（bookTicker 批量 weight 1） |
@@ -39,16 +39,24 @@
 ## 关键口径契约（改动前必读）
 
 - **一场口径三层**（恒等式）：`day_pnl(实时累计) = close_pnl(收盘定格) + overnight_pnl(夜盘增量)`；
-  场基准 base=当日 9:30 开盘（regular 时段腾讯 f[4] 每轮刷新）、收盘定格 close=16:00 定格价。
-  冷启动落在非 regular 时段 → twelvedata open/close 锚点恢复（base_restored 标记区分退化值，
-  连续失败 3 次放弃，09:30 自愈）。
+  场基准 base=昨日收盘（regular 时段腾讯 f[4] 每轮刷新；2026-10-02 实证凌晨/盘前 f[4]
+  均未切换、即上一场基准）、收盘定格 close=16:00 定格价（f[3] 收盘后至次日盘前实测
+  全程保持收盘价；凌晨 closed<4 与盘前 pre 分支均用 f[3]，pre 仅缺失时填充防污染）。
+  冷启动落在非 regular 时段 → twelvedata previous_close/close 锚点恢复（base=prev 与
+  regular f[4] 同口径；base_restored 标记区分退化值，连续失败 3 次放弃，09:30 自愈）。
 - **状态机顺序**：`update_session_state` 必须先于加密覆盖（防 close_prices 被代理价污染）。
 - **加密窗口** = `session != "regular"`（盘后+夜盘+盘前+周末/假日）；pre/post 真实扩展价优先，
   加密价兜底；closed 段直接覆盖。
 - **同标的替代**：`CRYPTO_ALIAS = {"QQQM": "QQQ"}`，夜盘价 = 自身收盘定格 × 替代涨跌幅。
   加密源覆盖 10/14：MU/SKHY/DRAM/QQQ/QQM(推导)/BABA/LITE/AMD/SMH/NVDA 有；
-  AMKR/PCG/F 无对应交易对（FUSDT 是 Findora 币，禁止误配）。
-- **tick**：market_ticks 统一 UTC（HSI 腾讯分钟 -8h）；组合 tick 写入条件
+  AMKR/PCG/F 无对应交易对（FUSDT 是 Findora 币，禁止误配；币安 TradFi 永续合约
+  TRADIFI_PERPETUAL 共 213 只同样无此三只——AMKRUSDT/PCGUSDT 无效符号），
+  三只维持新浪盘后扩展价定格口径。
+- **看板 spark**：market_ticks 统一 UTC；分时全由主价快照「价变即写」累积，
+  不再单独请求分时接口（US30Y/US10Y/VIX 主价源 Yahoo，刷新沿用 backfill 节奏
+  30min 断档/4h 冷却/5min 重试，当日 5m 分时顺带落库）；spark 取最近一个
+  tick≥5 的「有效分时日」（杂点日自动回退上一完整时段）并以 [ts,price] 对
+  下发（前端悬浮显示北京时间+价格）；组合 tick 写入条件
   `session != "closed" or overnight_used > 0`；写入口毛刺延迟确认（hold/discard/confirm）。
 - **代理分类**：proxy_pool.region（overseas/unknown），_crypto_probe_loop 30min；
   加密源请求序：直连（_crypto_direct_ok）→ 境外代理 → 通用池。
@@ -80,4 +88,3 @@ pytest 本地跑可以（不起服务）；**服务只能线上起一份**。
   镜像直连；直连失效时境外代理自动接管（探测循环打标）；
 - Yahoo 常态 403 靠代理池 backfill，失败 5min 重试；
 - 新浪 fx_susdhkd/DINIW 白天偶发 403（有 FX_FALLBACK）；
-- subagent 通道不稳定（多次空返回），复杂调研直接主 Agent 做或用 codegraph。

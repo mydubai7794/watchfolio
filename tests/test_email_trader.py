@@ -1,6 +1,6 @@
 """HSBC 成交邮件模块离线单元测试：解析样例全覆盖 + apply_trade 编排（db 全 mock，无网络）。"""
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -152,9 +152,10 @@ def _trade(**kw):
     return t
 
 
-def _patch_db(monkeypatch, holdings=None, message_exists=False, no_exists=False):
+def _patch_db(monkeypatch, holdings=None, message_exists=False, no_exists=False,
+              last_poll=None):
     """mock database 模块全部依赖函数，记录调用供断言。"""
-    calls = {"insert": [], "upsert": [], "update": [], "deduct": []}
+    calls = {"insert": [], "upsert": [], "update": [], "deduct": [], "config": []}
 
     async def fake_message_exists(mid):
         return message_exists
@@ -183,6 +184,13 @@ def _patch_db(monkeypatch, holdings=None, message_exists=False, no_exists=False)
         calls["deduct"].append((currency, amount))
         return 1000.0 - amount
 
+    async def fake_get_config(key):
+        return last_poll
+
+    async def fake_set_config(key, value, remark=""):
+        calls["config"].append((key, value))
+        return 1
+
     monkeypatch.setattr(et.db, "trade_message_exists", fake_message_exists)
     monkeypatch.setattr(et.db, "trade_no_exists", fake_no_exists)
     monkeypatch.setattr(et.db, "insert_trade_record", fake_insert)
@@ -190,6 +198,8 @@ def _patch_db(monkeypatch, holdings=None, message_exists=False, no_exists=False)
     monkeypatch.setattr(et.db, "upsert_holding", fake_upsert)
     monkeypatch.setattr(et.db, "update_holding", fake_update)
     monkeypatch.setattr(et.db, "deduct_cash", fake_deduct)
+    monkeypatch.setattr(et.db, "get_config", fake_get_config)
+    monkeypatch.setattr(et.db, "set_config", fake_set_config)
     return calls
 
 
@@ -287,7 +297,7 @@ class TestPollOnce:
         calls = _patch_db(monkeypatch, holdings=[])
 
         def fake_fetch(days=1):
-            assert days == 1
+            assert days == 1  # 无 last_poll（首跑）→ 默认 1 天窗口
             return [{"message_id": "<mail1@hsbc>", "date": None, "text": SAMPLE_BUY}]
 
         monkeypatch.setattr(et, "fetch_hsbc_emails", fake_fetch)
@@ -307,6 +317,83 @@ class TestPollOnce:
         monkeypatch.setattr(et, "fetch_hsbc_emails", fake_fetch)
         assert asyncio.run(et.poll_once(days=1)) == []
         assert calls["insert"] == []
+
+    def test_poll_once_enlarged_window_on_downtime(self, monkeypatch):
+        """停机 3 天恢复：回溯窗口放大为 4 天（宁多勿漏，幂等去重兜底）。"""
+        calls = _patch_db(monkeypatch, holdings=[],
+                          last_poll="2026-09-29T10:00:00")  # 距今 3 天
+        seen_days = []
+
+        def fake_fetch(days=1):
+            seen_days.append(days)
+            return []
+
+        monkeypatch.setattr(et, "fetch_hsbc_emails", fake_fetch)
+        assert asyncio.run(et.poll_once(days=1)) == []
+        assert seen_days == [4]  # gap_days(3) + 1
+
+    def test_poll_once_persists_last_poll_on_success(self, monkeypatch):
+        """整轮成功（即使 0 封新邮件）→ last_poll 推进落库。"""
+        calls = _patch_db(monkeypatch, holdings=[])
+
+        async def fake_get_config(key):
+            return None
+
+        def fake_fetch(days=1):
+            return []
+
+        monkeypatch.setattr(et, "fetch_hsbc_emails", fake_fetch)
+        asyncio.run(et.poll_once(days=1))
+        assert len(calls["config"]) == 1
+        key, value = calls["config"][0]
+        assert key == et.LAST_POLL_KEY
+        datetime.fromisoformat(value)  # 落库值须为可解析的 isoformat 时刻
+
+    def test_poll_once_zero_mails_still_advances(self, monkeypatch):
+        """0 封新邮件属正常完成 → 水位照常推进，窗口下轮收敛回 1 天。"""
+        calls = _patch_db(monkeypatch, holdings=[],
+                          last_poll=datetime.now().isoformat(timespec="seconds"))
+
+        def fake_fetch(days=1):
+            assert days == 1  # 刚轮询过 → 窗口应已收敛
+            return []
+
+        monkeypatch.setattr(et, "fetch_hsbc_emails", fake_fetch)
+        assert asyncio.run(et.poll_once(days=1)) == []
+        assert len(calls["config"]) == 1
+
+    def test_poll_once_fetch_failure_keeps_waterline(self, monkeypatch):
+        """拉取失败：不推进水位（下轮以放大窗口重拉），返回空结果。"""
+        calls = _patch_db(monkeypatch, holdings=[])
+
+        def fake_fetch(days=1):
+            raise RuntimeError("imap down")
+
+        monkeypatch.setattr(et, "fetch_hsbc_emails", fake_fetch)
+        assert asyncio.run(et.poll_once(days=1)) == []
+        assert calls["config"] == []  # 水位未推进
+
+
+class TestComputeBacktrackDays:
+    """回溯窗口计算：停机越久回溯越久，宁多勿漏；异常输入回退保守窗口。"""
+
+    def test_no_last_poll_defaults(self):
+        assert et._compute_backtrack_days(None, 1) == 1
+        assert et._compute_backtrack_days("", 1) == 1
+
+    def test_recent_poll_keeps_min_window(self):
+        # 30 分钟前刚轮询过 → gap_days=0 → max(1, 1) = 1
+        recent = (datetime.now() - timedelta(minutes=30)).isoformat(timespec="seconds")
+        assert et._compute_backtrack_days(recent, 1) == 1
+
+    def test_downtime_enlarges_window(self):
+        # 停机 3 天 → 回溯 4 天（+1 天余量覆盖边界，宁多勿漏）
+        stale = (datetime.now() - timedelta(days=3)).isoformat(timespec="seconds")
+        assert et._compute_backtrack_days(stale, 1) == 4
+
+    def test_bad_value_falls_back(self):
+        assert et._compute_backtrack_days("not-a-date", 1) == 1
+        assert et._compute_backtrack_days("12345", 2) == 2
 
 
 class TestStripHtml:

@@ -17,6 +17,7 @@
 import asyncio
 import json
 import logging
+import os
 import random
 import re
 import time
@@ -48,12 +49,13 @@ _SINA_GLOBAL_INDEX_MAP = {
 }
 
 _last_global_index_cache: dict[str, dict] = {}
+# 东财接口 token 属敏感凭据：优先从环境变量读取，缺省回退现值保持部署零影响
 EASTMONEY_PARAMS = {
     "orderBy": "dm",
     "sort": "desc",
     "pageSize": "500",  # 一次获取全部数据
     "pageIndex": "0",
-    "token": "***REMOVED***",
+    "token": os.getenv("QDII_EASTMONEY_TOKEN", "***REMOVED***"),
     "field": "dm,sc,name,p,zsjd,zde,zdf,f152,o,h,l,zjsj,vol,wp,np,ccl",
     "blockName": "callback",
 }
@@ -72,6 +74,8 @@ _direct_last_used: dict[str, float] = {}
 # 期指数据源轮询状态
 _futures_source_roundrobin: list[str] = ["sina", "eastmoney"]  # 轮询顺序
 _futures_source_index: int = 0
+# 上一轮实际成功使用的期指数据源（主源失败降级备源时如实记录，供 fetch_round 下发）
+_futures_last_used_source: str | None = None
 # 数据源健康状态：True=可用, False=不可用
 _futures_source_health: dict[str, bool] = {"sina": True, "eastmoney": True}
 _futures_source_recover: dict[str, float] = {}  # source -> monotonic ts when it can recover
@@ -732,8 +736,11 @@ async def fetch_futures_with_routing(
     else:
         result = await _fetch_futures_eastmoney(futures_indices)
 
+    global _futures_last_used_source
+
     if result:
         _futures_source_health[primary_source] = True
+        _futures_last_used_source = primary_source  # 记录实际使用源（防降级后误报）
         return result
 
     logger.warning("期指数据源 %s 失败，降级到 %s", primary_source, backup_source)
@@ -747,6 +754,7 @@ async def fetch_futures_with_routing(
         _futures_source_health[backup_source] = True
         _futures_source_health[primary_source] = False  # 标记优先源不可用
         _futures_source_recover[primary_source] = time.monotonic() + _FUTURES_SOURCE_COOLDOWN_SEC
+        _futures_last_used_source = backup_source  # 实际由备源成功，如实记录
         return result
 
     # 3. 两个源都失败
@@ -755,6 +763,7 @@ async def fetch_futures_with_routing(
     _futures_source_health["eastmoney"] = False
     _futures_source_recover["sina"] = time.monotonic() + _FUTURES_SOURCE_COOLDOWN_SEC
     _futures_source_recover["eastmoney"] = time.monotonic() + _FUTURES_SOURCE_COOLDOWN_SEC
+    _futures_last_used_source = None
     return {k: None for k in futures_indices}
 
 
@@ -825,13 +834,12 @@ async def fetch_round(
     elapsed = time.monotonic() - fetch_start
     fetch_time = datetime.now().strftime("%H:%M:%S")
 
-    # 确定使用的数据源
+    # 确定使用的数据源（以路由函数实际记录的成功源为准，
+    # 主源失败降级备源成功时如实下发备源名，不再按轮询索引推算）
     futures_source = "unknown"
     if futures_data:
         if any(v is not None for v in futures_data.values()):
-            # 根据轮询索引判断用了哪个源
-            idx = (_futures_source_index - 1) % len(_futures_source_roundrobin)
-            futures_source = _futures_source_roundrobin[idx]
+            futures_source = _futures_last_used_source or "unknown"
 
     logger.info(
         "本轮抓取完成: %d 只ETF, 期指源=%s, 耗时 %.1fs, 错误 %d",

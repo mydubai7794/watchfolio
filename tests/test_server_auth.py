@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import server
+import database as db
 
 # 不使用 with：构造即用，避免 lifespan 连接数据库/启动后台循环
 client = TestClient(server.app)
@@ -259,6 +260,42 @@ def test_holding_add_deduct(monkeypatch):
         client.cookies.clear()
 
 
+def test_password_hash_roundtrip():
+    """pbkdf2 哈希往返校验 + 存量明文兼容 + 损坏哈希串不抛异常。"""
+    h = db.hash_password("s3cret")
+    assert h.startswith("pbkdf2_sha256$") and len(h) > 100
+    assert db.verify_password("s3cret", h) is True
+    assert db.verify_password("wrong", h) is False
+    assert db.verify_password("plain", "plain") is True       # 存量明文兼容
+    assert db.verify_password("x", "pbkdf2_sha256$bad") is False
+
+
+def test_login_plaintext_auto_upgrade(monkeypatch):
+    """登录命中存量明文 → 自动升级 pbkdf2：update_user_password 收到哈希串
+    且能通过 verify_password 回验；登录本身不受升级失败影响。"""
+    upgraded = []
+
+    async def fake_update(user_id, password_hash):
+        upgraded.append((user_id, password_hash))
+
+    async def fake_create(token, username, ttl):
+        pass
+
+    async def fake_get_user(username):
+        return {"id": 7, "username": username, "password": "old-plain"}
+
+    monkeypatch.setattr(server.db, "update_user_password", fake_update)
+    monkeypatch.setattr(server.db, "create_session", fake_create)
+    monkeypatch.setattr(server.db, "get_user", fake_get_user)
+    server._captchas["cid2"] = {"answer": 3, "expires": time.time() + 60}
+    r = client.post("/api/login", json={
+        "username": "admin", "password": "old-plain",
+        "captcha_id": "cid2", "captcha_answer": "3"})
+    assert r.status_code == 200
+    assert len(upgraded) == 1 and upgraded[0][0] == 7
+    assert db.verify_password("old-plain", upgraded[0][1]) is True
+
+
 def test_session_persisted_via_db(monkeypatch):
     """登录成功后会话写入 DB 而非内存字典。"""
     calls = []
@@ -317,6 +354,16 @@ def test_expired_token_datetime_rejected(monkeypatch):
         client.cookies.clear()
 
 
+def test_hsi_session_open():
+    """HSI 快照写入口交易时段过滤（纯函数）：港股 09:30-16:00 = UTC 01:30-08:00，
+    窗外（腾讯收盘后仍回微变价）不写库，防分时拖出收盘后尾段。"""
+    assert server.hsi_session_open(datetime(2026, 10, 2, 1, 30)) is True    # 09:30 开盘
+    assert server.hsi_session_open(datetime(2026, 10, 2, 4, 30)) is True    # 午休段（价不变本就不写）
+    assert server.hsi_session_open(datetime(2026, 10, 2, 8, 0)) is True     # 16:00 收盘定格
+    assert server.hsi_session_open(datetime(2026, 10, 2, 8, 54)) is False   # 16:54 收盘后尾段
+    assert server.hsi_session_open(datetime(2026, 10, 2, 0, 30)) is False   # 08:30 盘前
+
+
 def test_overview_fx_spark(monkeypatch):
     """overview 顶层下发 fx_spark（USD/HKD 近5日走势，前端拼 USDHKD 方块用）。"""
     monkeypatch.setattr(server.db, "get_session", _fake_valid_session("fx-user"))
@@ -370,6 +417,47 @@ def test_backfill_keys_max_age():
     # 全部新鲜 → 无补拉
     fresh = {k: (datetime(2026, 10, 2, 11, 45, 0), 1.0) for k in keys}
     assert server.backfill_keys(fresh, now, keys) == []
+
+
+def test_yahoo_refresh_plan_due():
+    """Yahoo 主价刷新双轨节流（纯函数）：缺价即拉仅受 5min 失败重试；
+    断档>30min 例行 backfill 受 4h 成功冷却。
+
+    对应 _market_loop 节流单点化：启动缓存空 → 立即拉（不等 30min 断档）；
+    失败后 5min 静默（防 Yahoo 403 期间每轮空转请求放大）；成功后回归
+    4h 例行节奏。缺价与断档同属时只走 missing（不受成功冷却拦截）。
+    """
+    keys = ("US30Y", "US10Y", "VIX")
+    now = datetime(2026, 10, 2, 12, 0, 0)
+    mono = 1000.0
+    # 1) 启动缓存空 + 库内无 tick → missing 项立即拉（冷启动自愈）
+    no_tick = {k: None for k in keys}
+    assert server.yahoo_refresh_plan({}, no_tick, now, mono, {}, {}) \
+        == ["US30Y", "US10Y", "VIX"]
+    # 2) 5min 失败节流：刚失败 1min → 静默；失败满 5min → 重拉
+    fail_recent = {k: mono - 60.0 for k in keys}
+    assert server.yahoo_refresh_plan({}, no_tick, now, mono, {}, fail_recent) == []
+    fail_old = {k: mono - 301.0 for k in keys}
+    assert server.yahoo_refresh_plan({}, no_tick, now, mono, {}, fail_old) \
+        == ["US30Y", "US10Y", "VIX"]
+    # 3) 缓存有价 + tick 新鲜 → 无刷新
+    day = {k: {"price": 5.0} for k in keys}
+    fresh = {k: (datetime(2026, 10, 2, 11, 50, 0), 5.0) for k in keys}
+    assert server.yahoo_refresh_plan(day, fresh, now, mono, {}, {}) == []
+    # 4) 断档>30min（缓存有价）：4h 成功冷却未到期 → 不拉；到期 → 例行拉
+    stale = {k: (datetime(2026, 10, 2, 11, 0, 0), 5.0) for k in keys}
+    at_recent = {k: mono - 3600.0 for k in keys}    # 1h 前成功（<4h）
+    assert server.yahoo_refresh_plan(day, stale, now, mono, at_recent, {}) == []
+    at_old = {k: mono - 14401.0 for k in keys}      # 4h+1s 前成功
+    assert server.yahoo_refresh_plan(day, stale, now, mono, at_old, {}) \
+        == ["US30Y", "US10Y", "VIX"]
+    # 5) 仅 VIX 缺价且有 1h 成功冷却记录：missing 不受 backfill_at 拦截仍即拉
+    day2 = {"US30Y": {"price": 5.0}, "US10Y": {"price": 5.0}}
+    stale2 = {"US30Y": (datetime(2026, 10, 2, 11, 0, 0), 5.0),
+              "US10Y": (datetime(2026, 10, 2, 11, 0, 0), 5.0),
+              "VIX": (datetime(2026, 10, 2, 11, 0, 0), 20.0)}
+    assert server.yahoo_refresh_plan(day2, stale2, now, mono, {"VIX": mono - 3600.0}, {}) \
+        == ["VIX"]
 
 
 class TestRootRedirect:

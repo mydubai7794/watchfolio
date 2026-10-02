@@ -313,18 +313,6 @@ class TestMarketPanelParsers:
         assert pf.parse_yahoo_chart("not-json") == {}
         assert pf.parse_yahoo_chart(json.dumps({"chart": {"error": "x"}})) == {}
 
-    def test_parse_tencent_minute(self):
-        """腾讯分时接口 → [(HHMM, 价格)]。"""
-        raw = json.dumps({"code": 0, "data": {"usQQQ": {"data": {
-            "data": ["0930 738.00 100", "0931 738.50 200"], "date": ""}}}})
-        pts = pf.parse_tencent_minute(raw)
-        assert pts == [("0930", 738.0), ("0931", 738.5)]
-
-    def test_parse_tencent_minute_garbage(self):
-        """非法 JSON/结构缺失 → 空列表，不抛异常。"""
-        assert pf.parse_tencent_minute("not-json") == []
-        assert pf.parse_tencent_minute(json.dumps({"code": 0, "data": {}})) == []
-
 
 class _FakeResp:
     """假 httpx 响应：200 + GBK 编码内容。"""
@@ -511,9 +499,11 @@ class TestUpdateSessionState:
     """一场口径状态机纯函数：base_closes/close_prices/base_logged 就地更新，
     冷启动退化经 base_fallback 传给调用方打日志（函数自身无 IO）。
 
-    f[3]=腾讯现价、f[4]=腾讯昨收；边界覆盖：regular 开盘刷新基准、
-    post/closed≥16:00 定格、凌晨<04:00 与 pre 的 f[4] 切换语义、
-    冷启动空 state 退化填 f[4]。"""
+    f[3]=腾讯现价（收盘后至次日盘前实测保持 16:00 收盘价）、f[4]=腾讯昨收
+    （凌晨/盘前实证仍为上一场基准未切换）；边界覆盖：regular 开盘刷新基准、
+    post/closed≥16:00 定格、凌晨<04:00 用 f[3] 定格（旧版误用 f[4] 致
+    close==base、收盘定格段恒 0）、盘前仅缺失时 f[3] 兜底、冷启动空 state
+    退化填 f[4]。"""
 
     Q = {"MU": {"price": 100.0, "pre_close": 95.0}}
 
@@ -536,19 +526,36 @@ class TestUpdateSessionState:
         assert state["close_prices"]["MU"] == 100.0
         assert state["base_closes"]["MU"] == 95.0
 
-    def test_pre_early_morning_f4_semantic_switch(self):
-        # 凌晨 pre：腾讯昨收(f[4])实测已切换为昨日常规收盘 → 定格兜底取 f[4]
-        # （而非 regular 语义的一场基准），场基准沿用不覆盖
-        state = {"base_closes": {"MU": 95.0}, "close_prices": {"MU": 100.0},
+    def test_dawn_closed_keeps_frozen_close(self):
+        # 凌晨 closed(<04:00)：f[4] 实证仍为上一场基准（未切换，065f 实证
+        # 2026-10-02 03:27/04:07 AMD f[4]=611.76=f[3]615.73 的基准），定格必须
+        # 用 f[3]（旧版取 f[4] 会使 close==base → 收盘定格段恒 0，线上
+        # 「收盘定格 -$22.14」根因）；每轮覆写，自愈历史污染值
+        state = {"base_closes": {"MU": 95.0}, "close_prices": {"MU": 99.0},
+                 "base_logged": False}
+        pf.update_session_state(state, "closed",
+                                datetime(2026, 10, 2, 2, 0, tzinfo=ET), self.Q)
+        assert state["close_prices"]["MU"] == 100.0   # f[3] 定格，非 f[4]
+        assert state["base_closes"]["MU"] == 95.0     # 基准沿用不覆盖
+
+    def test_pre_fills_missing_close_only(self):
+        # 盘前 pre：仅缺失时用 f[3] 兜底（实测保持收盘定格），不覆盖已定格值
+        # （防盘前中后段 f[3] 可能切换为盘前成交价污染 16:00 定格/锚点恢复值）
+        state = {"base_closes": {"MU": 95.0}, "close_prices": {"MU": 615.73},
                  "base_logged": False}
         pf.update_session_state(state, "pre",
                                 datetime(2026, 10, 2, 8, 0, tzinfo=ET), self.Q)
-        assert state["close_prices"]["MU"] == 95.0
+        assert state["close_prices"]["MU"] == 615.73   # 已定格不被覆盖
         assert state["base_closes"]["MU"] == 95.0
+        state2 = {"base_closes": {"MU": 95.0}, "close_prices": {},
+                  "base_logged": True}
+        pf.update_session_state(state2, "pre",
+                                datetime(2026, 10, 2, 8, 0, tzinfo=ET), self.Q)
+        assert state2["close_prices"]["MU"] == 100.0   # 缺失时 f[3] 兜底
 
     def test_closed_windows_branch_by_hour(self):
         # closed 按 et_hour 分支：晚间 ≥16:00 同 post（f[3] 定格）；
-        # 凌晨 <04:00 同 pre（f[4] 定格）
+        # 凌晨 <04:00 亦用 f[3] 定格（f[4] 未切换、为场基准）
         state_night = {"base_closes": {}, "close_prices": {}, "base_logged": False}
         pf.update_session_state(state_night, "closed",
                                 datetime(2026, 10, 1, 21, 0, tzinfo=ET), self.Q)
@@ -557,7 +564,7 @@ class TestUpdateSessionState:
                       "base_logged": False}
         pf.update_session_state(state_dawn, "closed",
                                 datetime(2026, 10, 2, 2, 0, tzinfo=ET), self.Q)
-        assert state_dawn["close_prices"]["MU"] == 95.0
+        assert state_dawn["close_prices"]["MU"] == 100.0   # f[3]，非 f[4]（95.0）
 
     def test_cold_start_empty_state_fallback(self):
         # 冷启动空 state：非 regular 时段退化用当轮 f[4] 充当场基准，
@@ -929,10 +936,10 @@ SINA_PANEL_RAW = (
 
 
 class TestMarketPanelYahooSpark:
-    """看板当日分时源（旧 5d 日线 spark 语义退役）：Yahoo 1d/5m 解析、腾讯 HHMM→ts
-    守卫、fetch_day_minutes 路由（HSI 腾讯主源 <5 点 fallback Yahoo）、新浪
-    fx_susdcnh 主价、fetch_market_panel 组装（spark 读库注入），以及 USD/HKD 汇率
-    走势 fetch_fx_spark（server fx_spark 下发、前端拼 USDHKD 方块用）。"""
+    """看板分时主价快照存库口径：Yahoo 5d/5m 解析（US30Y/US10Y/VIX 主价刷新
+    顺带落库）、新浪 fx_susdcnh 主价、fetch_market_panel 组装（spark 读库注入
+    [ts,price] 对），以及 USD/HKD 汇率走势 fetch_fx_spark（server fx_spark 下发、
+    前端拼 USDHKD 方块用）。"""
 
     def test_day_symbols_mapping(self):
         """YAHOO_DAY_SYMBOLS 当日分时映射齐备（期货/美元指数/收益率/VIX/离岸人民币）；
@@ -947,8 +954,8 @@ class TestMarketPanelYahooSpark:
         assert pf.YAHOO_PANEL_SYMBOLS == {"USDHKD": "HKD=X"}
 
     def test_market_panel_spark_marks(self):
-        """MARKET_PANEL spark_source 口径：HSI 腾讯分钟主源，其余 10 项 Yahoo 当日
-        分时；USDCNH 已作为第 11 项加入看板；旧 "yahoo" 5d 日线枚举退役。"""
+        """MARKET_PANEL spark_source 口径：第 5 位仅作历史主源标记（现行分时统一
+        读库组装，不再单独请求分时接口）；USDCNH 已作为第 11 项加入看板。"""
         src = {key: s for key, _, _, _, s in pf.MARKET_PANEL}
         assert len(pf.MARKET_PANEL) == 11 and "USDCNH" in src
         assert src["HSI"] == "tencent"
@@ -956,9 +963,8 @@ class TestMarketPanelYahooSpark:
         assert src["BZ"] == src["GC"] == src["DXY"] == "yahoo_day"
         assert src["US30Y"] == src["US10Y"] == src["VIX"] == src["USDCNH"] == "yahoo_day"
         assert "yahoo" not in set(src.values())
-        # 分时拉取集合：10 个 Yahoo 项 + HSI 腾讯主源，绝无 hf_ 前缀死请求
+        # 主价快照存库/读 spark 标的全集：10 个 Yahoo 项 + HSI
         assert set(pf.DAY_MINUTE_KEYS) == set(pf.YAHOO_DAY_SYMBOLS) | {"HSI"}
-        assert pf.TENCENT_MINUTE_CODES == {"HSI": "hkHSI"}
 
     def test_parse_yahoo_day_chart(self):
         """Yahoo 5d/5m 解析：meta 主价/昨收 + None 收盘点跳过 + epoch→UTC naive
@@ -991,21 +997,6 @@ class TestMarketPanelYahooSpark:
         assert pf.parse_yahoo_day_chart("not-json") == {}
         assert pf.parse_yahoo_day_chart('{"chart": {"result": []}}') == {}
 
-    def test_tencent_minute_points(self):
-        """腾讯分时 HHMM 拼当日日期 → naive datetime（北京时区口径）。"""
-        now = datetime(2026, 10, 2, 11, 46)
-        pts = pf.tencent_minute_points([("0930", 24099.73), ("0931", 24017.53)], now=now)
-        assert pts == [(datetime(2026, 10, 2, 9, 30), 24099.73),
-                       (datetime(2026, 10, 2, 9, 31), 24017.53)]
-
-    def test_tencent_minute_points_stale_batch_dropped(self):
-        """次日拉到上一交易日残留：HHMM 拼出未来时刻 → 整批丢弃（防错误日期入库）。"""
-        now = datetime(2026, 10, 2, 8, 0)
-        assert pf.tencent_minute_points([("0930", 24099.0), ("1600", 23946.0)], now=now) == []
-
-    def test_tencent_minute_points_bad_hhmm(self):
-        assert pf.tencent_minute_points([("9x30", 1.0)], now=datetime(2026, 10, 2, 11, 0)) == []
-
     def test_parse_fx_usdcnh(self):
         """新浪 fx_susdcnh：f[1] 现价 f[3] 昨收，涨跌幅自算（实测布局与 susdhkd 一致）。"""
         raw = ('var hq_str_fx_susdcnh="11:46:24,6.706800,6.706900,6.713200,124,'
@@ -1020,54 +1011,6 @@ class TestMarketPanelYahooSpark:
         assert pf.parse_fx_usdcnh('var hq_str_fx_susdcnh="11:46,6.70";') == {}
         assert pf.parse_fx_usdcnh('var hq_str_fx_susdcnh="09:00,9.9,1,6.7,1,1,1,1,1,x,1,1";') == {}
         assert pf.parse_fx_usdcnh("") == {}
-
-    def test_fetch_day_minutes_hsi_tencent_primary(self, monkeypatch):
-        """HSI：腾讯分时 ≥5 点主源直出，不触发 Yahoo fallback；HHMM 拼注入 now 日期，
-        统一 -8h 转 UTC（market_ticks 全表同时区口径）。"""
-        async def fake_get_text(url, headers=None, timeout=10.0):
-            assert "code=hkHSI" in url
-            rows = [f"093{i} 2409{i}.5" for i in range(6)]
-            return json.dumps({"data": {"hkHSI": {"data": {"data": rows}}}})
-
-        async def fake_yahoo(sym, proxy_urls=None):
-            raise AssertionError("腾讯分时 ≥5 点不应触发 Yahoo fallback")
-
-        monkeypatch.setattr(pf, "_get_text", fake_get_text)
-        monkeypatch.setattr(pf, "fetch_yahoo_day_minutes", fake_yahoo)
-        pts = asyncio.run(pf.fetch_day_minutes("HSI", now=datetime(2026, 10, 2, 11, 0)))
-        # 北京 09:30/09:31 → UTC 01:30/01:31
-        assert pts[:2] == [(datetime(2026, 10, 2, 1, 30), 24090.5),
-                           (datetime(2026, 10, 2, 1, 31), 24091.5)]
-        assert len(pts) == 6
-
-    def test_fetch_day_minutes_hsi_fallback_yahoo(self, monkeypatch):
-        """HSI：腾讯分时 <5 点（闭市残留/失败）→ fallback Yahoo ^HSI 当日分时。"""
-        async def fake_get_text(url, headers=None, timeout=10.0):
-            return json.dumps({"data": {"hkHSI": {"data": {"data": ["0930 24099.5"]}}}})
-
-        pulled: list[str] = []
-
-        async def fake_yahoo(sym, proxy_urls=None):
-            pulled.append(sym)
-            return {"minutes": [("t", 23946.0)]}
-
-        monkeypatch.setattr(pf, "_get_text", fake_get_text)
-        monkeypatch.setattr(pf, "fetch_yahoo_day_minutes", fake_yahoo)
-        pts = asyncio.run(pf.fetch_day_minutes("HSI", now=datetime(2026, 10, 2, 11, 0)))
-        assert pulled == ["^HSI"] and pts == [("t", 23946.0)]
-
-    def test_fetch_day_minutes_yahoo_route(self, monkeypatch):
-        """非 HSI 项按 YAHOO_DAY_SYMBOLS 路由（BZ→BZ=F）；未知 key 返回 []。"""
-        pulled: list[str] = []
-
-        async def fake_yahoo(sym, proxy_urls=None):
-            pulled.append(sym)
-            return {"minutes": [(datetime(2026, 10, 1, 8, 0), 66.1)]}
-
-        monkeypatch.setattr(pf, "fetch_yahoo_day_minutes", fake_yahoo)
-        assert asyncio.run(pf.fetch_day_minutes("BZ")) == [(datetime(2026, 10, 1, 8, 0), 66.1)]
-        assert pulled == ["BZ=F"]
-        assert asyncio.run(pf.fetch_day_minutes("NOPE")) == []
 
     def test_market_panel_assembly(self, monkeypatch):
         """组装：spark 由 spark_map 注入（缺项空数组）；主价分工不变——BZ/GC=新浪 hf
@@ -1117,6 +1060,39 @@ class TestMarketPanelYahooSpark:
         assert got["US30Y"]["price"] == 5.603 and got["US10Y"]["price"] == 5.6
         # 腾讯分时死请求已消除：主价轮不再打 minute 接口
         assert minute_urls == []
+
+    def test_market_panel_fetch_missing_off(self, monkeypatch):
+        """fetch_market_panel fetch_missing=False：缓存缺失项也零 Yahoo 请求，
+        缺失项 price 置 None（前端隐藏涨跌）——server _market_loop 传入，
+        Yahoo 补拉节流单点化到 server due 判定，防缓存空期间每轮 3 请求放大。"""
+        async def fake_get_text(url, headers=None, timeout=10.0):
+            return ""
+
+        async def fake_bus_get(codes):
+            return ""
+
+        async def fake_resilient(url, headers=None, proxy_urls=None, timeout=10.0):
+            return ""    # 新浪空：BZ/GC/DXY/USDCNH 全部缺价（本用例只看 Yahoo 侧）
+
+        yahoo_calls: list[str] = []
+
+        async def fake_day(sym, proxy_urls=None):
+            yahoo_calls.append(sym)
+            return {"price": 5.6, "pre_close": 5.5, "change_pct": 1.8, "minutes": []}
+
+        monkeypatch.setattr(pf, "_get_text", fake_get_text)
+        monkeypatch.setattr(pf.tencent_bus, "get", fake_bus_get)
+        monkeypatch.setattr(pf, "_get_text_resilient", fake_resilient)
+        monkeypatch.setattr(pf, "fetch_yahoo_day_minutes", fake_day)
+        panel = asyncio.run(pf.fetch_market_panel(
+            proxy_urls=["p1"], yahoo_day=None, spark_map=None,
+            fetch_missing=False))
+        got = {row["key"]: row for row in panel}
+        # 缓存为空 + fetch_missing=False → 零 Yahoo 请求，三项 price 置 None
+        assert yahoo_calls == []
+        assert got["US30Y"]["price"] is None
+        assert got["US10Y"]["price"] is None
+        assert got["VIX"]["price"] is None
 
     def test_fetch_fx_spark(self, monkeypatch):
         """fetch_fx_spark：Yahoo HKD=X 仅取 spark 字段，代理清单透传。"""
@@ -1170,9 +1146,9 @@ class TestCryptoAliasDerive:
 
 
 class TestTdSessionAnchors:
-    """冷启动一场锚点恢复（twelvedata open/close）：批量 8 只 + 60s 节流。"""
+    """冷启动一场锚点恢复（twelvedata previous_close/close）：批量 8 只 + 60s 节流。"""
 
-    def test_fetch_anchors_parses_open_close(self, monkeypatch):
+    def test_fetch_anchors_parses_prev_close(self, monkeypatch):
         pf._last_td_used = 0.0   # 重置节流
 
         async def fake_get(self, url, params=None, **kw):
@@ -1181,14 +1157,17 @@ class TestTdSessionAnchors:
 
             class R:
                 def json(self):
-                    return {"AMD": {"open": "610.0", "close": "615.5"},
+                    return {"AMD": {"open": "610.0", "close": "615.5",
+                                    "previous_close": "611.76"},
                             "MU": {"open": "1080.0", "close": "1065.11"}}
             return R()
 
         monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_get)
         out = asyncio.run(pf.fetch_td_session_anchors(["AMD", "MU"]))
-        assert out == {"AMD": {"open": 610.0, "close": 615.5},
-                       "MU": {"open": 1080.0, "close": 1065.11}}
+        # base=previous_close（与 regular f[4] 场基准同口径）；previous_close
+        # 缺失时退化 open（MU 用例）
+        assert out == {"AMD": {"open": 610.0, "prev": 611.76, "close": 615.5},
+                       "MU": {"open": 1080.0, "prev": 1080.0, "close": 1065.11}}
 
     def test_fetch_anchors_throttled(self, monkeypatch):
         # 距上次使用 <60s → 直接 {}，不发起请求（复用 twelvedata 免费限额节流）

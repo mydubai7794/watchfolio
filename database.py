@@ -1,5 +1,9 @@
 """异步 MySQL CRUD 模块（aiomysql）"""
+import asyncio
+import hashlib
+import hmac
 import logging
+import secrets
 from datetime import datetime, timedelta
 
 import aiomysql
@@ -8,26 +12,31 @@ from config import DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_NAME, DB_POOL_SIZE
 logger = logging.getLogger(__name__)
 
 _pool: aiomysql.Pool = None
+# 连接池创建锁：防御并发首调双建池（锁内双检 _pool）
+_pool_lock = asyncio.Lock()
 
 # ---------------------------------------------------------------------------
 # 连接池管理
 # ---------------------------------------------------------------------------
 
 async def get_pool() -> aiomysql.Pool:
-    """获取连接池，若未创建则自动创建。"""
+    """获取连接池，若未创建则自动创建（加锁双检，防并发首调双建池）。"""
     global _pool
-    if _pool is None or _pool._closed:
-        _pool = await aiomysql.create_pool(
-            host=DB_HOST,
-            port=DB_PORT,
-            user=DB_USER,
-            password=DB_PASS,
-            db=DB_NAME,
-            maxsize=DB_POOL_SIZE,
-            autocommit=True,
-            charset="utf8mb4",
-        )
-        logger.info("MySQL 连接池已创建 (host=%s, db=%s)", DB_HOST, DB_NAME)
+    if _pool is not None and not _pool._closed:
+        return _pool
+    async with _pool_lock:
+        if _pool is None or _pool._closed:  # 双检：拿锁后再查，避免重复建池
+            _pool = await aiomysql.create_pool(
+                host=DB_HOST,
+                port=DB_PORT,
+                user=DB_USER,
+                password=DB_PASS,
+                db=DB_NAME,
+                maxsize=DB_POOL_SIZE,
+                autocommit=True,
+                charset="utf8mb4",
+            )
+            logger.info("MySQL 连接池已创建 (host=%s, db=%s)", DB_HOST, DB_NAME)
     return _pool
 
 
@@ -178,13 +187,13 @@ async def init_tables():
         _pool=pool,
     )
 
-    # ---- users (登录用户表，密码明文存储方便修改) ----
+    # ---- users (登录用户表，存量明文密码登录命中后自动升级 pbkdf2 哈希) ----
     await execute(
         """
         CREATE TABLE IF NOT EXISTS users (
             id          INT AUTO_INCREMENT PRIMARY KEY,
             username    VARCHAR(50)  NOT NULL UNIQUE COMMENT '用户名',
-            password    VARCHAR(100) NOT NULL COMMENT '密码(明文)',
+            password    VARCHAR(200) NOT NULL COMMENT '密码(pbkdf2哈希或存量明文)',
             created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='登录用户'
         """,
@@ -412,14 +421,28 @@ async def toggle_etf(code: str) -> int:
 
 
 async def update_etf_names(naming: dict[str, str]) -> int:
-    """批量更新 ETF 名称。naming: {code: name}，仅更新有变化的行。"""
+    """批量更新 ETF 名称。naming: {code: name}，仅更新有变化的行。
+
+    先一次性取回现名做应用层比对，名称无变化时 0 次 UPDATE 往返；
+    UPDATE 仍保留 name != %s 守卫，防比对与写入之间被并发修改。
+    """
+    if not naming:
+        return 0
+    codes = list(naming.keys())
+    placeholders = ", ".join(["%s"] * len(codes))
+    rows = await execute_dict(
+        f"SELECT code, name FROM etf_targets WHERE code IN ({placeholders})",
+        tuple(codes),
+    )
+    current = {r["code"]: r["name"] for r in rows}
     total = 0
     for code, name in naming.items():
-        n = await execute(
+        if current.get(code) == name:
+            continue  # 名称未变化，跳过不发 UPDATE
+        total += await execute(
             "UPDATE etf_targets SET name = %s WHERE code = %s AND name != %s",
             (name, code, name),
         )
-        total += n
     return total
 
 
@@ -771,6 +794,33 @@ async def get_user(username: str) -> dict | None:
     return rows[0] if rows else None
 
 
+def hash_password(plain: str) -> str:
+    """明文密码 → pbkdf2 哈希串（pbkdf2_sha256$迭代$盐hex$哈希hex，随机盐）。"""
+    salt = secrets.token_hex(16)
+    dig = hashlib.pbkdf2_hmac("sha256", plain.encode(), salt.encode(), 200_000)
+    return f"pbkdf2_sha256$200000${salt}${dig.hex()}"
+
+
+def verify_password(plain: str, stored: str) -> bool:
+    """密码校验：pbkdf2 哈希串走恒时比较；存量明文直接相等（登录命中后由
+    server 侧自动升级为哈希，一次性迁移）；损坏哈希串按不匹配处理不抛异常。"""
+    if stored.startswith("pbkdf2_sha256$"):
+        try:
+            _, iters, salt, expect = stored.split("$")
+            dig = hashlib.pbkdf2_hmac("sha256", plain.encode(),
+                                      salt.encode(), int(iters))
+            return hmac.compare_digest(dig.hex(), expect)
+        except (ValueError, TypeError):
+            return False
+    return stored == plain
+
+
+async def update_user_password(user_id: int, password_hash: str) -> int:
+    """更新用户密码（登录自动升级哈希/改密用）。"""
+    return await execute(
+        "UPDATE users SET password = %s WHERE id = %s", (password_hash, user_id))
+
+
 # ---------------------------------------------------------------------------
 # Sessions CRUD (登录会话)
 # ---------------------------------------------------------------------------
@@ -854,16 +904,29 @@ async def delete_holding(holding_id: int) -> int:
 
 
 async def update_holding_names(naming: dict[str, str]) -> int:
-    """回写行情接口返回的名称。"""
+    """回写行情接口返回的名称。
+
+    先一次性取回现名做应用层比对，仅对有变化的行发 UPDATE（无变化 0 往返）；
+    UPDATE 仍保留 name != %s 守卫，防比对与写入之间被并发修改。
+    """
+    symbols = [s for s in naming if naming[s]]
+    if not symbols:
+        return 0
+    placeholders = ", ".join(["%s"] * len(symbols))
+    rows = await execute_dict(
+        f"SELECT symbol, name FROM holdings WHERE symbol IN ({placeholders})",
+        tuple(symbols),
+    )
+    current = {r["symbol"]: r["name"] for r in rows}
     total = 0
-    for symbol, name in naming.items():
-        if not name:
-            continue
-        n = await execute(
+    for symbol in symbols:
+        name = naming[symbol]
+        if current.get(symbol) == name:
+            continue  # 名称未变化，跳过不发 UPDATE
+        total += await execute(
             "UPDATE holdings SET name = %s WHERE symbol = %s AND name != %s",
             (name, symbol, name),
         )
-        total += n
     return total
 
 
@@ -953,17 +1016,37 @@ async def get_market_last_tick(symbol: str) -> tuple | None:
 
 
 async def get_market_day_spark(symbol: str, max_points: int = 60) -> list[tuple[str, float]]:
-    """取该标的库内最大 ts 所在自然日的全程分时（升序），等距降采样 ≤max_points。
+    """取该标的库内最近一个「有效分时日」的全程分时（升序），等距降采样 ≤max_points。
 
-    「自然日」以数据本身最大 ts 切分（全表统一 UTC naive 口径）：盘中
-    标的自然为开盘→当前，闭市标的自然为上一交易时段全程。返回 [(ts_str, price)]，
-    首尾点必保留。
+    「有效分时日」判定（全表统一 UTC naive 口径）：当日 tick 数 ≥5，且满足
+    密度条件之一——点数 ≥30（完整时段）或首尾跨 ≤2h（刚开盘的实时累积段）。
+    排除两类杂点日（实测线上）：美股类标的跨 UTC 日后腾讯夜间刷新落下的
+    单点（QQQ Oct-2 仅 1 点）、Yahoo backfill 写入的稀疏隔夜段（Oct-2 仅
+    5 点横跨数小时）——二者都会让「最大 ts 日」只剩残段、分时图消失，
+    自动回退上一完整时段。全部日期都不满足时退回最新日（新标的冷启动
+    有数可显）。
     """
+    day_rows = await execute_dict(
+        "SELECT DATE(ts) d, COUNT(*) n, MIN(ts) t_min, MAX(ts) t_max "
+        "FROM market_ticks WHERE symbol = %s "
+        "GROUP BY DATE(ts) ORDER BY d DESC LIMIT 7",
+        (symbol,),
+    )
+    day = None
+    for r in day_rows:
+        span_h = ((r["t_max"] - r["t_min"]).total_seconds() / 3600.0
+                  if r["t_max"] and r["t_min"] else 0.0)
+        if r["n"] >= 5 and (r["n"] >= 30 or span_h <= 2.0):
+            day = r["d"]
+            break
+    if day is None and day_rows:
+        day = day_rows[0]["d"]
+    if day is None:
+        return []
     rows = await execute_dict(
         "SELECT ts, price FROM market_ticks "
-        "WHERE symbol = %s AND DATE(ts) = "
-        "(SELECT DATE(MAX(ts)) FROM market_ticks WHERE symbol = %s) ORDER BY ts",
-        (symbol, symbol),
+        "WHERE symbol = %s AND DATE(ts) = %s ORDER BY ts",
+        (symbol, day),
     )
     pts = [(str(r["ts"]), float(r["price"])) for r in rows]
     if len(pts) <= max_points:

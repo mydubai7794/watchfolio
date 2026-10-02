@@ -9,7 +9,7 @@ import random
 import re
 import secrets
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from contextlib import asynccontextmanager
@@ -214,7 +214,6 @@ monitor_task: Optional[asyncio.Task] = None
 daily_task: Optional[asyncio.Task] = None
 scheduler_task: Optional[asyncio.Task] = None
 monitor_running: bool = False
-futures_kill_enabled: bool = False
 overnight_data: dict = {}
 
 # ETF昨日涨跌幅缓存 {code: change_pct}，每天一次 _daily_init 更新
@@ -259,16 +258,15 @@ email_task: Optional[asyncio.Task] = None   # HSBC 成交邮件轮询任务
 # ---------------------------------------------------------------------------
 
 async def _broadcast(event: str, data: dict):
-    """向所有 SSE 客户端广播事件。"""
+    """向所有 SSE 客户端广播事件。
+
+    队列为无界 asyncio.Queue，put_nowait 不阻塞不抛异常，断连客户端由
+    event_stream 的 is_disconnected 检测后自行出队清理（此处旧 try/except
+    死代码已移除，避免误导）。
+    """
     payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
-    disconnected = []
     for queue in clients:
-        try:
-            await queue.put(payload)
-        except Exception:
-            disconnected.append(queue)
-    for q in disconnected:
-        clients.remove(q)
+        queue.put_nowait(payload)
 
 
 def _safe_float(val, default=0.0) -> float:
@@ -403,11 +401,17 @@ async def login(data: LoginInput, request: Request):
     attempts.append(now_ts)
     _login_attempts[client_ip] = attempts
     user = await db.get_user(data.username.strip())
-    if not user or user["password"] != data.password:
+    if not user or not db.verify_password(data.password, user["password"]):
         return JSONResponse(
             status_code=401,
             content={"ok": False, "message": "用户名或密码错误"},
         )
+    # 存量明文命中 → 自动升级 pbkdf2 哈希（一次性迁移；失败不阻断登录，下次重试）
+    if not user["password"].startswith("pbkdf2_sha256$") and user.get("id") is not None:
+        try:
+            await db.update_user_password(user["id"], db.hash_password(data.password))
+        except Exception as e:
+            logger.warning("用户 %s 密码哈希升级失败(下次登录重试): %s", user["username"], e)
     token = await _create_session(user["username"])
     resp = JSONResponse(content={"ok": True, "username": user["username"]})
     resp.set_cookie(
@@ -522,20 +526,12 @@ async def monitor_status():
     etf_list = await db.get_etf_list(enabled_only=True)
     return {
         "running": monitor_running,
-        "futures_kill_enabled": futures_kill_enabled,
         "proxy_count": len(proxy_list),
         "etf_count": len(etf_list),
         "interval_sec": MIN_INTERVAL_SEC,
         "overnight": overnight_data,
         "in_trading_hours": _is_trading_hours(),
     }
-
-
-@app.post("/api/monitor/futures_kill")
-async def futures_kill(enabled: bool = Query(True)):
-    global futures_kill_enabled
-    futures_kill_enabled = enabled
-    return {"ok": True, "futures_kill_enabled": futures_kill_enabled}
 
 
 # ---------------------------------------------------------------------------
@@ -765,17 +761,32 @@ async def candidate_toggle(candidate_id: int, enabled: Optional[bool] = Query(No
 # 每日静态数据初始化（隔夜美股 + ETF昨日涨跌幅 + prev_close 更新）
 # ---------------------------------------------------------------------------
 
+def candidate_refresh_due(now_utc: datetime) -> bool:
+    """A 股候选池快刷窗口判定（纯函数，供 _candidate_refresh_loop 与单测）。
+
+    候选池均为 A 股 ETF/期指：仅北京时间 09:15-15:00 按 CANDIDATE_REFRESH_SEC
+    快刷；窗口外（夜间/周末/假日）价格不动，降频慢轮即可（价不变幂等，
+    期指路由随本循环自然放慢）。北京时间固定 UTC+8 无夏令时。
+    """
+    bj = now_utc + timedelta(hours=8)
+    mins = bj.hour * 60 + bj.minute
+    return 9 * 60 + 15 <= mins <= 15 * 60
+
+
 async def _candidate_refresh_loop():
-    """后台定时刷新候选池缓存。"""
+    """后台定时刷新候选池缓存：A 股时段（北京 09:15-15:00）按
+    CANDIDATE_REFRESH_SEC 快刷，窗口外降频 60s（候选价不动，省请求）。"""
     global candidate_cache, candidate_cache_time, global_index_cache
-    logger.info("候选池刷新循环启动 (间隔 %.0fs)", CANDIDATE_REFRESH_SEC)
+    logger.info("候选池刷新循环启动 (快刷间隔 %.0fs, 时段外 60s)", CANDIDATE_REFRESH_SEC)
 
     while True:
+        interval = CANDIDATE_REFRESH_SEC if candidate_refresh_due(
+            datetime.now(timezone.utc).replace(tzinfo=None)) else 60.0
         try:
             candidates = await db.get_candidate_list(enabled_only=True)
             if not candidates:
                 candidate_cache = {}
-                await asyncio.sleep(CANDIDATE_REFRESH_SEC)
+                await asyncio.sleep(interval)
                 continue
 
             tencent_codes = [c["code"] for c in candidates if c["source"] == "tencent"]
@@ -833,13 +844,13 @@ async def _candidate_refresh_loop():
             candidate_cache = cache
             candidate_cache_time = time.monotonic()
 
-            await asyncio.sleep(CANDIDATE_REFRESH_SEC)
+            await asyncio.sleep(interval)
         except asyncio.CancelledError:
             logger.info("候选池刷新循环已停止")
             break
         except Exception as e:
             logger.exception("候选池刷新错误: %s", e)
-            await asyncio.sleep(CANDIDATE_REFRESH_SEC)
+            await asyncio.sleep(max(interval, 60.0))
 
 
 async def _daily_init():
@@ -1026,13 +1037,15 @@ async def _monitor_loop():
 
         try:
             # 1. Load config from DB (4步决策模型参数)
-            futures_beta          = _safe_float(await db.get_config("futures_beta"), 1.15)
-            scenario_a_fut_drop   = _safe_float(await db.get_config("scenario_a_fut_drop"), -0.6)
-            scenario_b_ndx_drop   = _safe_float(await db.get_config("scenario_b_ndx_drop"), -0.5)
-            scenario_b_fut_rise   = _safe_float(await db.get_config("scenario_b_fut_rise"), 0.3)
-            scenario_a_overshot   = _safe_float(await db.get_config("scenario_a_overshot"), 1.0)
-            scenario_b_lag        = _safe_float(await db.get_config("scenario_b_lag"), 0.3)
-            buysell_ratio_thresh  = _safe_float(await db.get_config("buysell_ratio_threshold"), 2.0)
+            #    一次批量读取内存过滤，替代逐键 7 次 DB 往返（「能缓存不重查」）
+            cfg_map = {r["key"]: r.get("value") for r in await db.get_configs()}
+            futures_beta          = _safe_float(cfg_map.get("futures_beta"), 1.15)
+            scenario_a_fut_drop   = _safe_float(cfg_map.get("scenario_a_fut_drop"), -0.6)
+            scenario_b_ndx_drop   = _safe_float(cfg_map.get("scenario_b_ndx_drop"), -0.5)
+            scenario_b_fut_rise   = _safe_float(cfg_map.get("scenario_b_fut_rise"), 0.3)
+            scenario_a_overshot   = _safe_float(cfg_map.get("scenario_a_overshot"), 1.0)
+            scenario_b_lag        = _safe_float(cfg_map.get("scenario_b_lag"), 0.3)
+            buysell_ratio_thresh  = _safe_float(cfg_map.get("buysell_ratio_threshold"), 2.0)
 
             # 2. Load ETF list and proxy pool from DB
             etf_rows = await db.get_etf_list(enabled_only=True)
@@ -1144,8 +1157,7 @@ async def _monitor_loop():
             await _broadcast("snapshot", {
                 "items": snapshot_items,
                 "futures": {k: v for k, v in futures_data.items()},
-        "overnight": overnight_data,
-        "global_indices": global_index_cache,
+                "overnight": overnight_data,
                 "global_indices": global_index_cache,
                 "fetch_time": round_result.get("fetch_time", ""),
                 "decision": {
@@ -1191,7 +1203,7 @@ async def _monitor_loop():
 # ---------------------------------------------------------------------------
 
 async def _portfolio_loop():
-    """持仓行情采集：盘中10s/扩展时段30s/休市600s，成功才写 tick。"""
+    """持仓行情采集：盘中10s/扩展时段30s/休市按加密活价60s或定格600s，成功才写 tick。"""
     global portfolio_cache, _crypto_direct_ok
     # tick 毛刺延迟确认状态（进程内存，重启即失效重建）：
     # last_tick_state：上一条已写入 tick 的 {p: day_pnl, v: total_value} 基准；
@@ -1199,6 +1211,7 @@ async def _portfolio_loop():
     last_tick_state: dict = {"p": None, "v": None}
     pending_tick: tuple | None = None
     anchor_fail_streak = 0   # 锚点恢复连续失败计数（>=3 放弃，退化兜底）
+    overnight_used = 0       # 上一轮加密活价生效标的数（closed 段降频判定用，跨轮保留）
     logger.info("持仓行情采集循环启动")
     while True:
         interval = 600.0
@@ -1209,8 +1222,10 @@ async def _portfolio_loop():
             session, _et_date, et_now = pf.us_market_session(et_dt)
             # 加密窗口：收盘→开盘全段（盘后+夜盘+盘前+周末/假日），非 regular 即有活源
             crypto_window = session != "regular"
+            # closed 段加密窗口恒真（600s 兜底分支曾不可达），按上一轮加密活价
+            # 是否生效降频：生效→60s 跟价（24h 曲线连续），失效/无交易对→600s 定格慢轮
             interval = {"regular": 10.0, "pre": 30.0, "post": 30.0}.get(
-                session, 60.0 if crypto_window else 600.0)
+                session, 60.0 if overnight_used > 0 else 600.0)
             holdings = await db.get_holdings(enabled_only=True)
             us_symbols = [h["symbol"] for h in holdings if h["market"] == "US"]
             hk_symbols = [h["symbol"] for h in holdings if h["market"] == "HK"]
@@ -1227,11 +1242,12 @@ async def _portfolio_loop():
                 except Exception:
                     pass
             # ---- 一场口径锚点恢复（冷启动，先于状态机）----
-            # 重启落在非 regular 时段：腾讯昨收(f[4])语义已切换为最近收盘，直接
-            # 退化会让 base==close → 收盘定格段(close_pnl)恒 0（$0.00 问题根因）。
-            # 用 twelvedata 当日 open/close 补齐锚点（8 只/批渐进，见 fetcher 限额）；
-            # 以 base_restored 标记区分真锚点与状态机退化值（退化值每轮都可被
-            # 恢复覆盖），连续失败>=3 次放弃（退化兜底，09:30 开盘自愈）
+            # 重启落在非 regular 时段：用 twelvedata previous_close/close 补齐锚点
+            # （base=昨日收盘与 regular f[4] 同口径、close=当日常规收盘），保证
+            # day_pnl=close+overnight 恒等式跨重启一致（8 只/批渐进，见 fetcher
+            # 限额）；以 base_restored 标记区分真锚点与状态机退化值（退化值每轮
+            # 都可被恢复覆盖），连续失败>=3 次放弃（腾讯兜底：实证凌晨/盘前
+            # f[4]=场基准、f[3]=定格，语义恰好正确，09:30 自然对齐）
             if session != "regular" and us_symbols and anchor_fail_streak < 3:
                 restored = portfolio_session_state.setdefault("base_restored", set())
                 missing = [s for s in us_symbols
@@ -1242,7 +1258,9 @@ async def _portfolio_loop():
                     base_map = portfolio_session_state.setdefault("base_closes", {})
                     close_map = portfolio_session_state.setdefault("close_prices", {})
                     for s, a in anchors.items():
-                        base_map[s] = a["open"]
+                        # base=previous_close（昨日收盘，与 regular 时段 f[4] 场基准
+                        # 同口径，day_pnl=close+overnight 恒等式跨重启一致），缺失退化 open
+                        base_map[s] = a.get("prev") or a["open"]
                         close_map[s] = a["close"]
                         restored.add(s)
                     if anchors:
@@ -1453,18 +1471,19 @@ async def _fund_nav_loop():
         await asyncio.sleep((nxt - now).total_seconds())
 
 
-_BACKFILL_MAX_AGE_SEC = 1800.0   # 分时 backfill 阈值：库内最新 tick 距今超 30 分钟才补拉一次全量
-_BACKFILL_COOLDOWN_SEC = 14400.0  # backfill 成功后冷却 4h（闭市标的价不变会持续满足条件，幂等补拉限频）
-_BACKFILL_RETRY_SEC = 300.0       # backfill 失败后 5min 重试（防源持续故障时每轮全量放大请求）
+_BACKFILL_MAX_AGE_SEC = 1800.0   # Yahoo 主价刷新阈值：库内最新 tick 距今超 30 分钟才拉一次
+_BACKFILL_COOLDOWN_SEC = 14400.0  # 刷新成功后冷却 4h（价停滞会持续满足条件，幂等补拉限频）
+_BACKFILL_RETRY_SEC = 300.0       # 刷新失败后 5min 重试（防源持续故障时请求放大）
 
 
 def backfill_keys(last_map: dict[str, tuple | None], now_dt: datetime,
                   keys: list[str], max_age: float = _BACKFILL_MAX_AGE_SEC) -> list[str]:
-    """返回需要 backfill 分时的看板 keys（纯函数，供 _market_loop 与单测）。
+    """返回需要 Yahoo 主价刷新的看板 keys（纯函数，供 _market_loop 与单测）。
 
-    判定：库内无该标的 tick，或最新 tick 距今超 max_age（服务重启/新标的/
-    数据断档）。常规时段分时完全由主价快照（60s 轮询价变即写）累积，
-    外部分时接口请求≈0——「少请求、多数据、回显全用库」原则。
+    判定：库内无该标的 tick，或最新 tick 距今超 max_age（价停滞/服务重启/
+    新标的/数据断档）。当前仅用于 US30Y/US10Y/VIX 主价刷新节流；分时由
+    主价快照（60s 轮询价变即写）累积，不另请求分时接口——「少请求、
+    多数据、回显全用库」原则。
     """
     out: list[str] = []
     for k in keys:
@@ -1478,6 +1497,57 @@ def backfill_keys(last_map: dict[str, tuple | None], now_dt: datetime,
         if age > max_age:
             out.append(k)
     return out
+
+
+def yahoo_due_keys(yahoo_day: dict[str, dict], last_map: dict[str, tuple | None],
+                   now_dt: datetime,
+                   keys: tuple[str, ...] = ("US30Y", "US10Y", "VIX"),
+                   max_age: float = _BACKFILL_MAX_AGE_SEC) -> tuple[list[str], list[str]]:
+    """Yahoo 主价刷新双轨判定（纯函数，供 _market_loop 与单测）。
+
+    返回 (missing, stale)：
+    - missing：主价缓存无 price（冷启动/持续失败）→ 缺价即拉，循环侧仅受
+      5min 失败节流（backfill_fail），不等 30min 断档，启动即自愈；
+    - stale：库内最新 tick 断档超 max_age（例行 backfill）→ 受 4h 成功冷却
+      （backfill_at）+ 5min 失败节流。同一 key 同属两类时只入 missing
+      （立即拉、短节流），避免重复请求。
+    """
+    missing = [k for k in keys if not (yahoo_day.get(k) or {}).get("price")]
+    stale = [k for k in backfill_keys(last_map, now_dt, list(keys), max_age)
+             if k not in missing]
+    return missing, stale
+
+
+def yahoo_refresh_plan(yahoo_day: dict[str, dict], last_map: dict[str, tuple | None],
+                       now_dt: datetime, now_mono: float,
+                       backfill_at: dict[str, float], backfill_fail: dict[str, float],
+                       keys: tuple[str, ...] = ("US30Y", "US10Y", "VIX")) -> list[str]:
+    """合并双轨判定与节流状态，返回本轮应刷新的 Yahoo 主价 keys（纯函数）。
+
+    - missing（缓存无 price）：缺价即拉，仅受 5min 失败节流——冷启动/
+      Yahoo 故障恢复后立即自愈，不等 30min 断档；
+    - stale（断档>30min）：受 4h 成功冷却 + 5min 失败节流，维持既有例行
+      backfill 节奏；成功后 backfill_at 计 4h 冷却回归低频。
+    """
+    missing, stale = yahoo_due_keys(yahoo_day, last_map, now_dt, keys)
+    due = [k for k in missing
+           if now_mono - backfill_fail.get(k, 0.0) >= _BACKFILL_RETRY_SEC]
+    due += [k for k in stale
+            if now_mono - backfill_at.get(k, 0.0) >= _BACKFILL_COOLDOWN_SEC
+            and now_mono - backfill_fail.get(k, 0.0) >= _BACKFILL_RETRY_SEC]
+    return due
+
+
+def hsi_session_open(now_utc: datetime) -> bool:
+    """HSI 主价快照写入窗口（纯函数）：港股交易时段 09:30-16:00（港股与北京
+    同时区、无夏令时）对应 UTC 01:30-08:00。
+
+    腾讯收盘后仍返回微变价格，窗外写库会给当日分时拖出收盘后杂点尾段
+    （实测拖到 ~16:54），故写入口按窗口过滤；午休 12:00-13:00 价不变本就
+    不触发写入，窗口内连续判定即可。
+    """
+    mins = now_utc.hour * 60 + now_utc.minute
+    return 90 <= mins <= 480
 
 
 _CRYPTO_PROBE_INTERVAL_SEC = 1800.0   # 境外代理分类探测周期（30min，低频省资源）
@@ -1533,12 +1603,15 @@ async def _crypto_probe_loop():
 async def _market_loop():
     """市场参考看板采集（主价快照存库模式）：
 
-    - 主价 60s 快轮（腾讯/新浪混排；US30Y/US10Y/VIX 主价与分时同源顺带刷新）
-      → **价变即写 market_ticks**（60s 粒度分时由主价轮询自然累积，闭市价不变
-      不堆重复点）；
-    - 分时 backfill：仅当某标的库内最新 tick 距今 >30min（重启/新标的/断档）
-      时拉一次全量分时补齐（Yahoo 5d/5m 或腾讯分钟线），常规时段分时请求≈0；
-    - spark 统一读库（当日全程，闭市回退上一交易时段）；异常钳制 120s。
+    - 主价 60s 快轮（腾讯/新浪混排）→ **价变即写 market_ticks**，分时由主价
+      快照自然累积（不再单独请求分时接口，「少请求、多数据、回显全用库」；
+      闭市价不变不堆重复点）；
+    - US30Y/US10Y/VIX 主价源为 Yahoo：缺价即拉（缓存无主价触发，仅受 5min
+      失败节流）+ 例行 backfill（库内最新 tick 距今 >30min 且 4h 冷却到期），
+      一次请求两用——meta 现价刷新主价缓存、当日 5m 分时顺带落库（零额外
+      请求）；面板组装传 fetch_missing=False，Yahoo 节流单点化到本循环；
+    - spark 统一读库并按 [ts,price] 对下发（前端悬浮展示时间+价格，闭市回退
+      上一交易时段）；异常钳制 120s。
     """
     global market_cache
     logger.info("市场看板采集循环启动")
@@ -1550,62 +1623,75 @@ async def _market_loop():
         try:
             # Yahoo 链路国内直连不稳：仿 _fund_nav_loop 从代理池取存活代理透传
             proxies = [r["url"] for r in await db.get_alive_proxies()]
-            now_utc = datetime.utcnow()
+            now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
             now_mono = time.monotonic()
 
-            # ---- 分时 backfill：库内断档的标的并发拉一次全量分时并落库 ----
-            # 成功冷却 4h（闭市标的价不变持续满足条件，幂等补拉限频）；
-            # 失败 5min 后重试（防源持续故障时每轮全量请求放大）
+            # ---- 主价快照写入去重用的库内最新 tick ----
             last_map: dict[str, tuple | None] = {}
             for key in pf.DAY_MINUTE_KEYS:
                 try:
                     last_map[key] = await db.get_market_last_tick(key)
                 except Exception:
                     last_map[key] = None
-            due = [k for k in backfill_keys(last_map, now_utc, pf.DAY_MINUTE_KEYS)
-                   if now_mono - backfill_at.get(k, 0.0) >= _BACKFILL_COOLDOWN_SEC
-                   and now_mono - backfill_fail.get(k, 0.0) >= _BACKFILL_RETRY_SEC]
 
-            async def _refresh_minutes(key: str) -> None:
-                if key in ("US30Y", "US10Y", "VIX"):
-                    # 收益率/恐慌指数主价与分时同源：一次请求两用，顺带刷新主价缓存
-                    q = await pf.fetch_yahoo_day_minutes(pf.YAHOO_DAY_SYMBOLS[key], proxies)
-                    if q.get("minutes"):
-                        await db.save_market_ticks(key, q["minutes"])
-                        yahoo_day[key] = q
-                else:
-                    pts = await pf.fetch_day_minutes(key, proxy_urls=proxies)
-                    if pts:
-                        await db.save_market_ticks(key, pts)
+            # ---- US30Y/US10Y/VIX 主价刷新（缺价即拉 + 例行 backfill 双轨节流）：
+            #      这三项无腾讯/新浪主价源，Yahoo 一次请求两用——meta 现价刷新主价
+            #      缓存、当日 5m 分时顺带落库；其余 8 项分时纯由主价快照累积。
+            #      判定/节流抽 yahoo_refresh_plan 纯函数（见其 docstring）----
+            due = yahoo_refresh_plan(yahoo_day, last_map, now_utc, now_mono,
+                                     backfill_at, backfill_fail)
+
+            async def _refresh_yahoo(key: str) -> bool:
+                q = await pf.fetch_yahoo_day_minutes(pf.YAHOO_DAY_SYMBOLS[key], proxies)
+                if q.get("minutes"):
+                    await db.save_market_ticks(key, q["minutes"])
+                if not q.get("price"):
+                    return False   # 无主价视同失败：缓存仍空，不记成功冷却防每轮空转
+                yahoo_day[key] = q   # 按 price 缓存：极端空窗日有价无分时不放大补拉
+                return True
 
             if due:
-                results = await asyncio.gather(*(_refresh_minutes(k) for k in due),
+                results = await asyncio.gather(*(_refresh_yahoo(k) for k in due),
                                                return_exceptions=True)
                 for key, r in zip(due, results):
                     if isinstance(r, Exception):
-                        logger.warning("看板分时 backfill %s 拉取失败(5min 后重试): %s", key, r)
+                        logger.warning("看板主价 %s Yahoo 刷新失败(5min 后重试): %s", key, r)
                         backfill_fail[key] = now_mono   # 失败短冷却，防持续故障请求放大
-                    else:
+                    elif r:
                         backfill_at[key] = now_mono   # 成功才计 4h 冷却
+                    else:
+                        logger.warning("看板主价 %s Yahoo 刷新无主价(5min 后重试)", key)
+                        backfill_fail[key] = now_mono
 
-            # ---- spark 读库（每标的当日全程分时，降采样 ≤60 点）+ 主价快轮组装 ----
-            spark_map: dict[str, list[float]] = {}
+            # ---- spark 读库（每标的当日全程分时，降采样 ≤60 点，[ts,price] 对下发）
+            #      + 主价快轮组装 ----
+            spark_map: dict[str, list] = {}
             for key in pf.DAY_MINUTE_KEYS:
                 try:
-                    spark_map[key] = [p for _, p in await db.get_market_day_spark(key)]
+                    spark_map[key] = [[ts, p] for ts, p in await db.get_market_day_spark(key)]
                 except Exception as e:
                     logger.warning("看板分时 %s 读库失败: %s", key, e)
                     spark_map[key] = []
             market_cache = await pf.fetch_market_panel(
-                proxy_urls=proxies, yahoo_day=yahoo_day, spark_map=spark_map)
+                proxy_urls=proxies, yahoo_day=yahoo_day, spark_map=spark_map,
+                fetch_missing=False)   # Yahoo 补拉已由上方 due 判定单点节流
 
             # ---- 主价快照存库：价与库内最新 tick 不同才写（UTC，价变即积累分时）----
             for item in market_cache:
                 key, price = item.get("key"), item.get("price")
                 if price is None:
                     continue
-                last = last_map.get(key)
+                # HSI 仅在港股交易时段写库（腾讯收盘后仍回微变价，窗外写库
+                # 会拖出收盘后杂点尾段）
+                if key == "HSI" and not hsi_session_open(now_utc):
+                    continue
                 try:
+                    # Yahoo 三项本轮分时刚落库，last_map 是落库前快照，保留重查；
+                    # 其余项复用轮首 last_map，省一轮 DB 往返
+                    if key in ("US30Y", "US10Y", "VIX"):
+                        last = await db.get_market_last_tick(key)
+                    else:
+                        last = last_map.get(key)
                     if last is None or last[0] is None or last[1] != float(price):
                         await db.save_market_ticks(key, [(now_utc, float(price))])
                 except Exception as e:

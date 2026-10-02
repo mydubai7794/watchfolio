@@ -366,9 +366,14 @@ def _calc_recommended_prices(etf_data: list[dict]):
             etf["rec_price"] = round(price, 3)
         else:
             etf["rec_action"] = "Sell"
-            target_price = pre_close * (1 + avg_change / 100)
-            min_sell = price + 0.002
-            etf["rec_price"] = round(min(target_price, min_sell), 3)
+            if pre_close and pre_close > 0:
+                target_price = pre_close * (1 + avg_change / 100)
+                min_sell = price + 0.002
+                etf["rec_price"] = round(min(target_price, min_sell), 3)
+            else:
+                # pre_close 缺失（≤0）时理论回归价不可算，
+                # 置 None 而非下发 rec_price=0 误导用户
+                etf["rec_price"] = None
 
 
 def _empty_result(reason: str) -> dict:
