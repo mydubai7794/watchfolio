@@ -9,6 +9,7 @@ import pytest
 
 import portfolio_fetcher as pf
 import server
+from tencent_bus import TencentBus
 
 ET = ZoneInfo("America/New_York")
 
@@ -683,6 +684,8 @@ class TestBuildPositionsSessionPnl:
         assert summary["day_pnl"] == (110.0 - 90.0) * 10
         # live_change_pct 基于场基准 90
         assert abs(mu["live_change_pct"] - (110.0 - 90.0) / 90.0 * 100) < 1e-9
+        # 收盘定格涨跌幅（今日盈亏定格版分子）：(100-90)/90 = +11.11%
+        assert abs(mu["day_close_pct"] - (100.0 - 90.0) / 90.0 * 100) < 1e-9
         # 收盘定格：position 带 close_price；定格盈亏 = (100-90)×10 = 100
         assert mu["close_price"] == 100.0
         assert summary["close_pnl"] == (100.0 - 90.0) * 10
@@ -774,19 +777,48 @@ class TestFetchOvernightQuotes:
         assert asyncio.run(pf.resolve_crypto_map(["AMD"])) == {"AMD": "AMDBUSDT"}
         assert calls == []
 
-    def test_fetch_crypto_prices_mid_price(self, monkeypatch):
-        """24hr ticker 取 (bid+ask)/2 中间价；单只失败静默跳过不影响其余。"""
+    def test_fetch_crypto_prices_batch_mid_price(self, monkeypatch):
+        """bookTicker 批量一次拿全部：symbols=JSON 数组单参数，取 (bid+ask)/2 中间价。"""
+        calls = []
+
         async def fake_client_get(self, url, **kw):
+            calls.append(url)
+            assert "symbols=" in url   # 批量参数形态（URL 编码 JSON 数组）
+
             class R:
                 def json(self):
-                    if "AMDBUSDT" in url:
-                        return {"bidPrice": "620.02", "askPrice": "620.10"}
-                    raise RuntimeError("boom")
+                    return [
+                        {"symbol": "AMDBUSDT", "bidPrice": "620.02", "askPrice": "620.10"},
+                        {"symbol": "MUBUSDT", "bidPrice": "1090.00", "askPrice": "1090.02"},
+                    ]
             return R()
 
         monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_client_get)
-        out = asyncio.run(pf.fetch_crypto_prices({"AMD": "AMDBUSDT", "MU": "MUBUSDT"}))
-        assert out == {"AMD": {"price": pytest.approx(620.06)}}
+        out = asyncio.run(pf.fetch_crypto_prices(
+            {"AMD": "AMDBUSDT", "MU": "MUBUSDT"}))
+        # 单次请求携带全部交易对（攒批原则：次数要少，同批全查）
+        assert len(calls) == 1
+        assert out == {"AMD": {"price": pytest.approx(620.06)},
+                       "MU": {"price": pytest.approx(1090.01)}}
+
+    def test_fetch_crypto_prices_bad_resp_falls_back(self, monkeypatch):
+        """批量响应非 list（错误对象）→ 换代理候选重试，全失败返回 {}。"""
+        attempts = []
+
+        async def fake_client_get(self, url, **kw):
+            attempts.append(url)
+
+            class R:
+                def json(self):
+                    return {"code": -1121, "msg": "Invalid symbol."}   # 非批量数组
+            return R()
+
+        monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_client_get)
+        out = asyncio.run(pf.fetch_crypto_prices(
+            {"AMD": "AMDBUSDT"}, proxy_urls=["http://p1:9", "http://p2:9"]))
+        assert out == {}
+        # 直连 + 2 个代理候选逐个尝试后放弃
+        assert len(attempts) == 3
 
     def test_fetch_overnight_quotes_degrades_to_empty(self, monkeypatch):
         """映射为空（全部无对应交易对/接口失败）→ 恒 {}，自然降级定格口径。"""
@@ -1046,7 +1078,10 @@ class TestMarketPanelYahooSpark:
         async def fake_get_text(url, headers=None, timeout=10.0):
             if "minute/query" in url:
                 minute_urls.append(url)
-            return ""    # 腾讯混排空：BZ/GC 主价走新浪 hf 兜底
+            return ""    # 分钟线路径（走 _get_text 的仅剩 HSI 分钟线）
+
+        async def fake_bus_get(codes):
+            return ""    # 腾讯混排（攒批总线）空：BZ/GC 主价走新浪 hf 兜底
 
         async def fake_resilient(url, headers=None, proxy_urls=None, timeout=10.0):
             return SINA_PANEL_RAW + (
@@ -1061,6 +1096,7 @@ class TestMarketPanelYahooSpark:
             return {"price": 5.6, "pre_close": 5.5, "change_pct": 1.8, "minutes": []}
 
         monkeypatch.setattr(pf, "_get_text", fake_get_text)
+        monkeypatch.setattr(pf.tencent_bus, "get", fake_bus_get)
         monkeypatch.setattr(pf, "_get_text_resilient", fake_resilient)
         monkeypatch.setattr(pf, "fetch_yahoo_day_minutes", fake_day)
         panel = asyncio.run(pf.fetch_market_panel(
@@ -1099,3 +1135,194 @@ class TestMarketPanelYahooSpark:
 
         monkeypatch.setattr(pf, "_fetch_yahoo_chart", fake_fail)
         assert asyncio.run(pf.fetch_fx_spark()) == []
+
+
+class TestCryptoAliasDerive:
+    """同标的替代推导（QQQM→QQQ）：加密价百分点映射到自身收盘基准。"""
+
+    def test_derive_alias_qqqm_from_qqq(self):
+        # QQQ 加密价 745 / QQQ 收盘 740 = +0.6757% → QQQM = 304.64 × 比率
+        overnight = {"QQQ": {"price": 745.0}}
+        close_map = {"QQQM": 304.64, "QQQ": 740.0}
+        out = pf.derive_alias_prices(overnight, close_map, ["QQQM", "QQQ"])
+        assert set(out) == {"QQQM"}
+        assert out["QQQM"]["price"] == pytest.approx(304.64 * 745.0 / 740.0)
+
+    def test_derive_alias_skips_when_self_covered(self):
+        # 自身已有加密价（理论不该发生）→ 不推导不覆盖
+        overnight = {"QQQ": {"price": 745.0}, "QQQM": {"price": 306.0}}
+        out = pf.derive_alias_prices(overnight, {"QQQM": 304.64, "QQQ": 740.0},
+                                     ["QQQM", "QQQ"])
+        assert out == {}
+
+    def test_derive_alias_requires_close_anchors(self):
+        # 收盘定格缺失（任一侧）→ 放弃推导（保持定格口径，不猜价）
+        overnight = {"QQQ": {"price": 745.0}}
+        assert pf.derive_alias_prices(overnight, {"QQQ": 740.0}, ["QQQM"]) == {}
+        assert pf.derive_alias_prices(overnight, {"QQQM": 304.64}, ["QQQM"]) == {}
+        assert pf.derive_alias_prices(overnight, {}, ["QQQM", "QQQ"]) == {}
+
+    def test_derive_alias_not_in_universe(self):
+        # QQQM 不在持仓清单 → 不推导（推导只为持仓服务）
+        out = pf.derive_alias_prices({"QQQ": {"price": 745.0}},
+                                     {"QQQM": 304.64, "QQQ": 740.0}, ["QQQ"])
+        assert out == {}
+
+
+class TestTdSessionAnchors:
+    """冷启动一场锚点恢复（twelvedata open/close）：批量 8 只 + 60s 节流。"""
+
+    def test_fetch_anchors_parses_open_close(self, monkeypatch):
+        pf._last_td_used = 0.0   # 重置节流
+
+        async def fake_get(self, url, params=None, **kw):
+            assert params["symbol"] == "AMD,MU"
+            assert params["apikey"] == pf.TWELVEDATA_API_KEY
+
+            class R:
+                def json(self):
+                    return {"AMD": {"open": "610.0", "close": "615.5"},
+                            "MU": {"open": "1080.0", "close": "1065.11"}}
+            return R()
+
+        monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_get)
+        out = asyncio.run(pf.fetch_td_session_anchors(["AMD", "MU"]))
+        assert out == {"AMD": {"open": 610.0, "close": 615.5},
+                       "MU": {"open": 1080.0, "close": 1065.11}}
+
+    def test_fetch_anchors_throttled(self, monkeypatch):
+        # 距上次使用 <60s → 直接 {}，不发起请求（复用 twelvedata 免费限额节流）
+        pf._last_td_used = time.monotonic()
+        calls = []
+
+        async def boom(self, *a, **kw):
+            calls.append(1)
+            raise AssertionError("节流期内不应请求")
+
+        monkeypatch.setattr(pf.httpx.AsyncClient, "get", boom)
+        assert asyncio.run(pf.fetch_td_session_anchors(["AMD"])) == {}
+        assert calls == []
+
+    def test_fetch_anchors_batch_cap(self, monkeypatch):
+        # 单批上限 8 只（对齐免费 8 credits/min），超出部分留给下批渐进
+        pf._last_td_used = 0.0
+        got = {}
+
+        async def fake_get(self, url, params=None, **kw):
+            got["symbols"] = params["symbol"].split(",")
+
+            class R:
+                def json(self):
+                    return {s: {"open": "1.0", "close": "1.0"} for s in got["symbols"]}
+            return R()
+
+        monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_get)
+        out = asyncio.run(pf.fetch_td_session_anchors([f"S{i}" for i in range(12)]))
+        assert len(got["symbols"]) == 8
+        assert len(out) == 8
+
+    def test_fetch_anchors_fail_returns_empty(self, monkeypatch):
+        pf._last_td_used = 0.0
+
+        async def fake_get(self, *a, **kw):
+            raise RuntimeError("network down")
+
+        monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_get)
+        assert asyncio.run(pf.fetch_td_session_anchors(["AMD"])) == {}
+
+
+class TestTencentBus:
+    """腾讯行情攒批发送路由：微批合并（次数要少，同批全查）。"""
+
+    def _mk_bus(self):
+        bus = TencentBus(min_interval=0.2, ttl=0.4)
+        return bus
+
+    def _patch_fetch(self, monkeypatch, responses):
+        """responses: dict[prefixed_code, fields_str]；记录每次拉取的 codes。"""
+        reqs = []
+
+        async def fake_fetch(self):
+            try:
+                batch = sorted(self._pending)
+                self._pending.clear()
+                if not batch:
+                    return
+                reqs.append(batch)
+                now = time.monotonic()
+                self._last_fetch = now
+                for c in batch:
+                    if c in responses:
+                        self._result[c] = f"v_{c}={responses[c]}"
+                        self._ts[c] = now
+            finally:
+                self._inflight = None
+
+        monkeypatch.setattr(TencentBus, "_fetch", fake_fetch)
+        return reqs
+
+    def test_two_consumers_share_one_request(self, monkeypatch):
+        """两个消费方并发请求不同 code → 聚合为一次批量拉取（同批全查）。"""
+        bus = self._mk_bus()
+        reqs = self._patch_fetch(monkeypatch, {"usAMD": "1~AMD~620", "sz159501": "51~ETF~1.2"})
+
+        # 模拟真实网络延迟：批在飞期间第二个消费方到达 → 其 code 并入同批
+        orig_fetch = TencentBus._fetch
+
+        async def slow_fetch(self):
+            await asyncio.sleep(0.15)
+            await orig_fetch(self)
+
+        monkeypatch.setattr(TencentBus, "_fetch", slow_fetch)
+
+        async def main():
+            t1 = asyncio.create_task(bus.get(["usAMD"]))
+            await asyncio.sleep(0.05)
+            t2 = asyncio.create_task(bus.get(["sz159501"]))
+            return await asyncio.gather(t1, t2)
+
+        r1, r2 = asyncio.run(main())
+        assert r1 == "v_usAMD=1~AMD~620"
+        assert r2 == "v_sz159501=51~ETF~1.2"
+        # 两次消费只发起一次真实拉取，且一批带全两个 code
+        assert len(reqs) == 1 and set(reqs[0]) == {"usAMD", "sz159501"}
+
+    def test_ttl_cache_hit_no_refetch(self, monkeypatch):
+        """TTL 内重复请求同一 code → 直接回缓存，不重复拉取。"""
+        bus = self._mk_bus()
+        reqs = self._patch_fetch(monkeypatch, {"usAMD": "1~AMD~620"})
+
+        async def main():
+            a = await bus.get(["usAMD"])
+            b = await bus.get(["usAMD"])
+            return a, b
+
+        a, b = asyncio.run(main())
+        assert a == b == "v_usAMD=1~AMD~620"
+        assert len(reqs) == 1
+
+    def test_min_interval_coalesces(self, monkeypatch):
+        """MIN_INTERVAL 内的第二次拉取需求被抑制（合入节奏，不放大请求）。"""
+        bus = self._mk_bus()
+        reqs = self._patch_fetch(monkeypatch, {"usAMD": "1~AMD~620", "usMU": "1~MU~1090"})
+
+        async def main():
+            await bus.get(["usAMD"])
+            await asyncio.sleep(0.05)   # 仍在 min_interval(0.2s) 冷却内
+            await bus.get(["usMU"])
+            await asyncio.sleep(0.3)     # TTL(0.4s) 内：缓存直接命中，不再拉取
+            await bus.get(["usMU"])
+
+        asyncio.run(main())
+        assert reqs == [["usAMD"], ["usMU"]]
+
+    def test_join_drops_missing(self, monkeypatch):
+        """部分 code 拉取失败（响应缺失）→ 拼接文本自然缺该段，不抛错。"""
+        bus = self._mk_bus()
+        self._patch_fetch(monkeypatch, {"usAMD": "1~AMD~620"})
+
+        async def main():
+            return await bus.get(["usAMD", "usBAD"])
+
+        out = asyncio.run(main())
+        assert out == "v_usAMD=1~AMD~620"

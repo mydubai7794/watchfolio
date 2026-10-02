@@ -25,6 +25,7 @@ from datetime import datetime
 import httpx
 
 from config import FUTURES_NAME_MAP, MIN_INTERVAL_SEC
+from tencent_bus import tencent_bus
 
 logger = logging.getLogger(__name__)
 
@@ -796,12 +797,11 @@ async def fetch_round(
     # 1. 设置代理
     set_proxies(proxy_urls)
 
-    # 2. ETF 批量行情 (腾讯)
+    # 2. ETF 批量行情 (腾讯，经攒批发送路由与候选池/持仓共用节奏)
     prefixed = [_add_prefix(c) for c in etf_codes]
-    tencent_url = f"{TENCENT_BASE}{','.join(prefixed)}"
     etf_data: list[dict] = []
 
-    raw_etf = await _http_get(tencent_url, source="tencent")
+    raw_etf = await tencent_bus.get(prefixed)
     naming: dict[str, str] = {}
     if raw_etf:
         etf_data, errors, naming = _parse_tencent_etf(raw_etf, etf_codes)
@@ -1003,9 +1003,9 @@ async def fetch_candidates(tencent_codes: list[str], futures_codes: list[str] | 
 
     if tencent_codes:
         prefixed = [_add_prefix(c) for c in tencent_codes]
-        tencent_url = f"{TENCENT_BASE}{','.join(prefixed)}"
 
-        raw = await _http_get(tencent_url, source="tencent_candidate")
+        # 攒批发送路由：与 A股监控/持仓行情共用一个批量节奏（少请求，同批全查）
+        raw = await tencent_bus.get(prefixed)
         if raw:
             quote_data, naming = _parse_tencent_quote(raw, tencent_codes)
             logger.info("候选池腾讯行情: %d/%d 成功", len(quote_data), len(tencent_codes))

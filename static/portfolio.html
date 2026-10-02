@@ -564,10 +564,10 @@ function positionTags(p, session) {
 // （盘前/盘后/夜盘时段），字段缺失（null）省略不显示
 function nightBadge(p, session, night) {
   if (session !== 'pre' && session !== 'post' && !night) return '';
-  if (p.overnight_change_pct == null) return '';
+  if (p.overnight_change_pct == null || p.overnight_change_pct === 0) return '';
   const inc = p.overnight_change_pct;
   const tone = inc > 0 ? ' pill-up' : (inc < 0 ? ' pill-down' : '');
-  return '<span class="pill tag' + tone + '">' + sign(inc) + fmt(inc, 1) + '%</span>';
+  return '<span class="pill tag' + tone + '">收' + sign(inc) + fmt(inc, 1) + '%</span>';
 }
 
 // night_session 归一：兼容旧布尔与新结构 {active,window,source,note}
@@ -606,8 +606,12 @@ function renderPositions(d) {
   positions.forEach(p => {
     const tags = positionTags(p, session) + (p.stale ? '<span class="pill tag tag-stale">无行情</span>' : '');
     const sub = p.market === 'HKFUND' ? (p.nav_date || '') : (p.quote_time || '');
-    // 涨跌幅口径：实时累计%（live_change_pct，基准=场基准）优先，缺失回退常规涨跌幅（基准=昨收）
-    const liveChg = (p.live_change_pct != null) ? p.live_change_pct : p.change_pct;
+    // 涨跌幅口径（一场分层）：盘中=实时累计%（live_change_pct，基准=场基准）；
+    // 收盘后=收盘定格涨跌%（day_close_pct，基准=场基准→16:00 收盘定格，
+    // 不再混入盘后/夜盘段）；盘后/夜盘实时增量另由夜盘徽标展示
+    const closedView = session !== 'regular' && p.day_close_pct != null;
+    const liveChg = closedView ? p.day_close_pct
+      : ((p.live_change_pct != null) ? p.live_change_pct : p.change_pct);
     const chgHtml = liveChg==null ? '--' : sign(liveChg)+fmt(liveChg)+'%';
     // 现价 + 夜盘增量徽标（盘后/夜盘时段且字段齐备才显示）
     const priceHtml = p.price ? fmt(p.price, p.market==='HKFUND'?4:2) : '--';
@@ -669,13 +673,13 @@ function renderOverview(d) {
   const extLive = d.session === 'pre' || d.session === 'post' || nightOf(d).window;
   document.getElementById('dayPnlLabel').innerHTML =
     '今日盈亏' + (extLive ? ' <i class="ref-tag">实时累计</i>' : '');
-  // 一场口径副行：收盘定格（Micro 灰字）+「昨收以来」夜盘增量徽标。
-  // 显示门槛统一用 extLive（盘前/盘后/夜盘），regular 时段两数值恒等、副行无信息量，隐藏
+  // 一场口径副行：收盘定格（Micro 灰字）+「收盘以来」隔夜增量徽标。
+  // 显示门槛统一用 extLive（盘后/夜盘/盘前），regular 时段两数值恒等、副行无信息量，隐藏
   const subEl = document.getElementById('dayPnlSub');
   if (s.close_pnl != null && extLive) {
     let subHtml = '<span>收盘定格 ' + sign(s.close_pnl) + usd(s.close_pnl) + '</span>';
     if (extLive && s.overnight_pnl != null) {
-      subHtml += '<span class="ov-pill ' + cls(s.overnight_pnl) + '">昨收以来 '
+      subHtml += '<span class="ov-pill ' + cls(s.overnight_pnl) + '">收盘以来 '
         + sign(s.overnight_pnl) + usd(s.overnight_pnl) + '</span>';
     }
     subEl.innerHTML = subHtml;
@@ -691,18 +695,18 @@ function renderOverview(d) {
   document.getElementById('cashVal').textContent = usd(s.cash_usd);
   document.getElementById('cashSub').textContent =
     (s.cash_usd != null && d.fx_usdhkd) ? '≈ HK$' + fmt(s.cash_usd * d.fx_usdhkd, 0) : '';
-  // session 徽章口径：盘前计入上一场/盘后实时累计；夜盘/周末窗口用加密市场
-  // 数据源代理价补全（active 时徽章「夜盘·加密市场数据源」）；全部标的无对应
-  // 交易对时退回「数据定格」提示（价格定格 19:59 盘后价）
+  // session 徽章与提示：非 regular 时段加密市场数据源代理价补全（盘后/夜盘/
+  // 盘前/假日），active 时徽章取后端 note；无活源时退回「数据定格」
   const badge = document.getElementById('sessionBadge');
   const ng = nightOf(d);
-  badge.textContent = ng.active ? (ng.note || '夜盘 · 加密市场数据源')
-    : (ng.window ? '夜盘 · 数据定格' : (SESSION_BADGE[d.session] || d.session || '--'));
+  badge.textContent = ng.active ? (ng.note || '加密市场数据源')
+    : (ng.window ? (SESSION_BADGE[d.session] || d.session || '--') + ' · 数据定格'
+                 : (SESSION_BADGE[d.session] || d.session || '--'));
   const hintEl = document.getElementById('nightHint');
   hintEl.style.display = ng.window ? '' : 'none';
   hintEl.textContent = ng.active
-    ? '夜盘/周末时段：加密市场数据源代理价近似夜盘价（允许微小偏差）'
-    : '夜盘时段行情暂不可用，价格定格于盘后收盘';
+    ? '收盘至开盘时段：加密市场数据源代理价近似活价（允许微小偏差，盘前盘后优先真实扩展价）'
+    : '收盘时段行情暂不可用，价格定格于最近收盘';
   document.getElementById('fetchTime').textContent = d.fetch_time || '--:--:--';
   document.getElementById('fxInfo').textContent = 'USD/HKD ' + fmt(d.fx_usdhkd, 4) + (d.fx_fallback ? '(默认)' : '');
 

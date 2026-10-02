@@ -23,6 +23,8 @@ from urllib.parse import quote
 
 import httpx
 
+from tencent_bus import tencent_bus
+
 logger = logging.getLogger(__name__)
 
 from zoneinfo import ZoneInfo
@@ -45,10 +47,15 @@ SINA_PANEL_URL = "https://hq.sinajs.cn/list=DINIW,hf_OIL,hf_GC,fx_susdcnh"
 # （详见《美股夜盘数据源研报.md》）；境内 IP 直连不可用，须经境外代理访问
 CRYPTO_EXCHANGE_INFO_URL = "https://data-api.binance.vision/api/v3/exchangeInfo"
 CRYPTO_TICKER_URL = "https://data-api.binance.vision/api/v3/ticker/24hr?symbol={symbol}"
+CRYPTO_BOOK_TICKER_URL = "https://data-api.binance.vision/api/v3/ticker/bookTicker"
 CRYPTO_PING_URL = "https://data-api.binance.vision/api/v3/ping"   # 代理境外可达性探测（weight 0）
 # 注：data-api.binance.vision 是该交易所官方公开行情镜像域名，主站 api.binance.com
 # 对机房 IP 段有 TLS 层封禁（实测 *REMOVED* 等境外出口 CONNECT 成功但握手被
-# reset），vision 域名不封且行情数据与主站完全一致
+# reset），vision 域名不封且行情数据与主站完全一致；实测境内直连可达（200）
+# 同标的替代映射（自身无对应交易对、但可借替代标的涨跌幅推导夜盘价）：
+# QQQM 与 QQQ 为同一基金的两份额类，净值比率恒定 → QQQM 夜盘价 =
+# QQQM 收盘定格 × (QQQ 加密中间价 / QQQ 收盘定格)
+CRYPTO_ALIAS = {"QQQM": "QQQ"}
 # twelvedata 接口型美股/港股行情兜底（有 key 不 ban IP；免费 8 credits/min，
 # 批量请求 credits=symbol 数，故单次批量上限 8 并轮换指针覆盖全部持仓）
 TWELVEDATA_QUOTE_URL = "https://api.twelvedata.com/quote"
@@ -604,7 +611,8 @@ def build_positions(holdings: list[dict], us_quotes: dict[str, dict],
                                            cost_usd=cost_usd, nav_date=str(fund.get("nav_date", "")),
                                            nav_change_pct=fund.get("nav_change_pct"),
                                            close_price=nav,
-                                           live_change_pct=(nav - prev) / prev * 100 if prev > 0 else None))
+                                           live_change_pct=(nav - prev) / prev * 100 if prev > 0 else None,
+                                           base_ref=prev if prev > 0 else None))
         elif h["market"] == "HK":
             # 港股上市 ETF：腾讯 hk 前缀行情，HKD 计价按汇率折算 USD；无扩展时段(ext=regular)
             q = us_quotes.get(sym)
@@ -628,7 +636,8 @@ def build_positions(holdings: list[dict], us_quotes: dict[str, dict],
                                            cost_usd=cost_usd, pre_close=q["pre_close"],
                                            quote_time=q.get("quote_time", ""),
                                            close_price=close_price,
-                                           live_change_pct=(price_now - base) / base * 100 if base > 0 else None))
+                                           live_change_pct=(price_now - base) / base * 100 if base > 0 else None,
+                                           base_ref=base if base > 0 else None))
         else:
             q = us_quotes.get(sym)
             if not q or not q.get("price"):
@@ -652,7 +661,8 @@ def build_positions(holdings: list[dict], us_quotes: dict[str, dict],
                                            pre_close=q["pre_close"],
                                            quote_time=q.get("ext_time") or q.get("quote_time", ""),
                                            close_price=close_price,
-                                           live_change_pct=(price_now - base) / base * 100 if base > 0 else None))
+                                           live_change_pct=(price_now - base) / base * 100 if base > 0 else None,
+                                           base_ref=base if base > 0 else None))
         p = positions[-1]
         total_value += p["value"]
         total_cost += p["cost_usd"]
@@ -677,7 +687,8 @@ def build_positions(holdings: list[dict], us_quotes: dict[str, dict],
 
 def _position(h: dict, price, value, today, pnl, ext, stale,
               cost_usd=None, pre_close=None, quote_time="", nav_date="",
-              nav_change_pct=None, close_price=None, live_change_pct=None):
+              nav_change_pct=None, close_price=None, live_change_pct=None,
+              base_ref=None):
     """构造单持仓输出行（内部辅助）。金额保持原始浮点精度，不做 round。"""
     qty, cost = float(h["quantity"]), float(h["cost_price"])
     if cost_usd is None:
@@ -686,6 +697,10 @@ def _position(h: dict, price, value, today, pnl, ext, stale,
     # 为 None，前端直接消费不再二次推导，与 overnight_pnl=day_pnl-close_pnl 同源
     overnight_change_pct = ((price - close_price) / close_price * 100
                             if (close_price and price) else None)
+    # 收盘定格涨跌幅%（=今日盈亏的定格版分子）：(收盘定格-场基准)/场基准×100；
+    # 非 regular 时段前端优先用它展示「今日涨跌」（收盘后不再混入盘后/夜盘段）
+    day_close_pct = ((close_price - base_ref) / base_ref * 100
+                     if (close_price and base_ref and base_ref > 0) else None)
     return {
         "id": h.get("id"),
         "symbol": h["symbol"], "name": h.get("name", ""), "market": h.get("market", "US"),
@@ -699,9 +714,10 @@ def _position(h: dict, price, value, today, pnl, ext, stale,
         "position_pnl_pct": pnl / cost_usd * 100 if (cost_usd > 0 and pnl is not None) else None,
         "cost_usd": cost_usd,
         # 一场口径：常规收盘定格价、实时累计涨跌%（基准=base_overrides 优先）、
-        # 夜盘增量%（基准=收盘定格价，后端统一下发）
+        # 收盘定格涨跌%（今日盈亏定格版分子）、夜盘增量%（基准=收盘定格价）
         "close_price": close_price,
         "live_change_pct": live_change_pct,
+        "day_close_pct": day_close_pct,
         "overnight_change_pct": overnight_change_pct,
         "ext": ext, "stale": stale,
         "quote_time": quote_time, "nav_date": nav_date, "nav_change_pct": nav_change_pct,
@@ -763,7 +779,8 @@ async def fetch_quotes(us_symbols: list[str], hk_symbols: list[str],
     prefixes = {s: "us" for s in us_symbols}
     prefixes.update({s: "hk" for s in hk_symbols})
     req = ",".join(prefixes[s] + s for s in all_symbols)
-    raw = await _get_text(TENCENT_US_URL.format(symbols=req))
+    # 攒批发送路由：与 A股监控/候选池共用一个批量节奏（少请求，同批全查）
+    raw = await tencent_bus.get(req.split(","))
     quotes: dict[str, dict] = {}
     if raw:
         quotes = parse_tencent_quotes(raw, all_symbols, prefixes)
@@ -829,6 +846,68 @@ async def fetch_us_quotes(symbols: list[str], session: str | None = None) -> dic
     return await fetch_quotes(symbols, [], session)
 
 
+def derive_alias_prices(overnight: dict[str, dict], close_map: dict[str, float],
+                        us_symbols: list[str]) -> dict[str, dict]:
+    """同标的替代推导（纯函数）：借替代标的加密价涨跌幅还原无交易对标的的夜盘价。
+
+    映射表 CRYPTO_ALIAS（如 QQQM→QQQ，同一基金两份额类、净值比率恒定）：
+    sym 夜盘价 = sym 收盘定格 × (alias 加密价 / alias 收盘定格)——把替代标的的
+    百分比变动映射到自身基准得到最新净值。前提：sym 自身无加密价、alias 有、
+    两者收盘定格齐备（腾讯常规收盘）。返回补充进 overnight 的新增项。
+    """
+    added: dict[str, dict] = {}
+    for sym, alias in CRYPTO_ALIAS.items():
+        if sym not in us_symbols or sym in overnight or alias not in overnight:
+            continue
+        c_self = close_map.get(sym)
+        c_alias = close_map.get(alias)
+        a_price = (overnight.get(alias) or {}).get("price")
+        if c_self and c_alias and a_price:
+            added[sym] = {"price": c_self * a_price / c_alias}
+    return added
+
+
+async def fetch_td_session_anchors(us_symbols: list[str]) -> dict[str, dict]:
+    """冷启动一场口径锚点恢复：twelvedata quote 批量拉当日 open/close。
+
+    场景：服务重启落在非 regular 时段，腾讯昨收(f[4])语义已切换为最近收盘，
+    无法还原「9:30 开盘基准」→ 退化后 base==close，收盘定格段(close_pnl)恒 0。
+    本函数用 twelvedata quote 的 open/close 字段（= 当日常规时段开/收盘价，
+    盘后调用语义稳定）补齐锚点：base_closes=open、close_prices=close。
+
+    限额纪律：免费 8 credits/min（credits=symbol 数），单批 8 只、间隔 60s
+    （_TD_MIN_INTERVAL_SEC 复用），多只缺失分批渐进补齐（每分钟一批）。
+    返回 {symbol: {"open": x, "close": y}}；失败返回 {}（调用方退化为腾讯兜底）。
+    """
+    global _last_td_used
+    batch = [s for s in us_symbols][:TWELVEDATA_BATCH]
+    if not batch or time.monotonic() - _last_td_used < _TD_MIN_INTERVAL_SEC:
+        return {}
+    _last_td_used = time.monotonic()
+    out: dict[str, dict] = {}
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(TWELVEDATA_QUOTE_URL, params={
+                "symbol": ",".join(batch), "apikey": TWELVEDATA_API_KEY})
+            data = resp.json()
+        if isinstance(data, dict) and "symbol" in data and len(batch) == 1:
+            items = {str(data.get("symbol") or batch[0]): data}
+        else:
+            items = data if isinstance(data, dict) else {}
+        for sym, item in items.items():
+            sym = str(sym).split(":")[0]
+            if sym in set(batch) and item:
+                o, c = _f(item.get("open")), _f(item.get("close"))
+                if o > 0 and c > 0:
+                    out[sym] = {"open": o, "close": c}
+        if out:
+            logger.info("一场锚点恢复(twelvedata): %d/%d (本批 %s)",
+                        len(out), len(us_symbols), batch)
+    except Exception as e:
+        logger.warning("一场锚点恢复失败: %s", e)
+    return out
+
+
 async def resolve_crypto_map(us_symbols: list[str],
                              proxy_urls: list[str] | None = None) -> dict[str, str]:
     """解析美股代码 → 加密市场数据源交易对映射（如 AMD→AMDBUSDT）。
@@ -864,29 +943,37 @@ async def resolve_crypto_map(us_symbols: list[str],
 
 async def fetch_crypto_prices(bmap: dict[str, str],
                               proxy_urls: list[str] | None = None) -> dict[str, dict]:
-    """逐只拉加密市场数据源 24hr ticker，取买卖一中间价 (bid+ask)/2（研报 4.3 的稳健口径）。
+    """批量拉加密市场数据源 bookTicker，取买卖一中间价 (bid+ask)/2（研报 4.3 稳健口径）。
 
-    约 15 只=30 weight/轮，远低于 1200 weight/min/IP；单只失败/停牌跳过不致命。
-    请求直连优先（实测境内可达），失败按 proxy_urls 顺序逐个代理重试。
+    攒批原则（用户：次数要少，尽量同批全查）：symbols 参数一次携带全部交易对
+    （≤20 只 weight 仅 1，URL 编码 JSON 数组），替代逐只请求（原 15 只=30
+    weight/轮）；请求直连优先（实测境内可达），失败按 proxy_urls 顺序逐个
+    代理重试；全部失败返回 {}（下轮再试）。
     返回 {美股代码: {"price": 中间价}}。
     """
+    if not bmap:
+        return {}
     out: dict[str, dict] = {}
     candidates = [None] + list(proxy_urls or [])[:2]
-
-    async def _one(sym: str, pair: str) -> None:
-        for proxy in candidates:
-            try:
-                async with httpx.AsyncClient(timeout=10, proxy=proxy) as client:
-                    resp = await client.get(CRYPTO_TICKER_URL.format(symbol=pair))
-                    t = resp.json()
-                mid = (Decimal(str(t.get("bidPrice", "0"))) + Decimal(str(t.get("askPrice", "0")))) / 2
-                if mid > 0:
+    pair2sym = {p: s for s, p in bmap.items()}
+    symbols_param = quote(json.dumps(sorted(bmap.values()), separators=(",", ":")))
+    for proxy in candidates:
+        try:
+            async with httpx.AsyncClient(timeout=10, proxy=proxy) as client:
+                resp = await client.get(
+                    CRYPTO_BOOK_TICKER_URL + "?symbols=" + symbols_param)
+                rows = resp.json()
+            if not isinstance(rows, list):
+                continue   # 换下一个候选重试
+            for row in rows:
+                sym = pair2sym.get(str(row.get("symbol", "")))
+                mid = (Decimal(str(row.get("bidPrice", "0")))
+                       + Decimal(str(row.get("askPrice", "0")))) / 2
+                if sym and mid > 0:
                     out[sym] = {"price": float(mid)}
-                return
-            except Exception:
-                continue   # 换下一个代理重试；全部失败静默跳过（下轮再试）
-
-    await asyncio.gather(*(_one(s, p) for s, p in bmap.items()))
+            return out
+        except Exception:
+            continue   # 换下一个代理重试；全部失败静默跳过（下轮再试）
     return out
 
 
@@ -1067,7 +1154,8 @@ async def fetch_market_panel(proxy_urls: list[str] | None = None,
     code_sym = {c: _split_tencent_code(c)[1] for c in tencent_codes}   # 腾讯代码 → 输出 symbol
     sym_prefix = {s: p for p, s in (_split_tencent_code(c) for c in tencent_codes)}
     quotes: dict[str, dict] = {}
-    raw = await _get_text(TENCENT_US_URL.format(symbols=",".join(tencent_codes)))
+    # 攒批发送路由：看板主价与监控/候选池/持仓共用一个批量节奏
+    raw = await tencent_bus.get(tencent_codes)
     if raw:
         quotes = parse_tencent_quotes(raw, list(code_sym.values()), sym_prefix)
 

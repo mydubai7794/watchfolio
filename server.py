@@ -1206,9 +1206,10 @@ async def _portfolio_loop():
             # 消除对 us_market_session 展示串的 strptime 反解析）
             et_dt = datetime.now(pf.ET_TZ)
             session, _et_date, et_now = pf.us_market_session(et_dt)
-            # 夜盘/周末窗口：加密市场数据源代理价补全时段（closed 但有活源）
-            night_window = (et_dt.hour >= 20 or et_dt.hour < 4) or et_dt.weekday() >= 5
-            interval = {"regular": 10.0, "pre": 30.0, "post": 30.0}.get(session, 60.0 if night_window else 600.0)
+            # 加密窗口：收盘→开盘全段（盘后+夜盘+盘前+周末/假日），非 regular 即有活源
+            crypto_window = session != "regular"
+            interval = {"regular": 10.0, "pre": 30.0, "post": 30.0}.get(
+                session, 60.0 if crypto_window else 600.0)
             holdings = await db.get_holdings(enabled_only=True)
             us_symbols = [h["symbol"] for h in holdings if h["market"] == "US"]
             hk_symbols = [h["symbol"] for h in holdings if h["market"] == "HK"]
@@ -1224,8 +1225,27 @@ async def _portfolio_loop():
                     await db.update_holding_names({s: q["name"] for s, q in quotes.items() if q.get("name")})
                 except Exception:
                     pass
+            # ---- 一场口径锚点恢复（冷启动，先于状态机）----
+            # 重启落在非 regular 时段：腾讯昨收(f[4])语义已切换为最近收盘，直接
+            # 退化会让 base==close → 收盘定格段(close_pnl)恒 0（$0.00 问题根因）。
+            # 用 twelvedata 当日 open/close 补齐锚点（8 只/批渐进，见 fetcher 限额）；
+            # 恢复成功的 symbol 不再走腾讯退化
+            if session != "regular" and us_symbols:
+                missing = [s for s in us_symbols
+                           if s not in portfolio_session_state.get("base_closes", {})]
+                if missing:
+                    anchors = await pf.fetch_td_session_anchors(missing)
+                    base_map = portfolio_session_state.setdefault("base_closes", {})
+                    close_map = portfolio_session_state.setdefault("close_prices", {})
+                    for s, a in anchors.items():
+                        base_map[s] = a["open"]
+                        close_map[s] = a["close"]
+                    still = [s for s in missing if s not in anchors]
+                    if still:
+                        logger.info("锚点恢复待续(%d 只已补, %d 只待下批): %s",
+                                    len(anchors), len(still), still)
             # ---- 一场口径状态机维护（base=场基准 / close=常规收盘定格）----
-            # 必须先于夜盘覆盖：状态机吃原始腾讯价（f[3]/f[4] 口径），确保
+            # 必须先于加密覆盖：状态机吃原始腾讯价（f[3]/f[4] 口径），确保
             # close_prices 定格不被加密市场数据源代理价污染（尤其周末
             # closed+hour>=16 分支会用 q["price"] 写定格——若先覆盖，隔夜
             # 增量语义错乱）
@@ -1234,13 +1254,14 @@ async def _portfolio_loop():
             if fallback_syms:
                 logger.info("一场口径基准冷启动退化: 非 regular 时段用腾讯昨收充当场基准 "
                             "(存在隔夜偏差, 09:30 开盘自愈): %s", fallback_syms)
-            # ---- 夜盘/周末代理价覆盖（状态机维护之后，仅影响展示与 tick）----
-            # 加密市场数据源（7×24 有价，偏差 0.02%-0.1%）覆盖美股现价 →
-            # 组合总值 24h 曲线连续；请求走境外分类代理（不可用回退通用池，
-            # fetcher 内部逐候选尝试）；无对应交易对/失败的标的自然缺省，
-            # 维持 19:59 盘后价定格口径
+            # ---- 加密市场数据源覆盖（状态机维护之后，仅影响展示与 tick）----
+            # 窗口=收盘→开盘全段（盘后+夜盘+盘前+周末/假日）：7×24 有价（偏差
+            # 0.02%-0.1%）覆盖美股现价 → 组合总值 24h 曲线连续；盘前盘后真实
+            # 扩展价（腾讯/新浪 ext）优先，加密价兜底 ext 缺失标的；请求直连
+            # 优先（探测循环确认），不可用时境外分类代理→通用池；无对应交易对/
+            # 失败的标的自然缺省，维持盘后价定格口径
             overnight_used = 0
-            if night_window and us_symbols:
+            if crypto_window and us_symbols:
                 # 直连优先（vision 行情镜像境内可达，实测 200）：加密市场数据源
                 # 探测循环确认直连可用时传空候选（免代理开销）；直连不可用时
                 # 境外分类代理优先，再回退通用池（fetcher 内逐候选尝试）
@@ -1250,14 +1271,22 @@ async def _portfolio_loop():
                     ov_rows = await db.get_overseas_proxies()
                     ov_urls = [r["url"] for r in ov_rows] or proxies   # 境外优先，空回退通用池
                 overnight = await pf.fetch_overnight_quotes(us_symbols, proxy_urls=ov_urls)
+                # 同标的替代推导（QQQM 无交易对）：夜盘价 = 自身收盘定格 ×
+                # 替代标的(QQQ)涨跌幅——把加密价的百分点映射过来得最新净值
+                overnight.update(pf.derive_alias_prices(
+                    overnight, portfolio_session_state.get("close_prices", {}), us_symbols))
                 for sym, oq in overnight.items():
                     q = quotes.get(sym)
                     if q and oq.get("price"):
-                        # 夜盘代理价即现价：覆盖 f[3] 并清除盘后定格扩展价，避免被旧值覆盖
-                        q["price"] = oq["price"]
-                        q["ext_price"] = 0.0
-                        q["ext_time"] = "夜盘"
-                        overnight_used += 1
+                        # pre/post 段真实扩展价优先（腾讯/新浪盘前盘后成交价
+                        # 更真实，加密价只兜底无盘口标的）；closed 段的
+                        # ext_price 是夜间残留定格盘后价，直接用加密活价覆盖
+                        real_ext = q.get("ext_price") and session in ("pre", "post")
+                        if not real_ext:
+                            q["price"] = oq["price"]
+                            q["ext_price"] = 0.0
+                            q["ext_time"] = "加密源"
+                            overnight_used += 1
             base_overrides = {s: b for s, b in portfolio_session_state["base_closes"].items() if b}
             close_overrides = {s: c for s, c in portfolio_session_state["close_prices"].items() if c}
             positions, summary = pf.build_positions(
@@ -1284,13 +1313,18 @@ async def _portfolio_loop():
                 "session": session,
                 "et_now": et_now,
                 "trade_date": str(session_key),
-                # 夜盘/周末标记（结构化）：active=加密市场数据源代理价生效中，
-                # 前端据此展示"夜盘·加密市场数据源"提示；全部标的无对应交易对
-                # 或境外代理不可用时 active=False 退回定格提示
+                # 加密窗口标记（结构化）：active=加密市场数据源代理价生效中，
+                # 前端据此展示提示；全部标的无对应交易对或直连/代理不可用时
+                # active=False 退回定格提示。note 按时段：盘后/夜盘/盘前/假日
                 "night_session": {"active": overnight_used > 0,
-                                  "window": night_window,
+                                  "window": crypto_window,
                                   "source": "crypto_market",
-                                  "note": "夜盘·加密市场数据源(允许微小偏差)"},
+                                  "note": {
+                                      "post": "盘后·加密市场数据源(允许微小偏差)",
+                                      "pre": "盘前·加密市场数据源(允许微小偏差)",
+                                  }.get(session,
+                                        "闭市·加密市场数据源(允许微小偏差)"
+                                        if session == "closed" else "")},
                 "fx_usdhkd": fx_state["rate"],
                 "fx_fallback": fx_state["fallback"],
                 "fx_time": fx_state["time"],
