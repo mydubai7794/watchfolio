@@ -340,6 +340,27 @@ async def init_tables():
             _pool=pool,
         )
 
+    # ---- trade_records (HSBC 成交邮件交易记录，message_id 唯一作幂等锁) ----
+    await execute(
+        """
+        CREATE TABLE IF NOT EXISTS trade_records (
+            id          INT AUTO_INCREMENT PRIMARY KEY,
+            message_id  VARCHAR(255) UNIQUE NOT NULL COMMENT '邮件 Message-ID(幂等键)',
+            trade_no    VARCHAR(32)  DEFAULT '' COMMENT 'HSBC交易编号(如 P741002)',
+            symbol      VARCHAR(16)  DEFAULT '' COMMENT '代码 NVDA/00700',
+            name        VARCHAR(64)  DEFAULT '' COMMENT '股票名称',
+            market      VARCHAR(8)   DEFAULT '' COMMENT 'US/HK',
+            side        VARCHAR(4)   DEFAULT '' COMMENT 'BUY/SELL',
+            quantity    DECIMAL(18,6) DEFAULT 0 COMMENT '成交数量',
+            price       DECIMAL(18,6) DEFAULT 0 COMMENT '成交价',
+            currency    VARCHAR(8)   DEFAULT '' COMMENT 'USD/HKD',
+            email_date  DATETIME     NULL COMMENT '邮件 Date 头',
+            created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='HSBC成交邮件交易记录'
+        """,
+        _pool=pool,
+    )
+
     logger.info("数据库表初始化完成")
 
 # ---------------------------------------------------------------------------
@@ -973,3 +994,48 @@ async def deduct_cash(currency: str, amount: float) -> float | None:
     )
     rows = await execute_dict("SELECT amount FROM cash_accounts WHERE currency = %s", (currency,))
     return float(rows[0]["amount"]) if rows else None
+
+
+# ---------------------------------------------------------------------------
+# Trade records (HSBC 成交邮件交易记录)
+# ---------------------------------------------------------------------------
+
+async def trade_message_exists(message_id: str) -> bool:
+    """按邮件 Message-ID 判重（幂等主键）。"""
+    rows = await execute_dict(
+        "SELECT id FROM trade_records WHERE message_id = %s", (message_id,)
+    )
+    return bool(rows)
+
+
+async def trade_no_exists(trade_no: str) -> bool:
+    """按 HSBC 交易编号判重（防同邮件多收/重复投递）。"""
+    rows = await execute_dict(
+        "SELECT id FROM trade_records WHERE trade_no = %s", (trade_no,)
+    )
+    return bool(rows)
+
+
+async def insert_trade_record(message_id: str, trade_no: str, symbol: str,
+                              name: str, market: str, side: str,
+                              quantity: float, price: float, currency: str,
+                              email_date=None) -> int:
+    """插入一条交易记录（message_id 冲突会抛异常，由调用方幂等检查前置避免）。"""
+    return await execute(
+        "INSERT INTO trade_records (message_id, trade_no, symbol, name, market, "
+        "side, quantity, price, currency, email_date) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        (message_id, trade_no, symbol, name, market, side,
+         _safe_decimal(quantity, 6), _safe_decimal(price, 6), currency, email_date),
+    )
+
+
+async def get_recent_trades(limit: int = 20) -> list[dict]:
+    """返回最近 N 条交易记录（新→旧）。"""
+    rows = await execute_dict(
+        "SELECT * FROM trade_records ORDER BY id DESC LIMIT %s", (limit,)
+    )
+    for r in rows:
+        r["quantity"] = float(r["quantity"])
+        r["price"] = float(r["price"])
+    return rows

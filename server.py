@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import database as db
+import email_trader as et
 import fetcher
 import portfolio_fetcher as pf
 import scorer
@@ -143,6 +144,10 @@ async def lifespan(app: FastAPI):
     portfolio_task = asyncio.create_task(_portfolio_loop())
     market_task = asyncio.create_task(_market_loop())
 
+    # HSBC 成交邮件轮询（延迟 60s 首跑，之后每 30 分钟）
+    global email_task
+    email_task = asyncio.create_task(_email_loop())
+
     yield
     global monitor_running
     monitor_running = False
@@ -154,6 +159,8 @@ async def lifespan(app: FastAPI):
         fund_nav_task.cancel()
     if market_task:
         market_task.cancel()
+    if email_task:
+        email_task.cancel()
     if candidate_refresh_task:
         candidate_refresh_task.cancel()
     if daily_task:
@@ -240,6 +247,7 @@ portfolio_session_state: dict = {"base_closes": {}, "close_prices": {}, "base_lo
 portfolio_task: Optional[asyncio.Task] = None
 fund_nav_task: Optional[asyncio.Task] = None
 market_task: Optional[asyncio.Task] = None
+email_task: Optional[asyncio.Task] = None   # HSBC 成交邮件轮询任务
 
 
 # ---------------------------------------------------------------------------
@@ -1303,6 +1311,22 @@ async def _portfolio_loop():
         await asyncio.sleep(interval)
 
 
+async def _email_loop():
+    """HSBC 成交邮件轮询：每 30 分钟拉取最近 1 天邮件，解析全部执行交易并幂等入账。"""
+    logger.info("HSBC 成交邮件轮询循环启动 (间隔 %ss, 首跑延迟 %ss)",
+                et.POLL_INTERVAL_SEC, et.FIRST_DELAY_SEC)
+    await asyncio.sleep(et.FIRST_DELAY_SEC)
+    while True:
+        try:
+            await et.poll_once(days=1)
+        except asyncio.CancelledError:
+            logger.info("HSBC 成交邮件轮询循环已停止")
+            break
+        except Exception as e:
+            logger.exception("HSBC 邮件轮询错误: %s", e)
+        await asyncio.sleep(et.POLL_INTERVAL_SEC)
+
+
 def _next_fund_nav_run(now: datetime) -> datetime:
     """计算基金净值任务下一次执行时刻（北京 14:00/20:00，过点顺延次日）。"""
     targets = [now.replace(hour=14, minute=0, second=0, microsecond=0),
@@ -1457,11 +1481,16 @@ class HoldingUpdateInput(BaseModel):
 
 @app.get("/api/portfolio/overview")
 async def portfolio_overview():
-    """持仓总览（读缓存，含汇总/持仓明细/时段/汇率/市场看板）。"""
+    """持仓总览（读缓存，含汇总/持仓明细/时段/汇率/市场看板/最近成交）。"""
     data = dict(portfolio_cache)
     data["fund"] = fund_nav_cache
     data["market"] = market_cache
     data["fx_spark"] = fx_spark
+    # 最近 HSBC 成交记录（轻量，前端暂不展示只备数据）
+    try:
+        data["recent_trades"] = await db.get_recent_trades(10)
+    except Exception:
+        data["recent_trades"] = []
     return data
 
 
