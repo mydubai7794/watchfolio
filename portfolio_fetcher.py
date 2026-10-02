@@ -40,10 +40,12 @@ SINA_US_URL = "https://hq.sinajs.cn/list={symbols}"
 SINA_HEADERS = {"Referer": "https://finance.sina.com.cn"}
 SINA_FX_URL = "https://hq.sinajs.cn/list=fx_susdhkd"
 SINA_PANEL_URL = "https://hq.sinajs.cn/list=DINIW,hf_OIL,hf_GC,fx_susdcnh"
-# 币安 bStocks（代币化美股）夜盘代理价：公共行情免 key，美股闭市时段补全走势，
-# 中间价口径与底层夜盘价偏差实测 0.02%-0.1%（详见《美股夜盘数据源研报.md》）
-BINANCE_EXCHANGE_INFO_URL = "https://api.binance.com/api/v3/exchangeInfo"
-BINANCE_TICKER_URL = "https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
+# 加密市场数据源（境外现货交易所公共行情端点）：免 key 7×24 有价，美股闭市时段
+# （夜盘/周末）代理价补全组合走势，中间价口径与底层夜盘价偏差实测 0.02%-0.1%
+# （详见《美股夜盘数据源研报.md》）；境内 IP 直连不可用，须经境外代理访问
+CRYPTO_EXCHANGE_INFO_URL = "https://api.binance.com/api/v3/exchangeInfo"
+CRYPTO_TICKER_URL = "https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
+CRYPTO_PING_URL = "https://api.binance.com/api/v3/ping"   # 代理境外可达性探测（weight 0）
 # twelvedata 接口型美股/港股行情兜底（有 key 不 ban IP；免费 8 credits/min，
 # 批量请求 credits=symbol 数，故单次批量上限 8 并轮换指针覆盖全部持仓）
 TWELVEDATA_QUOTE_URL = "https://api.twelvedata.com/quote"
@@ -96,10 +98,10 @@ _td_fail_streak = 0
 _last_td_used = 0.0
 _td_cursor = 0   # 兜底批量轮换指针（全部 symbol 列表中的起始下标）
 
-# 币安 bStocks 映射缓存：{美股代码: 币安交易对}，exchangeInfo 低频刷新（24h TTL）
-_BSTOCK_MAP_TTL_SEC = 86400.0
-_bstock_map_cache: dict[str, str] = {}
-_bstock_map_ts = 0.0
+# 加密市场数据源映射缓存：{美股代码: 交易对}，exchangeInfo 低频刷新（24h TTL）
+_CRYPTO_MAP_TTL_SEC = 86400.0
+_crypto_map_cache: dict[str, str] = {}
+_crypto_map_ts = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -824,51 +826,62 @@ async def fetch_us_quotes(symbols: list[str], session: str | None = None) -> dic
     return await fetch_quotes(symbols, [], session)
 
 
-async def resolve_bstock_map(us_symbols: list[str]) -> dict[str, str]:
-    """解析美股代码 → 币安 bStocks 交易对映射（如 AMD→AMDBUSDT）。
+async def resolve_crypto_map(us_symbols: list[str],
+                             proxy_urls: list[str] | None = None) -> dict[str, str]:
+    """解析美股代码 → 加密市场数据源交易对映射（如 AMD→AMDBUSDT）。
 
     exchangeInfo 全量拉取（weight 10）后过滤 status=TRADING 的 USDT 对，
     规则：代码+"B"+"USDT" 精确匹配；结果缓存 24h（映射关系极少变化）。
-    失败返回上次缓存或空 dict（不写缓存，下轮重试）；无对应币安对的
+    请求经境外代理（proxy_urls 前 2 个）后直连兜底（境内 IP 直连不可用）；
+    失败返回上次缓存或空 dict（不写缓存，下轮重试）；无对应交易对的
     持仓（如 QQQM/PCG/AMKR/F）自然缺省，夜盘维持定格口径。
     """
-    global _bstock_map_cache, _bstock_map_ts
+    global _crypto_map_cache, _crypto_map_ts
     now_mono = time.monotonic()
-    if _bstock_map_cache and now_mono - _bstock_map_ts < _BSTOCK_MAP_TTL_SEC:
-        return {s: p for s, p in _bstock_map_cache.items() if s in set(us_symbols)}
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get(BINANCE_EXCHANGE_INFO_URL)
-            data = resp.json()
-        pairs = {s["symbol"] for s in data.get("symbols", [])
-                 if s.get("status") == "TRADING" and s.get("symbol", "").endswith("USDT")}
-        mapping = {s: s + "BUSDT" for s in us_symbols if s + "BUSDT" in pairs}
-        if mapping:
-            _bstock_map_cache, _bstock_map_ts = mapping, now_mono
-        return mapping
-    except Exception as e:
-        logger.warning("币安 exchangeInfo 获取失败(用上次缓存): %s", e)
-        return {s: p for s, p in _bstock_map_cache.items() if s in set(us_symbols)}
+    if _crypto_map_cache and now_mono - _crypto_map_ts < _CRYPTO_MAP_TTL_SEC:
+        return {s: p for s, p in _crypto_map_cache.items() if s in set(us_symbols)}
+    candidates = list(proxy_urls or [])[:2] + [None]
+    last_err = ""
+    for proxy in candidates:
+        try:
+            async with httpx.AsyncClient(timeout=15, proxy=proxy) as client:
+                resp = await client.get(CRYPTO_EXCHANGE_INFO_URL)
+                data = resp.json()
+            pairs = {s["symbol"] for s in data.get("symbols", [])
+                     if s.get("status") == "TRADING" and s.get("symbol", "").endswith("USDT")}
+            mapping = {s: s + "BUSDT" for s in us_symbols if s + "BUSDT" in pairs}
+            if mapping:
+                _crypto_map_cache, _crypto_map_ts = mapping, now_mono
+            return mapping
+        except Exception as e:
+            last_err = str(e)
+    logger.warning("加密市场数据源 exchangeInfo 获取失败(用上次缓存): %s", last_err)
+    return {s: p for s, p in _crypto_map_cache.items() if s in set(us_symbols)}
 
 
-async def fetch_bstock_prices(bmap: dict[str, str]) -> dict[str, dict]:
-    """逐只拉币安 24hr ticker，取买卖一中间价 (bid+ask)/2（研报 4.3 建议的稳健口径）。
+async def fetch_crypto_prices(bmap: dict[str, str],
+                              proxy_urls: list[str] | None = None) -> dict[str, dict]:
+    """逐只拉加密市场数据源 24hr ticker，取买卖一中间价 (bid+ask)/2（研报 4.3 的稳健口径）。
 
     约 15 只=30 weight/轮，远低于 1200 weight/min/IP；单只失败/停牌跳过不致命。
+    请求按 proxy_urls 顺序逐个尝试（境外代理优先），全部失败则直连兜底。
     返回 {美股代码: {"price": 中间价}}。
     """
     out: dict[str, dict] = {}
+    candidates = list(proxy_urls or [])[:2] + [None]
 
     async def _one(sym: str, pair: str) -> None:
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(BINANCE_TICKER_URL.format(symbol=pair))
-                t = resp.json()
-            mid = (Decimal(str(t.get("bidPrice", "0"))) + Decimal(str(t.get("askPrice", "0")))) / 2
-            if mid > 0:
-                out[sym] = {"price": float(mid)}
-        except Exception:
-            pass   # 单只失败静默跳过（下轮再试），不影响其余标的
+        for proxy in candidates:
+            try:
+                async with httpx.AsyncClient(timeout=10, proxy=proxy) as client:
+                    resp = await client.get(CRYPTO_TICKER_URL.format(symbol=pair))
+                    t = resp.json()
+                mid = (Decimal(str(t.get("bidPrice", "0"))) + Decimal(str(t.get("askPrice", "0")))) / 2
+                if mid > 0:
+                    out[sym] = {"price": float(mid)}
+                return
+            except Exception:
+                continue   # 换下一个代理重试；全部失败静默跳过（下轮再试）
 
     await asyncio.gather(*(_one(s, p) for s, p in bmap.items()))
     return out
@@ -876,17 +889,17 @@ async def fetch_bstock_prices(bmap: dict[str, str]) -> dict[str, dict]:
 
 async def fetch_overnight_quotes(us_symbols: list[str],
                                  proxy_urls: list[str] | None = None) -> dict[str, dict]:
-    """夜盘/周末美股代理价抓取（币安 bStocks，7×24 有价）。
+    """夜盘/周末美股代理价抓取（加密市场数据源，7×24 有价）。
 
-    美东闭市时段（夜盘 20:00-04:00 + 周末）以 bStocks 中间价近似夜盘价
-    （实测偏差 0.02%-0.1%，用户允许误差），_portfolio_loop 合并后组合总值
-    24h 曲线连续；无对应交易对/拉取失败的标的自然缺省，维持 19:59 盘后
-    价定格口径。proxy_urls 预留未用（币安境外直连）。
+    美东闭市时段（夜盘 20:00-04:00 + 周末）以加密市场数据源中间价近似
+    夜盘价（实测偏差 0.02%-0.1%，用户允许误差），_portfolio_loop 合并后
+    组合总值 24h 曲线连续；无对应交易对/拉取失败的标的自然缺省，维持
+    19:59 盘后价定格口径。proxy_urls 为境外代理列表（境内 IP 直连不可用）。
     """
-    bmap = await resolve_bstock_map(us_symbols)
+    bmap = await resolve_crypto_map(us_symbols, proxy_urls)
     if not bmap:
         return {}
-    return await fetch_bstock_prices(bmap)
+    return await fetch_crypto_prices(bmap, proxy_urls)
 
 
 async def fetch_fx_usdhkd(proxy_urls: list[str] | None = None) -> tuple[float, bool]:

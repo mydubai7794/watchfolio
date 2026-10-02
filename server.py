@@ -143,6 +143,8 @@ async def lifespan(app: FastAPI):
     fund_nav_task = asyncio.create_task(_fund_nav_loop())
     portfolio_task = asyncio.create_task(_portfolio_loop())
     market_task = asyncio.create_task(_market_loop())
+    global crypto_probe_task
+    crypto_probe_task = asyncio.create_task(_crypto_probe_loop())
 
     # HSBC 成交邮件轮询（延迟 60s 首跑，之后每 30 分钟）
     global email_task
@@ -159,6 +161,8 @@ async def lifespan(app: FastAPI):
         fund_nav_task.cancel()
     if market_task:
         market_task.cancel()
+    if crypto_probe_task:
+        crypto_probe_task.cancel()
     if email_task:
         email_task.cancel()
     if candidate_refresh_task:
@@ -1202,7 +1206,7 @@ async def _portfolio_loop():
             # 消除对 us_market_session 展示串的 strptime 反解析）
             et_dt = datetime.now(pf.ET_TZ)
             session, _et_date, et_now = pf.us_market_session(et_dt)
-            # 夜盘/周末窗口：币安 bStocks 代理价补全时段（closed 但有活源）
+            # 夜盘/周末窗口：加密市场数据源代理价补全时段（closed 但有活源）
             night_window = (et_dt.hour >= 20 or et_dt.hour < 4) or et_dt.weekday() >= 5
             interval = {"regular": 10.0, "pre": 30.0, "post": 30.0}.get(session, 60.0 if night_window else 600.0)
             holdings = await db.get_holdings(enabled_only=True)
@@ -1222,20 +1226,24 @@ async def _portfolio_loop():
                     pass
             # ---- 一场口径状态机维护（base=场基准 / close=常规收盘定格）----
             # 必须先于夜盘覆盖：状态机吃原始腾讯价（f[3]/f[4] 口径），确保
-            # close_prices 定格不被币安代理价污染（尤其周末 closed+hour>=16 分支
-            # 会用 q["price"] 写定格——若先覆盖，隔夜增量语义错乱）
+            # close_prices 定格不被加密市场数据源代理价污染（尤其周末
+            # closed+hour>=16 分支会用 q["price"] 写定格——若先覆盖，隔夜
+            # 增量语义错乱）
             pf.update_session_state(portfolio_session_state, session, et_dt, quotes)
             fallback_syms = portfolio_session_state.pop("base_fallback", [])
             if fallback_syms:
                 logger.info("一场口径基准冷启动退化: 非 regular 时段用腾讯昨收充当场基准 "
                             "(存在隔夜偏差, 09:30 开盘自愈): %s", fallback_syms)
             # ---- 夜盘/周末代理价覆盖（状态机维护之后，仅影响展示与 tick）----
-            # 币安 bStocks 代理价（7×24 有价，偏差 0.02%-0.1%）覆盖美股现价 →
-            # 组合总值 24h 曲线连续；无对应交易对/失败的标的自然缺省，
+            # 加密市场数据源（7×24 有价，偏差 0.02%-0.1%）覆盖美股现价 →
+            # 组合总值 24h 曲线连续；请求走境外分类代理（不可用回退通用池，
+            # fetcher 内部逐候选尝试）；无对应交易对/失败的标的自然缺省，
             # 维持 19:59 盘后价定格口径
             overnight_used = 0
             if night_window and us_symbols:
-                overnight = await pf.fetch_overnight_quotes(us_symbols, proxy_urls=proxies)
+                ov_rows = await db.get_overseas_proxies()
+                ov_urls = [r["url"] for r in ov_rows] or proxies   # 境外优先，空回退通用池
+                overnight = await pf.fetch_overnight_quotes(us_symbols, proxy_urls=ov_urls)
                 for sym, oq in overnight.items():
                     q = quotes.get(sym)
                     if q and oq.get("price"):
@@ -1270,12 +1278,13 @@ async def _portfolio_loop():
                 "session": session,
                 "et_now": et_now,
                 "trade_date": str(session_key),
-                # 夜盘/周末标记（结构化）：active=币安代理价生效中，前端据此展示
-                # "夜盘·币安代理价"提示；全部标的无对应交易对时 active=False 退回定格提示
+                # 夜盘/周末标记（结构化）：active=加密市场数据源代理价生效中，
+                # 前端据此展示"夜盘·加密市场数据源"提示；全部标的无对应交易对
+                # 或境外代理不可用时 active=False 退回定格提示
                 "night_session": {"active": overnight_used > 0,
                                   "window": night_window,
-                                  "source": "binance_bstocks",
-                                  "note": "夜盘·币安代理价(允许微小偏差)"},
+                                  "source": "crypto_market",
+                                  "note": "夜盘·加密市场数据源(允许微小偏差)"},
                 "fx_usdhkd": fx_state["rate"],
                 "fx_fallback": fx_state["fallback"],
                 "fx_time": fx_state["time"],
@@ -1284,8 +1293,8 @@ async def _portfolio_loop():
                 "cash": cash_rows,
                 "errors": [] if quotes else ["行情源暂不可用"],
             }
-            # 常规时段写 tick；夜盘/周末（closed）在币安代理价生效时同样写 tick，
-            # 24h 曲线跨夜盘/周末连续累积（日线聚合取每场最后一条不受影响）
+            # 常规时段写 tick；夜盘/周末（closed）在加密市场数据源代理价生效时
+            # 同样写 tick，24h 曲线跨夜盘/周末连续累积（日线聚合取每场最后一条不受影响）
             if quotes and (session != "closed" or overnight_used > 0):
                 # tick 口径：总资产(含现金折算)，现金变动当日需保持曲线连续；
                 # trade_date 用一场口径 session_key（凌晨归上一场）；day_pnl=实时累计
@@ -1420,6 +1429,41 @@ def backfill_keys(last_map: dict[str, tuple | None], now_dt: datetime,
         if age > max_age:
             out.append(k)
     return out
+
+
+_CRYPTO_PROBE_INTERVAL_SEC = 1800.0   # 境外代理分类探测周期（30min，低频省资源）
+_CRYPTO_PROBE_FIRST_DELAY_SEC = 90.0  # 首跑延迟（等代理池首轮抓取完成）
+
+
+async def _crypto_probe_loop():
+    """境外代理分类探测循环：给代理池打 region 标签。
+
+    加密市场数据源（境外现货交易所公共行情）境内 IP 直连不可用，须经境外代理访问。
+    每 30min 遍历存活代理，未分类(region=unknown)的逐个 GET CRYPTO_PING_URL
+    （weight 0，免 key）——成功标记 region='overseas'，失败保持 unknown（可能
+    只是临时抖动，下轮再测，不做永久否定标记）。已分类 overseas 的不重复探测。
+    """
+    logger.info("境外代理分类探测循环启动 (间隔 %ss)", _CRYPTO_PROBE_INTERVAL_SEC)
+    await asyncio.sleep(_CRYPTO_PROBE_FIRST_DELAY_SEC)
+    while True:
+        try:
+            rows = await db.get_alive_proxies()
+            unknown = [r for r in rows if r.get("region", "unknown") != "overseas"]
+            for r in unknown:
+                try:
+                    async with httpx.AsyncClient(timeout=8, proxy=r["url"]) as client:
+                        resp = await client.get(pf.CRYPTO_PING_URL)
+                    if resp.status_code == 200:
+                        await db.mark_proxy_region(r["id"], "overseas")
+                        logger.info("代理境外可达已标记 overseas: %s", r["url"])
+                except Exception:
+                    pass   # 探测失败保持 unknown，下轮再测
+        except asyncio.CancelledError:
+            logger.info("境外代理分类探测循环已停止")
+            break
+        except Exception as e:
+            logger.exception("境外代理分类探测错误: %s", e)
+        await asyncio.sleep(_CRYPTO_PROBE_INTERVAL_SEC)
 
 
 async def _market_loop():

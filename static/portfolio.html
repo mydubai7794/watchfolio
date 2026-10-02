@@ -571,7 +571,7 @@ function nightBadge(p, session, night) {
 }
 
 // night_session 归一：兼容旧布尔与新结构 {active,window,source,note}
-// active=币安代理价生效（夜盘活价），window=处于夜盘/周末窗口（可能定格）
+// active=加密市场数据源代理价生效（夜盘活价），window=处于夜盘/周末窗口（可能定格）
 function nightOf(d) {
   const n = d && d.night_session;
   if (n && typeof n === 'object') {
@@ -691,17 +691,17 @@ function renderOverview(d) {
   document.getElementById('cashVal').textContent = usd(s.cash_usd);
   document.getElementById('cashSub').textContent =
     (s.cash_usd != null && d.fx_usdhkd) ? '≈ HK$' + fmt(s.cash_usd * d.fx_usdhkd, 0) : '';
-  // session 徽章口径：盘前计入上一场/盘后实时累计；夜盘/周末窗口用币安 bStocks
-  // 代理价补全（active 时徽章「夜盘·币安代理价」）；全部标的无对应交易对时退回
-  // 「数据定格」提示（价格定格 19:59 盘后价）
+  // session 徽章口径：盘前计入上一场/盘后实时累计；夜盘/周末窗口用加密市场
+  // 数据源代理价补全（active 时徽章「夜盘·加密市场数据源」）；全部标的无对应
+  // 交易对时退回「数据定格」提示（价格定格 19:59 盘后价）
   const badge = document.getElementById('sessionBadge');
   const ng = nightOf(d);
-  badge.textContent = ng.active ? (ng.note || '夜盘 · 币安代理价')
+  badge.textContent = ng.active ? (ng.note || '夜盘 · 加密市场数据源')
     : (ng.window ? '夜盘 · 数据定格' : (SESSION_BADGE[d.session] || d.session || '--'));
   const hintEl = document.getElementById('nightHint');
   hintEl.style.display = ng.window ? '' : 'none';
   hintEl.textContent = ng.active
-    ? '夜盘/周末时段：币安 bStocks 代理价近似夜盘价（允许微小偏差）'
+    ? '夜盘/周末时段：加密市场数据源代理价近似夜盘价（允许微小偏差）'
     : '夜盘时段行情暂不可用，价格定格于盘后收盘';
   document.getElementById('fetchTime').textContent = d.fetch_time || '--:--:--';
   document.getElementById('fxInfo').textContent = 'USD/HKD ' + fmt(d.fx_usdhkd, 4) + (d.fx_fallback ? '(默认)' : '');

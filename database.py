@@ -145,10 +145,17 @@ async def init_tables():
             url         VARCHAR(100) NOT NULL UNIQUE COMMENT '代理地址',
             latency_ms  INT          DEFAULT 0 COMMENT '延迟(毫秒)',
             alive       TINYINT(1)   DEFAULT 1 COMMENT '1=可用 0=不可用',
+            region      VARCHAR(16)  DEFAULT 'unknown' COMMENT '代理分类: overseas=境外(加密市场数据源可用) unknown=未分类',
             last_check  DATETIME     NULL COMMENT '最后检测时间',
             created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='代理IP池'
         """,
+        _pool=pool,
+    )
+    # 代理分类列迁移（存量库补 region 列）
+    await execute(
+        "ALTER TABLE proxy_pool ADD COLUMN IF NOT EXISTS region VARCHAR(16) "
+        "DEFAULT 'unknown' COMMENT '代理分类: overseas=境外(加密市场数据源可用) unknown=未分类'",
         _pool=pool,
     )
 
@@ -456,6 +463,24 @@ async def get_alive_proxies() -> list[dict]:
     """返回所有可用代理。"""
     return await execute_dict(
         "SELECT * FROM proxy_pool WHERE alive = 1 ORDER BY latency_ms ASC"
+    )
+
+
+async def get_overseas_proxies() -> list[dict]:
+    """返回境外分类的可用代理（加密市场数据源专用）。
+
+    region='overseas' 由境外可达性探测循环维护（CRYPTO_PING 探测成功标记）。
+    """
+    return await execute_dict(
+        "SELECT * FROM proxy_pool WHERE alive = 1 AND region = 'overseas' "
+        "ORDER BY latency_ms ASC"
+    )
+
+
+async def mark_proxy_region(proxy_id: int, region: str) -> int:
+    """标记代理分类（overseas=境外/unknown=未分类）。"""
+    return await execute(
+        "UPDATE proxy_pool SET region = %s WHERE id = %s", (region, proxy_id)
     )
 
 

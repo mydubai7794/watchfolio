@@ -586,15 +586,15 @@ class TestUpdateSessionState:
 
 
 class TestNightOverrideAfterStateMachine:
-    """币安夜盘代理价覆盖时序：状态机必须先于覆盖执行（吃原始腾讯价），
+    """加密市场数据源夜盘代理价覆盖时序：状态机必须先于覆盖执行（吃原始腾讯价），
     否则周末 closed+hour>=16 分支会把代理价写进 close_prices 定格，
     隔夜增量(代理价-被污染定格)语义错乱（edc2e67 评审修复的回归防线）。"""
 
     Q_RAW = {"AMD": {"price": 615.78, "pre_close": 611.65}}   # 腾讯原始（周六=f[3]保持周五收盘）
 
-    def test_weekend_evening_close_not_polluted_by_bstock(self):
+    def test_weekend_evening_close_not_polluted_by_crypto(self):
         # 周六 18:00 closed（hour>=16 分支）：先状态机再覆盖 → 定格=615.78（周五收盘），
-        # 覆盖后的 q["price"]=币安代理价 620.9 只进展示/tick，不回写定格
+        # 覆盖后的 q["price"]=加密市场数据源代理价 620.9 只进展示/tick，不回写定格
         state = {"base_closes": {"AMD": 611.65}, "close_prices": {}, "base_logged": True}
         quotes = {"AMD": dict(self.Q_RAW["AMD"])}
         pf.update_session_state(state, "closed",
@@ -737,10 +737,10 @@ class TestBuildPositionsSessionPnl:
 
 
 class TestFetchOvernightQuotes:
-    """夜盘代理价（币安 bStocks）：resolve_bstock_map 映射/缓存/失败容错、
-    fetch_bstock_prices 中间价口径、fetch_overnight_quotes 插槽串联与降级。"""
+    """夜盘代理价（加密市场数据源）：resolve_crypto_map 映射/缓存/失败容错、
+    fetch_crypto_prices 中间价口径、fetch_overnight_quotes 插槽串联与降级。"""
 
-    def test_resolve_bstock_map_filters_trading_pairs(self, monkeypatch):
+    def test_resolve_crypto_map_filters_trading_pairs(self, monkeypatch):
         """exchangeInfo 过滤 status=TRADING 的 代码+B+USDT 精确匹配，无对应缺省。"""
         async def fake_client_get(self, url, **kw):
             class R:
@@ -749,17 +749,17 @@ class TestFetchOvernightQuotes:
                         {"symbol": "AMDBUSDT", "status": "TRADING"},
                         {"symbol": "NVDABUSDT", "status": "TRADING"},
                         {"symbol": "QQQBUSDT", "status": "BREAK"},        # 非交易状态剔除
-                        {"symbol": "BTCUSDT", "status": "TRADING"},      # 非 bStock 后缀不匹配
+                        {"symbol": "BTCUSDT", "status": "TRADING"},      # 普通交易对后缀不匹配
                     ]}
             return R()
 
         monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_client_get)
-        pf._bstock_map_cache.clear()
-        pf._bstock_map_ts = 0.0
-        m = asyncio.run(pf.resolve_bstock_map(["AMD", "NVDA", "QQQ", "MU"]))
+        pf._crypto_map_cache.clear()
+        pf._crypto_map_ts = 0.0
+        m = asyncio.run(pf.resolve_crypto_map(["AMD", "NVDA", "QQQ", "MU"]))
         assert m == {"AMD": "AMDBUSDT", "NVDA": "NVDABUSDT"}
 
-    def test_resolve_bstock_map_uses_cache_within_ttl(self, monkeypatch):
+    def test_resolve_crypto_map_uses_cache_within_ttl(self, monkeypatch):
         """24h TTL 内直接命中缓存不再请求 exchangeInfo。"""
         calls = []
 
@@ -767,14 +767,14 @@ class TestFetchOvernightQuotes:
             calls.append(url)
             raise AssertionError("缓存命中不应发起请求")
 
-        pf._bstock_map_cache.clear()
-        pf._bstock_map_cache.update({"AMD": "AMDBUSDT"})
-        pf._bstock_map_ts = time.monotonic()
+        pf._crypto_map_cache.clear()
+        pf._crypto_map_cache.update({"AMD": "AMDBUSDT"})
+        pf._crypto_map_ts = time.monotonic()
         monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_client_get)
-        assert asyncio.run(pf.resolve_bstock_map(["AMD"])) == {"AMD": "AMDBUSDT"}
+        assert asyncio.run(pf.resolve_crypto_map(["AMD"])) == {"AMD": "AMDBUSDT"}
         assert calls == []
 
-    def test_fetch_bstock_prices_mid_price(self, monkeypatch):
+    def test_fetch_crypto_prices_mid_price(self, monkeypatch):
         """24hr ticker 取 (bid+ask)/2 中间价；单只失败静默跳过不影响其余。"""
         async def fake_client_get(self, url, **kw):
             class R:
@@ -785,28 +785,30 @@ class TestFetchOvernightQuotes:
             return R()
 
         monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_client_get)
-        out = asyncio.run(pf.fetch_bstock_prices({"AMD": "AMDBUSDT", "MU": "MUBUSDT"}))
+        out = asyncio.run(pf.fetch_crypto_prices({"AMD": "AMDBUSDT", "MU": "MUBUSDT"}))
         assert out == {"AMD": {"price": pytest.approx(620.06)}}
 
     def test_fetch_overnight_quotes_degrades_to_empty(self, monkeypatch):
         """映射为空（全部无对应交易对/接口失败）→ 恒 {}，自然降级定格口径。"""
-        async def fake_resolve(us_symbols):
+        async def fake_resolve(us_symbols, proxy_urls=None):
             return {}
-        monkeypatch.setattr(pf, "resolve_bstock_map", fake_resolve)
+        monkeypatch.setattr(pf, "resolve_crypto_map", fake_resolve)
         assert asyncio.run(pf.fetch_overnight_quotes(["QQQM"])) == {}
 
-    def test_fetch_overnight_quotes_wires_bstocks(self, monkeypatch):
-        """插槽串联：映射非空 → fetch_bstock_prices 结果直出。"""
-        async def fake_resolve(us_symbols):
+    def test_fetch_overnight_quotes_wires_crypto(self, monkeypatch):
+        """插槽串联：映射非空 → fetch_crypto_prices 结果直出；境外代理透传。"""
+        async def fake_resolve(us_symbols, proxy_urls=None):
+            assert proxy_urls == ["http://ov1:9"]   # 境外代理经 fetch_overnight_quotes 透传
             return {"AMD": "AMDBUSDT"}
 
-        async def fake_prices(bmap):
+        async def fake_prices(bmap, proxy_urls=None):
             assert bmap == {"AMD": "AMDBUSDT"}
             return {"AMD": {"price": 620.06}}
 
-        monkeypatch.setattr(pf, "resolve_bstock_map", fake_resolve)
-        monkeypatch.setattr(pf, "fetch_bstock_prices", fake_prices)
-        assert asyncio.run(pf.fetch_overnight_quotes(["AMD"])) == {"AMD": {"price": 620.06}}
+        monkeypatch.setattr(pf, "resolve_crypto_map", fake_resolve)
+        monkeypatch.setattr(pf, "fetch_crypto_prices", fake_prices)
+        assert asyncio.run(pf.fetch_overnight_quotes(["AMD"], proxy_urls=["http://ov1:9"])) \
+            == {"AMD": {"price": 620.06}}
 
 
 class TestTwelveDataFallback:
