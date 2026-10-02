@@ -349,3 +349,40 @@ def test_refresh_fx_spark(monkeypatch):
     asyncio.run(server._refresh_fx_spark([]))
     assert server.fx_spark == []
     server.fx_spark = []
+
+
+class TestRootRedirect:
+    """root 跳转回归：已登录 / → 302 持仓页（首选入口）；未登录 / → 跳登录页；
+    已登录经 middleware 访问受保护路径正常到达目标（无二次重定向）。
+
+    实现事实：middleware 对 path=="/" 且已登录短路 302；未登录放行到 root()，
+    root() 的 RedirectResponse 未显式指定状态码（Starlette 默认 307）。
+    """
+
+    def test_root_logged_in_redirects_portfolio(self, monkeypatch):
+        """已登录 GET / → middleware 短路 302 → /static/portfolio.html。"""
+        monkeypatch.setattr(server.db, "get_session", _fake_valid_session("root-user"))
+        client.cookies.set("session_token", "tok-root-in")
+        try:
+            r = client.get("/", follow_redirects=False)
+            assert r.status_code == 302
+            assert r.headers["location"] == "/static/portfolio.html"
+        finally:
+            client.cookies.clear()
+
+    def test_root_anonymous_redirects_login(self):
+        """未登录 GET / → root() 跳登录页（307 + Location=/static/login.html）。"""
+        r = client.get("/", follow_redirects=False)
+        assert r.status_code == 307
+        assert r.headers["location"] == "/static/login.html"
+
+    def test_protected_path_logged_in_reaches_target(self, monkeypatch):
+        """已登录访问受保护路径 /static/portfolio.html → 200 直达持仓页内容。"""
+        monkeypatch.setattr(server.db, "get_session", _fake_valid_session("root-user"))
+        client.cookies.set("session_token", "tok-root-prot")
+        try:
+            r = client.get("/static/portfolio.html", follow_redirects=False)
+            assert r.status_code == 200
+            assert "portfolio" in r.text
+        finally:
+            client.cookies.clear()

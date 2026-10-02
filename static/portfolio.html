@@ -763,12 +763,13 @@ function drawChart() {
     ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 1.5; ctx.stroke();
   }
 }
-// 底部时间轴：按绘图宽自适应个数（max(3, floor(绘图宽/110))）等间隔取点，
+// 底部时间轴：按绘图宽自适应个数（max(3, floor(绘图宽/110))），并 clamp 到点数上限——
+// 点数不足时(n>pts.length)多个 k 会映射到同一下标造成重复标签（如 2 点画 3 个刻度）；
 // Micro 11px #C7C7CC；首点左对齐/末点右对齐防溢出画布
 function drawTimeAxis(ctx, pts, W, H) {
   if (pts.length < 2) return;
   const plotW = W - CH.l - CH.r;
-  const n = Math.max(3, Math.floor(plotW / 110));
+  const n = Math.min(pts.length, Math.max(3, Math.floor(plotW / 110)));
   ctx.fillStyle = TXT3; ctx.font = F11; ctx.textBaseline = 'middle';
   for (let k = 0; k < n; k++) {
     const i = Math.round(k * (pts.length - 1) / (n - 1));
@@ -803,7 +804,7 @@ function drawIntraday(ctx, pts, W, H) {
   const grad = ctx.createLinearGradient(0, CH.t, 0, H - CH.b);
   grad.addColorStop(0, up ? 'rgba(229,68,59,.12)' : 'rgba(0,168,112,.12)');
   grad.addColorStop(1, up ? 'rgba(229,68,59,0)' : 'rgba(0,168,112,0)');
-  // 跨日断线仅当 ts 带日期前缀（"MM-DD HH:MM:SS"，24h/Nh 跨日窗口）时启用：
+  // 跨日断线仅当 ts 带日期前缀（"MM-DD HH:MM"，24h/Nh 跨日窗口，后端 strftime %m-%d %H:%M）时启用：
   // 当日窗口 ts 为 "HH:MM:SS"，前 5 字符是 "HH:MM"，若同样按其切分会在每小时份变化处
   // 误判为跨日断线，导致整张图碎裂成多段（历史 bug）。当日模式必须整线连续绘制
   const crossDay = /^\d{2}-\d{2} /.test(String(pts[0].x));
@@ -987,11 +988,21 @@ function drawDonut(d) {
     a0 = a1;
     return arc;
   });
-  // 命中区域重建：数据刷新/resize 后旧坐标作废，hover 归位 -1
+  // 命中区域重建：数据刷新/resize 后旧坐标作废；但 10s 轮询重建时 symbol 列表
+  // 通常未变，按名称匹配沿用旧 hover（不打断高亮），列表变了才归位 -1
+  let hover = -1;
+  if (donutState && donutState.hover >= 0) {
+    const prevName = (donutState.items[donutState.hover] || {}).name;
+    const k = items.findIndex(it => it.name === prevName);
+    if (k >= 0) hover = k;
+  }
   donutState = {cv: cv, items: items, total: total, displayTotal: s.total_value,
-    W: W, H: H, cx: W / 2, cy: H / 2, ro: ro, ri: ri, arcs: arcs, hover: -1};
+    W: W, H: H, cx: W / 2, cy: H / 2, ro: ro, ri: ri, arcs: arcs, hover: hover};
   renderDonut();
   renderDonutLegend();
+  // 重建后关闭交互 tooltip（图例 DOM 已重建，旧 mouseleave 不再触发，防残留）；
+  // hover 高亮已保留，鼠标微动即恢复 tooltip
+  hideTipEl('donutTip');
 }
 // 环形图渲染：hover 扇区沿角平分线外扩 4px；中心文字联动（默认总资产，hover 切该项名称/市值/占比）
 function renderDonut() {
@@ -1018,7 +1029,7 @@ function renderDonut() {
     ctx.fillStyle = TXT2; ctx.font = F12;
     ctx.fillText(fitText(ctx, it.name, st.ri * 2 - 10), st.cx, st.cy - 14);
     ctx.fillStyle = TXT; ctx.font = F600_16;
-    ctx.fillText(fmt(it.value, 0), st.cx, st.cy + 5);
+    ctx.fillText('$' + fmt(it.value, 0), st.cx, st.cy + 5);
     ctx.fillStyle = TXT2; ctx.font = F11;
     ctx.fillText(fmt(it.value / st.total * 100, 1) + '%', st.cx, st.cy + 23);
   } else {
@@ -1126,11 +1137,22 @@ function drawHBar(cvId, positions, key, fmtVal, emptyText, label) {
   const dom = maxPos + maxNeg;
   const barL = nameW + 12, barR = W - valW - 12;
   const zeroX = dom > 0 ? barL + (barR - barL) * (maxNeg / dom) : barL;
-  // 命中区域重建：旧 hover 坐标随重建作废（hover 归位 -1）
+  // 命中区域重建：旧 hover 坐标随重建作废；10s 轮询时行标识（name/symbol）通常未变，
+  // 按标识匹配沿用旧 hover（行序随 |value| 重排时高亮跟随移动），标识变了才归位 -1
+  let hover = -1;
+  const prevSt = hbarStates[cvId];
+  if (prevSt && prevSt.hover >= 0) {
+    const prevRow = prevSt.rows[prevSt.hover] || {};
+    const prevId = prevRow.name || prevRow.symbol;
+    const k = rows.findIndex(r => (r.name || r.symbol) === prevId);
+    if (k >= 0) hover = k;
+  }
   hbarStates[cvId] = {cv: cv, rows: rows, key: key, fmtVal: fmtVal, label: label || '',
     nameW: nameW, valW: valW, barL: barL, barR: barR, zeroX: zeroX, dom: dom,
-    W: W, H: H, hover: -1, lastTipIdx: -1};
+    W: W, H: H, hover: hover, lastTipIdx: -1};
   renderHBar(cvId);
+  // 重建后关闭交互 tooltip（防 10s 轮询残留），hover 高亮已保留，鼠标微动即恢复
+  hideTipEl(cvId + 'Tip');
 }
 // 条形图渲染：hover 行条形叠 18% 暗层加深、右侧数值放大加粗（不引入新色）
 function renderHBar(cvId) {
@@ -1346,7 +1368,7 @@ const val = id => document.getElementById(id).value.trim();
 
 // ===== 启动与全局事件 =====
 // resize 防抖重绘：走势图 + 分析图 + 市场 spark（全部依赖容器宽度）；
-// drawAnalysis 内部重建 donut/hbar 命中区域（hover 归位），并清残留交互 tooltip
+// drawDonut/drawHBar 重建命中区域时已同步关闭交互 tooltip，无需在此重复隐藏
 let rsTimer = null;
 window.addEventListener('resize', () => {
   clearTimeout(rsTimer);
@@ -1354,7 +1376,6 @@ window.addEventListener('resize', () => {
     renderMarket(lastOverview);
     drawChart();
     drawAnalysis(lastOverview);
-    hideTipEl('donutTip'); hideTipEl('pnlBarCvTip'); hideTipEl('contribCvTip');
   }, 120);
 });
 refresh(); loadChart();

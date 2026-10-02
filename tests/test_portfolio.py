@@ -745,11 +745,21 @@ class TestMarketPanelYahooSpark:
         assert pf.YAHOO_PANEL_SYMBOLS["USDHKD"] == "HKD=X"
 
     def test_market_panel_spark_marks(self):
-        """MARKET_PANEL 的 BZ/GC/DXY spark 标记为 True（走势可用）。"""
-        marks = {key: spark for key, _, _, _, spark in pf.MARKET_PANEL}
-        assert marks["BZ"] is True
-        assert marks["GC"] is True
-        assert marks["DXY"] is True
+        """MARKET_PANEL spark 数据源显式化：股指走腾讯分时，BZ/GC/DXY/美债/VIX 走 Yahoo。
+
+        结构防呆：spark_source="tencent" 才发腾讯 minute 请求，hf_ 期货代码
+        （BZ/GC 主价）绝不进入分时拉取集合（消除对腾讯分时接口的死请求）。
+        """
+        src = {key: s for key, _, _, _, s in pf.MARKET_PANEL}
+        assert src["QQQ"] == "tencent" and src["SPY"] == "tencent"
+        assert src["SOXX"] == "tencent" and src["HSI"] == "tencent"
+        assert src["BZ"] == "yahoo" and src["GC"] == "yahoo" and src["DXY"] == "yahoo"
+        assert src["US30Y"] == "yahoo" and src["US10Y"] == "yahoo" and src["VIX"] == "yahoo"
+        # 腾讯分时拉取集合只含 us/hk 股指代码，绝无 hf_ 前缀
+        tencent_spark_codes = [code for _, code, _, _, s in pf.MARKET_PANEL
+                               if s == "tencent" and code]
+        assert tencent_spark_codes == ["usQQQ", "usSPY", "usSOXX", "hkHSI"]
+        assert all(not c.startswith("hf_") for c in tencent_spark_codes)
 
     def test_fetch_spark_from_yahoo_price_not_overridden(self, monkeypatch):
         """BZ/GC/DXY spark 来自 Yahoo chart；主价保持腾讯/新浪源不被 Yahoo 覆盖。
@@ -758,8 +768,11 @@ class TestMarketPanelYahooSpark:
         与独立 spark 序列：三项 spark 必须等于 fake 序列，price 必须等于新浪主源。
         """
         pulled: list[str] = []
+        minute_urls: list[str] = []
 
         async def fake_get_text(url, headers=None, timeout=10.0):
+            if "minute/query" in url:
+                minute_urls.append(url)
             return ""    # 腾讯混排/分时全空：BZ/GC 主价走新浪 hf 兜底
 
         async def fake_resilient(url, headers=None, proxy_urls=None, timeout=10.0):
@@ -786,6 +799,13 @@ class TestMarketPanelYahooSpark:
         # 面板 Yahoo 拉取集合：3 个原主价项 + 3 个新 spark 项；
         # 不含 HKD=X（汇率走势由 server 循环经 fetch_fx_spark 低频拉取）
         assert set(pulled) == {"^TYX", "^TNX", "^VIX", "BZ=F", "GC=F", "DX-Y.NYB"}
+        # 腾讯分时只请求 4 个股指代码，hf_ 期货代码不进分时接口（死请求回归防线）
+        assert minute_urls == [
+            "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=usQQQ",
+            "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=usSPY",
+            "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=usSOXX",
+            "https://web.ifzq.gtimg.cn/appstock/app/minute/query?code=hkHSI",
+        ]
 
     def test_fetch_fx_spark(self, monkeypatch):
         """fetch_fx_spark：Yahoo HKD=X 仅取 spark 字段，代理清单透传。"""

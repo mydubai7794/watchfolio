@@ -766,17 +766,19 @@ async def fetch_fund_nav(proxy_urls: list[str] | None = None) -> dict | None:
 # 市场参考看板（QQQ/SPY/SOXX/HSI/BZ/GC/DXY/US30Y/US10Y/VIX + sparkline）
 # ---------------------------------------------------------------------------
 
-MARKET_PANEL = [  # (key, 腾讯代码(空=新浪DINIW或Yahoo见YAHOO_PANEL_SYMBOLS), 展示名, 币种, sparkline 可用)
-    ("QQQ", "usQQQ", "纳指100", "USD", True),
-    ("SPY", "usSPY", "标普500", "USD", True),
-    ("SOXX", "usSOXX", "费城半导体", "USD", True),
-    ("HSI", "hkHSI", "恒生指数", "HKD", True),
-    ("BZ", "hf_OIL", "布伦特原油", "USD", True),    # 主价腾讯 hf_ 混排(新浪兜底)；spark 走 Yahoo BZ=F
-    ("GC", "hf_GC", "COMEX黄金", "USD", True),      # 主价腾讯 hf_ 混排(新浪兜底)；spark 走 Yahoo GC=F
-    ("DXY", "", "美元指数", "", True),              # 主价新浪 DINIW；spark 走 Yahoo DX-Y.NYB
-    ("US30Y", "", "美债30Y", "%", True),            # Yahoo ^TYX，单位百分点
-    ("US10Y", "", "美债10Y", "%", True),            # Yahoo ^TNX，单位百分点
-    ("VIX", "", "恐慌指数", "", True),              # Yahoo ^VIX
+MARKET_PANEL = [  # (key, 腾讯代码(空=新浪DINIW或Yahoo见YAHOO_PANEL_SYMBOLS), 展示名, 币种, spark 数据源)
+    # 第 5 位 spark_source："tencent"=腾讯分时接口（仅股指，code 必须是 us/hk 股指代码）、
+    # "yahoo"=Yahoo v8 chart 日线、" "=无 spark。显式双源分流，hf_ 期货代码绝不进腾讯分时拉取
+    ("QQQ", "usQQQ", "纳指100", "USD", "tencent"),
+    ("SPY", "usSPY", "标普500", "USD", "tencent"),
+    ("SOXX", "usSOXX", "费城半导体", "USD", "tencent"),
+    ("HSI", "hkHSI", "恒生指数", "HKD", "tencent"),
+    ("BZ", "hf_OIL", "布伦特原油", "USD", "yahoo"),   # 主价腾讯 hf_ 混排(新浪兜底)；spark 走 Yahoo BZ=F
+    ("GC", "hf_GC", "COMEX黄金", "USD", "yahoo"),     # 主价腾讯 hf_ 混排(新浪兜底)；spark 走 Yahoo GC=F
+    ("DXY", "", "美元指数", "", "yahoo"),             # 主价新浪 DINIW；spark 走 Yahoo DX-Y.NYB
+    ("US30Y", "", "美债30Y", "%", "yahoo"),           # Yahoo ^TYX，单位百分点
+    ("US10Y", "", "美债10Y", "%", "yahoo"),           # Yahoo ^TNX，单位百分点
+    ("VIX", "", "恐慌指数", "", "yahoo"),             # Yahoo ^VIX
 ]
 
 
@@ -826,11 +828,11 @@ async def _fetch_yahoo_chart(symbol: str, proxy_urls: list[str] | None = None) -
 async def fetch_market_panel(proxy_urls: list[str] | None = None) -> list[dict]:
     """抓市场看板 10 项：腾讯混排批量 + 新浪(DINIW主用/hf兜底) + Yahoo chart(代理池) + sparkline。
 
-    数据分工：
-    - QQQ/SPY/SOXX/HSI：腾讯 us/hk 波浪线行情 + minute 分时 spark（降采样≤60点）
+    数据分工（MARKET_PANEL 第 5 位 spark_source 显式声明来源）：
+    - QQQ/SPY/SOXX/HSI：腾讯 us/hk 波浪线行情 + minute 分时 spark（tencent，降采样≤60点）
     - BZ/GC：主价腾讯 hf_ 逗号行（与股指同一混排请求），新浪 hf_OIL/hf_GC 兜底；
-      走势 spark 走 Yahoo BZ=F/GC=F 日线（仅取 spark，主价不从 Yahoo 取）
-    - DXY：主价新浪 DINIW；走势 spark 走 Yahoo DX-Y.NYB 日线（仅取 spark）
+      走势 spark 走 Yahoo BZ=F/GC=F 日线（yahoo，仅取 spark，主价不从 Yahoo 取）
+    - DXY：主价新浪 DINIW；走势 spark 走 Yahoo DX-Y.NYB 日线（yahoo，仅取 spark）
     - US30Y/US10Y/VIX：Yahoo v8 chart（代理池优先，全失败直连重试），主价+spark 同源
     单项失败不致命：price/change_pct 置 None（前端隐藏涨跌）、spark 置空数组。
     返回 [{key,name,price,change_pct,currency,spark:[float,...]}]，name 用 MARKET_PANEL 中文展示名。
@@ -868,9 +870,10 @@ async def fetch_market_panel(proxy_urls: list[str] | None = None) -> list[dict]:
         if not isinstance(r, Exception):
             yahoo_map[r[0]] = r[1]
 
-    # 4. sparkline：QQQ/SPY/SOXX/HSI 并发拉腾讯分时接口并降采样（失败→空数组）
+    # 4. sparkline：仅 spark_source="tencent" 的股指项并发拉腾讯分时接口并降采样（失败→空数组）；
+    #    BZ/GC 等 yahoo 源项的 spark 已在第 3 步 Yahoo chart 批量里，不进腾讯分时请求（消除死请求）
     spark_map: dict[str, list[float]] = {}
-    spark_codes = [code for key, code, _, _, spark in MARKET_PANEL if spark and code]
+    spark_codes = [code for _, code, _, _, src in MARKET_PANEL if src == "tencent" and code]
 
     async def _spark(code: str) -> tuple[str, list[float]]:
         # _get_text 失败返回 None，parse_tencent_minute 对 None 返回 []，故不会抛出
@@ -884,7 +887,7 @@ async def fetch_market_panel(proxy_urls: list[str] | None = None) -> list[dict]:
 
     # 5. 组装输出：无行情的项 price/change_pct 置 None（前端隐藏涨跌），不致命
     panel: list[dict] = []
-    for key, code, name, cur, spark in MARKET_PANEL:
+    for key, code, name, cur, spark_src in MARKET_PANEL:
         price = change = None
         spark_data: list[float] = []
         # Yahoo chart 结果：US30Y/US10Y/VIX 主价+spark 同源；BZ/GC/DXY 仅取 spark
@@ -892,25 +895,25 @@ async def fetch_market_panel(proxy_urls: list[str] | None = None) -> list[dict]:
         if key == "DXY":
             # 主价新浪 DINIW；走势 spark 用 Yahoo 日线（主价不从 Yahoo 取）
             q = sina_dxy
-            if spark:
+            if spark_src == "yahoo":
                 spark_data = (yq.get("spark") or [])[-60:]
         elif key in ("BZ", "GC"):
             # 腾讯 hf 行优先，失败用新浪 hf 兜底；走势 spark 用 Yahoo 日线
             q = quotes.get(code_sym.get(code, "")) or {}
             if not q.get("price"):
                 q = sina_hf.get(key) or {}
-            if spark:
+            if spark_src == "yahoo":
                 spark_data = (yq.get("spark") or [])[-60:]
         elif key in ("US30Y", "US10Y", "VIX"):
             q = yq
             # 收益率类（美债30Y/10Y）price 保留 3 位小数（前端再 fmt）
             if q.get("price") and key in ("US30Y", "US10Y"):
                 q = {**q, "price": round(q["price"], 3)}
-            if spark:
+            if spark_src == "yahoo":
                 spark_data = (q.get("spark") or [])[-60:]
         else:
             q = quotes.get(code_sym.get(code, "")) or {}
-            if spark:
+            if spark_src == "tencent":
                 spark_data = spark_map.get(code, [])
         if q.get("price"):
             price, change = q["price"], q.get("change_pct")
