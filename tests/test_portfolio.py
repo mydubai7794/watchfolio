@@ -5,6 +5,7 @@ from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import portfolio_fetcher as pf
+import server
 
 ET = ZoneInfo("America/New_York")
 
@@ -417,3 +418,95 @@ class TestFetchFxUsesProxies:
         assert rate == 7.8466 and fallback is False
         assert captured["proxy_urls"] == ["p9"]
         assert "susdhkd" in captured["url"]
+
+
+class TestDetectIsolatedSpike:
+    """tick 孤立毛刺检测：当前点大幅偏离前后邻居均值、且邻居彼此接近 → 坏值毛刺。
+
+    阈值语义：偏离量 dev>60 且邻居互差 < dev*0.5（排除真实跳变后的平稳序列），
+    两者同时满足才判毛刺；任一边界为 None（序列首尾/缺值）不判。
+    """
+
+    def test_real_spike_1667(self):
+        # 线上实测 id=1667：p=87.38，前后邻居 281/280 → 孤立尖峰
+        assert pf.detect_isolated_spike(281.0, 87.38, 280.0) is True
+
+    def test_real_spike_1725(self):
+        # 线上实测 id=1725：p=-299.60，前后邻居 272/270 → 孤立深坑
+        assert pf.detect_isolated_spike(272.0, -299.60, 270.0) is True
+
+    def test_stable_series_false(self):
+        # 平稳序列：相邻点小幅波动，不判毛刺
+        assert pf.detect_isolated_spike(280.0, 281.0, 280.5) is False
+
+    def test_real_jump_false(self):
+        # 真实跳变（如开盘跳空）：邻居互差大（≥ dev*0.5），不判毛刺
+        assert pf.detect_isolated_spike(999.0, 1000.0, 100.0) is False
+
+    def test_small_dev_false(self):
+        # 偏离量未过 60 绝对阈值：不判毛刺
+        assert pf.detect_isolated_spike(280.0, 270.0, 280.0) is False
+
+    def test_none_boundary_false(self):
+        # 任一边界为 None（序列首尾/缺值）：不判毛刺
+        assert pf.detect_isolated_spike(None, 87.38, 280.0) is False
+        assert pf.detect_isolated_spike(281.0, 87.38, None) is False
+        assert pf.detect_isolated_spike(None, 87.38, None) is False
+        assert pf.detect_isolated_spike(281.0, None, 280.0) is False
+
+
+class TestDecideTickAction:
+    """tick 写入口延迟确认决策：超阈值暂存(hold)→下一轮恢复丢弃(discard)/
+    仍异常确认为真实跳变(confirm，如开盘跳空)。阈值 = max(60, 0.05×|last_v|)。"""
+
+    def test_cold_start_write(self):
+        # 冷启动首条无 last 基准：直接写入
+        assert pf.decide_tick_action(None, None, 280.0, False) == "write"
+
+    def test_normal_write(self):
+        # 偏差在阈值内且无暂存：正常写入
+        assert pf.decide_tick_action(280.0, 100000.0, 281.0, False) == "write"
+
+    def test_spike_hold(self):
+        # 线上实测 id=1725 场景：last_p=272、new_p=-299.6，偏差 571.6 > 阈值 500
+        # （last_v=10000 → max(60, 500)=500）→ 暂存不写库
+        assert pf.decide_tick_action(272.0, 10000.0, -299.6, False) == "hold"
+
+    def test_recover_discard(self):
+        # 下一轮恢复到 last 附近（偏差 < 阈值一半）：上一轮为毛刺，丢弃暂存
+        assert pf.decide_tick_action(272.0, 10000.0, 272.5, True) == "discard"
+
+    def test_still_abnormal_confirm(self):
+        # 连续两轮仍异常（偏差 ≥ 阈值一半）：真实跳变确认，补写暂存并接受本轮
+        assert pf.decide_tick_action(272.0, 10000.0, -290.0, True) == "confirm"
+
+    def test_absolute_floor_60(self):
+        # last_v 很小时阈值取绝对下限 60：偏差 100 > 60 → 暂存
+        assert pf.decide_tick_action(200.0, 500.0, 100.0, False) == "hold"
+
+
+class TestStripSpikePoints:
+    """intraday 读出口毛刺清洗：孤立单点剔除（首尾不判），双端过滤的读侧兜底。"""
+
+    def test_strip_two_real_spikes(self):
+        # 线上两根针（87.38 / -299.60）嵌入平稳序列 → 两点剔除，其余保留
+        points = [{"ts": "1", "v": 1.0, "p": 281.0},
+                  {"ts": "2", "v": 1.0, "p": 87.38},
+                  {"ts": "3", "v": 1.0, "p": 280.0},
+                  {"ts": "4", "v": 1.0, "p": 272.0},
+                  {"ts": "5", "v": 1.0, "p": -299.60},
+                  {"ts": "6", "v": 1.0, "p": 270.0}]
+        out = server._strip_spike_points(points)
+        assert [p["p"] for p in out] == [281.0, 280.0, 272.0, 270.0]
+
+    def test_keep_first_last(self):
+        # 序列首尾即使数值异常也不剔除（无法三点判定），真实跳变同样保留
+        points = [{"ts": "1", "v": 1.0, "p": 87.38},
+                  {"ts": "2", "v": 1.0, "p": 280.0},
+                  {"ts": "3", "v": 1.0, "p": -299.60}]
+        assert server._strip_spike_points(points) == points
+
+    def test_short_series_untouched(self):
+        # 少于 3 点：原样返回
+        points = [{"ts": "1", "v": 1.0, "p": 1.0}]
+        assert server._strip_spike_points(points) == points

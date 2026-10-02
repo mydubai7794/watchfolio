@@ -1166,6 +1166,11 @@ async def _monitor_loop():
 async def _portfolio_loop():
     """持仓行情采集：盘中10s/扩展时段30s/休市600s，成功才写 tick。"""
     global portfolio_cache
+    # tick 毛刺延迟确认状态（进程内存，重启即失效重建）：
+    # last_tick_state：上一条已写入 tick 的 {p: day_pnl, v: total_value} 基准；
+    # pending_tick：偏差超阈值被暂存待确认的 tick 行（下一轮恢复→丢弃，仍异常→补写确认）
+    last_tick_state: dict = {"p": None, "v": None}
+    pending_tick: tuple | None = None
     logger.info("持仓行情采集循环启动")
     while True:
         interval = 600.0
@@ -1217,10 +1222,31 @@ async def _portfolio_loop():
             }
             # 休市不写 tick（避免日线聚合混入休市平线）
             if quotes and session != "closed":
-                # tick 口径：总资产(含现金折算)，现金变动当日需保持曲线连续
-                await db.save_portfolio_tick(
-                    datetime.now(), et_date, summary["total_value"], summary["day_pnl"],
-                    summary["total_pnl"], summary["day_pnl_pct"], summary["total_pnl_pct"])
+                # tick 口径：总资产(含现金折算)，现金变动当日需保持曲线连续；
+                # 写入口毛刺延迟确认：偏差超阈值的 tick 先暂存一轮不写库，下一轮
+                # 恢复到 last 附近→上轮为瞬时坏值丢弃；仍异常→确认为真实跳变
+                # （如开盘跳空），补写暂存 tick 保持曲线连续并接受本轮
+                p_now, v_now = summary["day_pnl"], summary["total_value"]
+                tick_row = (datetime.now(), et_date, v_now, p_now,
+                            summary["total_pnl"], summary["day_pnl_pct"],
+                            summary["total_pnl_pct"])
+                action = pf.decide_tick_action(
+                    last_tick_state["p"], last_tick_state["v"], p_now,
+                    pending_tick is not None)
+                if action == "write":
+                    await db.save_portfolio_tick(*tick_row)
+                    last_tick_state.update(p=p_now, v=v_now)
+                elif action == "hold":
+                    pending_tick = tick_row
+                elif action == "discard":
+                    pending_tick = None
+                    await db.save_portfolio_tick(*tick_row)
+                    last_tick_state.update(p=p_now, v=v_now)
+                else:  # confirm：真实跳变，先补写暂存 tick 保持曲线连续
+                    await db.save_portfolio_tick(*pending_tick)
+                    pending_tick = None
+                    await db.save_portfolio_tick(*tick_row)
+                    last_tick_state.update(p=p_now, v=v_now)
         except asyncio.CancelledError:
             logger.info("持仓行情采集循环已停止")
             break
@@ -1328,21 +1354,41 @@ async def portfolio_overview():
     return data
 
 
+def _strip_spike_points(points: list[dict]) -> list[dict]:
+    """intraday 读出口毛刺清洗：day_pnl 孤立坏值点剔除（序列首尾不判），其余原样保留。
+
+    针对"单持仓行情瞬时坏值"已落库的孤立单点（前后邻居相近、当前点大幅偏离），
+    在 day/hours 两分支出口统一兜底，过滤写入口延迟确认阈值以下的漏网小毛刺。
+    """
+    if len(points) < 3:
+        return points
+    out: list[dict] = []
+    for i, pt in enumerate(points):
+        if 0 < i < len(points) - 1 and pf.detect_isolated_spike(
+                points[i - 1]["p"], pt["p"], points[i + 1]["p"]):
+            continue
+        out.append(pt)
+    return out
+
+
 @app.get("/api/portfolio/intraday")
 async def portfolio_intraday(trade_date: str = Query(default=""),
                              hours: int = Query(default=0, ge=0, le=48)):
     """当日（或指定美东交易日）分时点；hours>0 时返回最近 N 小时窗口（跨日分时）。"""
     if hours > 0:
         rows = await db.get_portfolio_recent(hours)
-        return {"ok": True, "window": f"{hours}h", "points": [
+        points = [
             {"ts": r["ts"].strftime("%m-%d %H:%M") if isinstance(r["ts"], datetime) else str(r["ts"]),
-             "v": float(r["total_value_usd"]), "p": float(r["day_pnl_usd"])} for r in rows]}
+             "v": float(r["total_value_usd"]), "p": float(r["day_pnl_usd"])} for r in rows]
+        return {"ok": True, "window": f"{hours}h", "points": _strip_spike_points(points)}
     if not trade_date:
         trade_date = portfolio_cache.get("trade_date") or datetime.now().strftime("%Y-%m-%d")
     rows = await db.get_portfolio_intraday(trade_date)
-    return {"ok": True, "window": "day", "trade_date": trade_date, "points": [
+    points = [
         {"ts": r["ts"].strftime("%H:%M:%S") if isinstance(r["ts"], datetime) else str(r["ts"]),
-         "v": float(r["total_value_usd"]), "p": float(r["day_pnl_usd"])} for r in rows]}
+         "v": float(r["total_value_usd"]), "p": float(r["day_pnl_usd"])} for r in rows]
+    return {"ok": True, "window": "day", "trade_date": trade_date,
+            "points": _strip_spike_points(points)}
 
 
 @app.get("/api/portfolio/daily")

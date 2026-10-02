@@ -328,6 +328,44 @@ def parse_ft_nav(data: dict) -> dict | None:
 # 盈亏计算（纯函数，所有金额统一 USD）
 # ---------------------------------------------------------------------------
 
+def detect_isolated_spike(prev: float | None, cur: float | None,
+                          nxt: float | None) -> bool:
+    """tick 孤立毛刺检测：当前点大幅偏离前后邻居均值、且邻居彼此接近 → 坏值毛刺。
+
+    判定：dev=|cur-(prev+nxt)/2| > 60（偏离量过绝对阈值）且 |prev-nxt| < dev*0.5
+    （邻居互差远小于偏离量，排除开盘跳空等真实跳变），两者同时满足才判 True；
+    任一边界为 None（序列首尾/缺值）不判，返回 False。
+    成因：单持仓行情瞬时坏值（线上实例：p=87.38 邻居 281/280、p=-299.60 邻居 272/270）。
+    """
+    if prev is None or cur is None or nxt is None:
+        return False
+    nb = (prev + nxt) / 2
+    dev = abs(cur - nb)
+    return dev > 60 and abs(prev - nxt) < dev * 0.5
+
+
+def decide_tick_action(last_p: float | None, last_v: float | None,
+                       new_p: float, has_pending: bool) -> str:
+    """tick 写入口延迟确认决策（纯函数，供采集循环执行）。
+
+    阈值 = max(60, 0.05×|last_v|)（绝对盈亏跳变 60 或总资产 5% 取大者）。
+    返回动作：
+    - "write":   冷启动首条 / 偏差在阈值内 → 直接写入并更新 last；
+    - "hold":    偏差超阈值且当前无暂存 → 暂存 pending，本轮不写库；
+    - "discard": 已有暂存且本轮恢复到 last 附近（偏差 < 阈值一半）→ 上轮为毛刺，
+                 丢弃 pending，本轮正常写入；
+    - "confirm": 已有暂存且本轮仍异常（偏差 ≥ 阈值一半）→ 真实跳变（如开盘跳空），
+                 补写 pending 保持曲线连续，并接受本轮写入。
+    """
+    if last_p is None:
+        return "write"
+    threshold = max(60.0, 0.05 * abs(last_v or 0.0))
+    dev = abs(new_p - last_p)
+    if has_pending:
+        return "discard" if dev < threshold / 2 else "confirm"
+    return "hold" if dev > threshold else "write"
+
+
 def build_positions(holdings: list[dict], us_quotes: dict[str, dict],
                     fund: dict | None, fx_usdhkd: float) -> tuple[list[dict], dict]:
     """计算每持仓盈亏与组合汇总。
