@@ -152,12 +152,19 @@ async def init_tables():
         """,
         _pool=pool,
     )
-    # 代理分类列迁移（存量库补 region 列）
-    await execute(
-        "ALTER TABLE proxy_pool ADD COLUMN IF NOT EXISTS region VARCHAR(16) "
-        "DEFAULT 'unknown' COMMENT '代理分类: overseas=境外(加密市场数据源可用) unknown=未分类'",
+    # 代理分类列迁移（存量库补 region 列；MySQL 无 ADD COLUMN IF NOT EXISTS，先查再补）
+    cols = await execute_dict(
+        "SELECT COUNT(*) AS n FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'proxy_pool' "
+        "AND COLUMN_NAME = 'region'",
         _pool=pool,
     )
+    if not cols or not cols[0].get("n"):
+        await execute(
+            "ALTER TABLE proxy_pool ADD COLUMN region VARCHAR(16) "
+            "DEFAULT 'unknown' COMMENT '代理分类: overseas=境外(加密市场数据源可用) unknown=未分类'",
+            _pool=pool,
+        )
 
     # ---- sys_config ----
     await execute(
