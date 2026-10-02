@@ -1198,6 +1198,7 @@ async def _portfolio_loop():
     # pending_tick：偏差超阈值被暂存待确认的 tick 行（下一轮恢复→丢弃，仍异常→补写确认）
     last_tick_state: dict = {"p": None, "v": None}
     pending_tick: tuple | None = None
+    anchor_fail_streak = 0   # 锚点恢复连续失败计数（>=3 放弃，退化兜底）
     logger.info("持仓行情采集循环启动")
     while True:
         interval = 600.0
@@ -1229,10 +1230,13 @@ async def _portfolio_loop():
             # 重启落在非 regular 时段：腾讯昨收(f[4])语义已切换为最近收盘，直接
             # 退化会让 base==close → 收盘定格段(close_pnl)恒 0（$0.00 问题根因）。
             # 用 twelvedata 当日 open/close 补齐锚点（8 只/批渐进，见 fetcher 限额）；
-            # 恢复成功的 symbol 不再走腾讯退化
-            if session != "regular" and us_symbols:
+            # 以 base_restored 标记区分真锚点与状态机退化值（退化值每轮都可被
+            # 恢复覆盖），连续失败>=3 次放弃（退化兜底，09:30 开盘自愈）
+            if session != "regular" and us_symbols and anchor_fail_streak < 3:
+                restored = portfolio_session_state.setdefault("base_restored", set())
                 missing = [s for s in us_symbols
-                           if s not in portfolio_session_state.get("base_closes", {})]
+                           if s not in restored
+                           or s not in portfolio_session_state.get("base_closes", {})]
                 if missing:
                     anchors = await pf.fetch_td_session_anchors(missing)
                     base_map = portfolio_session_state.setdefault("base_closes", {})
@@ -1240,6 +1244,11 @@ async def _portfolio_loop():
                     for s, a in anchors.items():
                         base_map[s] = a["open"]
                         close_map[s] = a["close"]
+                        restored.add(s)
+                    if anchors:
+                        anchor_fail_streak = 0
+                    else:
+                        anchor_fail_streak += 1
                     still = [s for s in missing if s not in anchors]
                     if still:
                         logger.info("锚点恢复待续(%d 只已补, %d 只待下批): %s",

@@ -606,10 +606,11 @@ function renderPositions(d) {
   positions.forEach(p => {
     const tags = positionTags(p, session) + (p.stale ? '<span class="pill tag tag-stale">无行情</span>' : '');
     const sub = p.market === 'HKFUND' ? (p.nav_date || '') : (p.quote_time || '');
-    // 涨跌幅口径（一场分层）：盘中=实时累计%（live_change_pct，基准=场基准）；
-    // 收盘后=收盘定格涨跌%（day_close_pct，基准=场基准→16:00 收盘定格，
-    // 不再混入盘后/夜盘段）；盘后/夜盘实时增量另由夜盘徽标展示
-    const closedView = session !== 'regular' && p.day_close_pct != null;
+    // 涨跌幅口径（一场分层，仅美股行）：盘中=实时累计%（live_change_pct，
+    // 基准=场基准）；收盘后=收盘定格涨跌%（day_close_pct，基准=场基准→16:00
+    // 收盘定格，不再混入盘后/夜盘段）；盘后/夜盘实时增量另由夜盘徽标展示。
+    // 港股/基金不适用美股一场口径（港股随自身时段盘中实时），恒用 live
+    const closedView = session !== 'regular' && p.market === 'US' && p.day_close_pct != null;
     const liveChg = closedView ? p.day_close_pct
       : ((p.live_change_pct != null) ? p.live_change_pct : p.change_pct);
     const chgHtml = liveChg==null ? '--' : sign(liveChg)+fmt(liveChg)+'%';
