@@ -170,6 +170,8 @@ class TestBuildPositions:
         positions, summary = pf.build_positions(HOLDINGS, {}, FUND, 7.8)
         mu = next(p for p in positions if p["symbol"] == "MU")
         assert mu["price"] == 0 and mu["value"] == 0 and mu["stale"] is True
+        # stale 行无收盘定格价 → 夜盘增量% 不可算，后端下发 None（前端省略）
+        assert mu["overnight_change_pct"] is None
 
     def test_stale_cost_basis(self):
         # 行情与净值均缺失：stale 行的成本仍需按 USD 口径计入 cost_basis，total_value 归零
@@ -454,10 +456,17 @@ class TestDetectIsolatedSpike:
         assert pf.detect_isolated_spike(None, 87.38, None) is False
         assert pf.detect_isolated_spike(281.0, None, 280.0) is False
 
+    def test_consecutive_bad_values_undetectable(self):
+        # 连续 ≥2 点同向坏值不可检（无第二信息源）：坏点相邻时邻居互差
+        # 不再远小于偏离量，判定条件天然不成立 → False（写入口延迟确认兜底）
+        assert pf.detect_isolated_spike(281.0, 87.38, 87.5) is False
+
 
 class TestDecideTickAction:
     """tick 写入口延迟确认决策：超阈值暂存(hold)→下一轮恢复丢弃(discard)/
-    仍异常确认为真实跳变(confirm，如开盘跳空)。阈值 = max(60, 0.05×|last_v|)。"""
+    仍异常确认为真实跳变(confirm，如开盘跳空)。
+    p 阈值 = max(60, 0.02×|last_v|)（总资产 2% 量纲；v 无独立跳变检测，
+    现金/行情坏值不会使 v 脱离 p 单独突变）。"""
 
     def test_cold_start_write(self):
         # 冷启动首条无 last 基准：直接写入
@@ -467,13 +476,22 @@ class TestDecideTickAction:
         # 偏差在阈值内且无暂存：正常写入
         assert pf.decide_tick_action(280.0, 100000.0, 281.0, False) == "write"
 
-    def test_spike_hold(self):
-        # 线上实测 id=1725 场景：last_p=272、new_p=-299.6，偏差 571.6 > 阈值 500
-        # （last_v=10000 → max(60, 500)=500）→ 暂存不写库
-        assert pf.decide_tick_action(272.0, 10000.0, -299.6, False) == "hold"
+    def test_replay_needle_571_hold(self):
+        # 线上针2(id=1725) 写入口回放：last_p=272 → p=-299.6（dev≈571.6），
+        # last_v=13000 → 阈值 max(60, 0.02×13000)=260 < 571.6 → hold。
+        # 旧 5% 量纲阈值 650 > 571.6 会 write 漏过入库（本轮修复点）
+        assert pf.decide_tick_action(272.0, 13000.0, -299.6, False) == "hold"
+
+    def test_replay_needle_194_hold(self):
+        # 线上针1(id=1667) 写入口回放：last_p=281 → p=87.38（dev≈193.6）。
+        # last_v 处 2% 阈值生效区间(<194/0.02=9700，盘中基准如 9000)：
+        # 阈值 180 < 193.6 → hold。last_v≈13000 时阈值 260 > 193.6 该针会漏过，
+        # 由读出口 _strip_spike_points 孤立点剔除兜底（双端过滤分工，
+        # 连续坏值边界见 detect_isolated_spike docstring）
+        assert pf.decide_tick_action(281.0, 9000.0, 87.38, False) == "hold"
 
     def test_recover_discard(self):
-        # 下一轮恢复到 last 附近（偏差 < 阈值一半）：上一轮为毛刺，丢弃暂存
+        # 下一轮恢复到 last 附近（偏差 < 阈值一半 100）：上一轮为毛刺，丢弃暂存
         assert pf.decide_tick_action(272.0, 10000.0, 272.5, True) == "discard"
 
     def test_still_abnormal_confirm(self):
@@ -483,6 +501,85 @@ class TestDecideTickAction:
     def test_absolute_floor_60(self):
         # last_v 很小时阈值取绝对下限 60：偏差 100 > 60 → 暂存
         assert pf.decide_tick_action(200.0, 500.0, 100.0, False) == "hold"
+
+
+class TestUpdateSessionState:
+    """一场口径状态机纯函数：base_closes/close_prices/base_logged 就地更新，
+    冷启动退化经 base_fallback 传给调用方打日志（函数自身无 IO）。
+
+    f[3]=腾讯现价、f[4]=腾讯昨收；边界覆盖：regular 开盘刷新基准、
+    post/closed≥16:00 定格、凌晨<04:00 与 pre 的 f[4] 切换语义、
+    冷启动空 state 退化填 f[4]。"""
+
+    Q = {"MU": {"price": 100.0, "pre_close": 95.0}}
+
+    def test_regular_0930_refreshes_base(self):
+        # 09:30 regular：f[4] 即一场基准，每轮刷新覆盖隔夜退化的旧基准；
+        # 收盘定格跟随实时价（定格于 16:00 最后一条采样）
+        state = {"base_closes": {"MU": 88.0}, "close_prices": {}, "base_logged": True}
+        pf.update_session_state(state, "regular",
+                                datetime(2026, 10, 1, 9, 30, tzinfo=ET), self.Q)
+        assert state["base_closes"]["MU"] == 95.0
+        assert state["close_prices"]["MU"] == 100.0
+        assert state["base_fallback"] == []
+
+    def test_post_1600_freezes_close(self):
+        # 16:00 post：f[3] 实测保持收盘价 → 收盘定格；场基准沿用上一值不刷新
+        state = {"base_closes": {"MU": 95.0}, "close_prices": {"MU": 99.0},
+                 "base_logged": False}
+        pf.update_session_state(state, "post",
+                                datetime(2026, 10, 1, 16, 0, tzinfo=ET), self.Q)
+        assert state["close_prices"]["MU"] == 100.0
+        assert state["base_closes"]["MU"] == 95.0
+
+    def test_pre_early_morning_f4_semantic_switch(self):
+        # 凌晨 pre：腾讯昨收(f[4])实测已切换为昨日常规收盘 → 定格兜底取 f[4]
+        # （而非 regular 语义的一场基准），场基准沿用不覆盖
+        state = {"base_closes": {"MU": 95.0}, "close_prices": {"MU": 100.0},
+                 "base_logged": False}
+        pf.update_session_state(state, "pre",
+                                datetime(2026, 10, 2, 8, 0, tzinfo=ET), self.Q)
+        assert state["close_prices"]["MU"] == 95.0
+        assert state["base_closes"]["MU"] == 95.0
+
+    def test_closed_windows_branch_by_hour(self):
+        # closed 按 et_hour 分支：晚间 ≥16:00 同 post（f[3] 定格）；
+        # 凌晨 <04:00 同 pre（f[4] 定格）
+        state_night = {"base_closes": {}, "close_prices": {}, "base_logged": False}
+        pf.update_session_state(state_night, "closed",
+                                datetime(2026, 10, 1, 21, 0, tzinfo=ET), self.Q)
+        assert state_night["close_prices"]["MU"] == 100.0
+        state_dawn = {"base_closes": {"MU": 95.0}, "close_prices": {},
+                      "base_logged": False}
+        pf.update_session_state(state_dawn, "closed",
+                                datetime(2026, 10, 2, 2, 0, tzinfo=ET), self.Q)
+        assert state_dawn["close_prices"]["MU"] == 95.0
+
+    def test_cold_start_empty_state_fallback(self):
+        # 冷启动空 state：非 regular 时段退化用当轮 f[4] 充当场基准，
+        # base_logged 置位 + base_fallback 传递（隔夜偏差 09:30 开盘自愈）
+        state = {}
+        pf.update_session_state(state, "post",
+                                datetime(2026, 10, 1, 16, 30, tzinfo=ET), self.Q)
+        assert state["base_closes"] == {"MU": 95.0}
+        assert state["base_logged"] is True
+        assert state["base_fallback"] == ["MU"]
+        # 第二轮：基准已维护不再退化，标注不重复（base_fallback 清空）
+        pf.update_session_state(state, "post",
+                                datetime(2026, 10, 1, 16, 40, tzinfo=ET), self.Q)
+        assert state["base_fallback"] == []
+        assert state["base_closes"] == {"MU": 95.0}
+
+    def test_partial_missing_fills_only_missing(self):
+        # 多 symbol 场景：仅缺失基准的 symbol 退化，已维护的不被覆盖
+        quotes = {"MU": {"price": 100.0, "pre_close": 95.0},
+                  "QQQ": {"price": 500.0, "pre_close": 495.0}}
+        state = {"base_closes": {"MU": 94.0}, "close_prices": {},
+                 "base_logged": True}
+        pf.update_session_state(state, "post",
+                                datetime(2026, 10, 1, 17, 0, tzinfo=ET), quotes)
+        assert state["base_closes"] == {"MU": 94.0, "QQQ": 495.0}
+        assert state["base_fallback"] == []   # base_logged 已置位，不再标注
 
 
 class TestStripSpikePoints:
@@ -568,6 +665,8 @@ class TestBuildPositionsSessionPnl:
         assert summary["close_pnl"] == (100.0 - 90.0) * 10
         # 夜盘增量 = 实时累计 - 收盘定格 = 200 - 100 = 100
         assert summary["overnight_pnl"] == summary["day_pnl"] - summary["close_pnl"]
+        # 夜盘增量% 后端统一下发：(现价110-定格100)/定格100 = +10%
+        assert abs(mu["overnight_change_pct"] - 10.0) < 1e-9
 
     def test_no_overrides_fallback(self):
         # 不传 overrides：基准退化 pre_close(95)、close 退化实时价(110)→
@@ -578,6 +677,8 @@ class TestBuildPositionsSessionPnl:
         assert mu["close_price"] == 110.0
         assert summary["close_pnl"] == (110.0 - 95.0) * 10
         assert summary["overnight_pnl"] == 0.0
+        # close 退化实时价 → 夜盘增量% = 0
+        assert mu["overnight_change_pct"] == 0.0
 
     def test_hk_overrides_fx(self):
         # HK 持仓：三数值按汇率折算 USD，恒等式保持
@@ -594,6 +695,8 @@ class TestBuildPositionsSessionPnl:
         assert p["today_pnl"] == (1050.0 - 1040.0) * 2 / 7.8
         assert summary["close_pnl"] == (1045.0 - 1040.0) * 2 / 7.8
         assert summary["overnight_pnl"] == summary["day_pnl"] - summary["close_pnl"]
+        # 夜盘增量% 按 HKD 定格价计算，与金额口径同源
+        assert abs(p["overnight_change_pct"] - (1050.0 - 1045.0) / 1045.0 * 100) < 1e-9
 
     def test_fund_close_is_nav(self):
         # HKFUND：场基准=prev_nav，收盘定格=当日净值（基金日更，无夜盘）→ overnight=0
@@ -606,6 +709,8 @@ class TestBuildPositionsSessionPnl:
         assert p["close_price"] == 15.50
         assert summary["close_pnl"] == (15.50 - 15.62) * 100 / 7.8
         assert summary["overnight_pnl"] == 0.0
+        # 基金日更无夜盘：现价=定格净值 → 夜盘增量% = 0
+        assert p["overnight_change_pct"] == 0.0
 
 
 class TestFetchOvernightQuotes:

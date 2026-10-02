@@ -223,15 +223,17 @@ fund_nav_cache: dict | None = None   # {"nav","prev_nav","nav_date","nav_change_
 fx_state: dict = {"rate": 7.80, "fallback": True, "time": ""}
 market_cache: list[dict] = []        # 市场参考看板缓存（QQQ/SPY/SOXX/HSI/BZ/GC/DXY/US30Y/US10Y/VIX）
 
-# 一场口径状态机（模块级，进程生命周期内持久；重启后冷启动自愈，09:30 开盘刷新基准）：
+# 一场口径状态机（模块级，进程生命周期内持久；重启后冷启动自愈，09:30 开盘刷新基准）。
+# 维护逻辑已提取为纯函数 pf.update_session_state（无 IO、可离线测试），此处仅持有状态：
 # base_closes: {symbol: 场基准价}——regular 时段用腾讯昨收(f[4])每轮刷新（数据源保证
 #              =一场基准）；非 regular 沿用上一值；冷启动/重启落在非 regular 时段时
 #              退化用当轮 f[4]（次日凌晨该值语义可能已切换，存在隔夜偏差，09:30 自愈，
-#              logger.info 仅标注一次）
+#              循环侧 logger.info 仅标注一次）
 # close_prices: {symbol: 常规收盘定格价}——regular 时段跟随实时价（定格于 16:00 最后
 #              一条）；post/closed(≥16:00) 取腾讯现价(f[3]，实测盘后保持收盘价)；
 #              次日凌晨(<04:00)/盘前取 f[4]（实测已切换为昨日常规收盘）
 # base_logged: 冷启动退化标注开关（每次进程生命周期仅标注一次）
+# base_fallback: 本轮冷启动退化填充的 symbol（纯函数→循环侧的日志传递通道，读完即 pop）
 portfolio_session_state: dict = {"base_closes": {}, "close_prices": {}, "base_logged": False}
 portfolio_task: Optional[asyncio.Task] = None
 fund_nav_task: Optional[asyncio.Task] = None
@@ -1186,10 +1188,10 @@ async def _portfolio_loop():
     while True:
         interval = 600.0
         try:
-            session, _et_date, et_now = pf.us_market_session()
-            # us_market_session 的 et_now 为展示用字符串；状态机/归场需日历字段，
-            # 此处解析回美东时区 datetime（与该次调用同一时钟快照）
-            et_dt = datetime.strptime(et_now, "%Y-%m-%d %H:%M:%S").replace(tzinfo=pf.ET_TZ)
+            # 美东时钟循环内直取一次复用（时段判断/状态机/夜盘标记/归场同一快照，
+            # 消除对 us_market_session 展示串的 strptime 反解析）
+            et_dt = datetime.now(pf.ET_TZ)
+            session, _et_date, et_now = pf.us_market_session(et_dt)
             interval = {"regular": 10.0, "pre": 30.0, "post": 30.0}.get(session, 600.0)
             holdings = await db.get_holdings(enabled_only=True)
             us_symbols = [h["symbol"] for h in holdings if h["market"] == "US"]
@@ -1218,41 +1220,15 @@ async def _portfolio_loop():
                         q["price"] = oq["price"]
                         q["ext_price"] = 0.0
                         q["ext_time"] = "夜盘"
-            base_closes: dict = portfolio_session_state["base_closes"]
-            close_prices: dict = portfolio_session_state["close_prices"]
-            et_hour = et_dt.hour
-            if session == "regular":
-                # regular：腾讯昨收(f[4])即一场基准，每轮刷新；收盘定格跟随实时价
-                # （定格于 16:00 最后一条采样），实时累计=定格、夜盘增量=0
-                for sym, q in quotes.items():
-                    if q.get("pre_close"):
-                        base_closes[sym] = q["pre_close"]
-                    if q.get("price"):
-                        close_prices[sym] = q["price"]
-            elif session == "post" or (session == "closed" and et_hour >= 16):
-                # post/晚间 closed：腾讯现价(f[3])实测保持 16:00 收盘价 → 收盘定格
-                for sym, q in quotes.items():
-                    if q.get("price"):
-                        close_prices[sym] = q["price"]
-            elif session == "pre" or (session == "closed" and et_hour < 4):
-                # 次日凌晨/盘前：腾讯昨收(f[4])实测已切换为昨日常规收盘 → 定格兜底
-                for sym, q in quotes.items():
-                    if q.get("pre_close"):
-                        close_prices[sym] = q["pre_close"]
-            if session != "regular":
-                # 非 regular 沿用已维护基准；冷启动/重启缺失时退化用当轮 f[4]
-                # （次日凌晨该值可能已是次日语义，存在隔夜偏差，09:30 开盘自愈）
-                missing = [s for s, q in quotes.items()
-                           if s not in base_closes and q.get("pre_close")]
-                for sym in missing:
-                    base_closes[sym] = quotes[sym]["pre_close"]
-                if missing and not portfolio_session_state["base_logged"]:
-                    logger.info("一场口径基准冷启动退化: 非 regular 时段用腾讯昨收充当场基准 "
-                                "(存在隔夜偏差, 09:30 开盘自愈): %s", missing)
-                    portfolio_session_state["base_logged"] = True
-            # 一场基准/定格传入纯函数层（overrides 优先，缺失退化 pre_close/实时价）
-            base_overrides = {s: b for s, b in base_closes.items() if b}
-            close_overrides = {s: c for s, c in close_prices.items() if c}
+            # 状态机纯函数（无 IO）：base_closes/close_prices/base_logged 就地更新；
+            # 冷启动退化标注由 base_fallback 传递，日志在循环侧打（保持函数可离线测试）
+            pf.update_session_state(portfolio_session_state, session, et_dt, quotes)
+            fallback_syms = portfolio_session_state.pop("base_fallback", [])
+            if fallback_syms:
+                logger.info("一场口径基准冷启动退化: 非 regular 时段用腾讯昨收充当场基准 "
+                            "(存在隔夜偏差, 09:30 开盘自愈): %s", fallback_syms)
+            base_overrides = {s: b for s, b in portfolio_session_state["base_closes"].items() if b}
+            close_overrides = {s: c for s, c in portfolio_session_state["close_prices"].items() if c}
             positions, summary = pf.build_positions(
                 holdings, quotes, fund_nav_cache, fx_state["rate"],
                 base_overrides=base_overrides, close_overrides=close_overrides)

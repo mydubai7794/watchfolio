@@ -521,12 +521,13 @@ function positionTags(p, session) {
   return '';
 }
 
-// 夜盘增量小徽标：盘后/夜盘时段在现价旁显示「实时累计% − 收盘定格涨跌%」胶囊；
-// live_change_pct/close_price/pre_close 任一缺失则口径不可算，省略不显示
+// 夜盘增量小徽标：后端统一下发的 overnight_change_pct=(现价-收盘定格)/收盘定格×100
+// 直接消费（不再前端二次推导）；显示门槛与 summary 徽标统一为 extLive
+// （盘前/盘后/夜盘时段），字段缺失（null）省略不显示
 function nightBadge(p, session, night) {
-  if (session !== 'post' && !night) return '';
-  if (p.live_change_pct == null || p.close_price == null || !p.pre_close) return '';
-  const inc = p.live_change_pct - (p.close_price - p.pre_close) / p.pre_close * 100;
+  if (session !== 'pre' && session !== 'post' && !night) return '';
+  if (p.overnight_change_pct == null) return '';
+  const inc = p.overnight_change_pct;
   const tone = inc > 0 ? ' pill-up' : (inc < 0 ? ' pill-down' : '');
   return '<span class="pill tag' + tone + '">' + sign(inc) + fmt(inc, 1) + '%</span>';
 }
@@ -612,9 +613,10 @@ function renderOverview(d) {
   const extLive = d.session === 'pre' || d.session === 'post' || d.night_session;
   document.getElementById('dayPnlLabel').innerHTML =
     '今日盈亏' + (extLive ? ' <i class="ref-tag">实时累计</i>' : '');
-  // 一场口径副行：收盘定格（Micro 灰字）+「昨收以来」夜盘增量徽标（仅盘后/夜盘/次日盘前且字段非空）
+  // 一场口径副行：收盘定格（Micro 灰字）+「昨收以来」夜盘增量徽标。
+  // 显示门槛统一用 extLive（盘前/盘后/夜盘），regular 时段两数值恒等、副行无信息量，隐藏
   const subEl = document.getElementById('dayPnlSub');
-  if (s.close_pnl != null) {
+  if (s.close_pnl != null && extLive) {
     let subHtml = '<span>收盘定格 ' + sign(s.close_pnl) + usd(s.close_pnl) + '</span>';
     if (extLive && s.overnight_pnl != null) {
       subHtml += '<span class="ov-pill ' + cls(s.overnight_pnl) + '">昨收以来 '

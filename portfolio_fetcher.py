@@ -353,6 +353,9 @@ def detect_isolated_spike(prev: float | None, cur: float | None,
     （邻居互差远小于偏离量，排除开盘跳空等真实跳变），两者同时满足才判 True；
     任一边界为 None（序列首尾/缺值）不判，返回 False。
     成因：单持仓行情瞬时坏值（线上实例：p=87.38 邻居 281/280、p=-299.60 邻居 272/270）。
+    边界：连续 ≥2 点同向坏值不可检——坏点相邻时其"邻居"仍含坏值，邻居互差不再
+    远小于偏离量，判定条件天然不成立（无第二信息源交叉验证）；此类序列依赖
+    写入口 decide_tick_action 的延迟确认兜底，本函数仅作为读出口的孤立点清洗。
     """
     if prev is None or cur is None or nxt is None:
         return False
@@ -365,7 +368,11 @@ def decide_tick_action(last_p: float | None, last_v: float | None,
                        new_p: float, has_pending: bool) -> str:
     """tick 写入口延迟确认决策（纯函数，供采集循环执行）。
 
-    阈值 = max(60, 0.05×|last_v|)（绝对盈亏跳变 60 或总资产 5% 取大者）。
+    p/v 阈值分设（量纲说明）：被检测对象是 p（当日盈亏额，USD），其合理跳变
+    上限与总资产规模挂钩，取 p 阈值 = max(60, 0.02×|last_v|)（总资产 2%，
+    绝对下限 60）；旧版 5% 量纲过大，线上 last_v≈13000 时阈值 650，
+    两根真实毛刺针（p 偏差 194/571）全部漏过入库。v（总资产）自身无独立
+    跳变检测——现金与行情坏值不会使 v 脱离 p 单独突变，p 检测已覆盖。
     返回动作：
     - "write":   冷启动首条 / 偏差在阈值内 → 直接写入并更新 last；
     - "hold":    偏差超阈值且当前无暂存 → 暂存 pending，本轮不写库；
@@ -376,11 +383,68 @@ def decide_tick_action(last_p: float | None, last_v: float | None,
     """
     if last_p is None:
         return "write"
-    threshold = max(60.0, 0.05 * abs(last_v or 0.0))
+    threshold = max(60.0, 0.02 * abs(last_v or 0.0))
     dev = abs(new_p - last_p)
     if has_pending:
         return "discard" if dev < threshold / 2 else "confirm"
     return "hold" if dev > threshold else "write"
+
+
+def update_session_state(state: dict, session: str, et_dt: datetime,
+                         quotes: dict) -> None:
+    """一场口径状态机维护（纯函数，无 IO；仅就地修改 state 键值）。
+
+    state 键（全部就地更新，缺失键自动补建）：
+    - base_closes:  {symbol: 场基准价}——regular 时段用腾讯昨收(f[4])每轮刷新
+      （数据源保证=一场基准）；非 regular 沿用上一值；冷启动/重启落在非 regular
+      时段时退化用当轮 f[4]（次日凌晨该值语义可能已切换，存在隔夜偏差，
+      09:30 开盘自愈）；
+    - close_prices: {symbol: 常规收盘定格价}——regular 时段跟随实时价（定格于
+      16:00 最后一条）；post/closed(≥16:00) 取腾讯现价(f[3]，实测盘后保持收盘价)；
+      次日凌晨(<04:00)/盘前取 f[4]（实测已切换为昨日常规收盘）；
+    - base_logged:  bool，冷启动退化仅标注一次的开关；
+    - base_fallback: list，本轮冷启动退化填充的 symbol（供调用方打日志；
+      无退化时重置为 []——本函数无 IO，日志由调用方负责）。
+
+    分支语义（session ∈ pre/regular/post/closed，et_dt 为美东时钟）：
+    - regular：f[4] 即一场基准每轮刷新；收盘定格跟随实时价；
+    - post 或 closed 且 et_hour>=16：f[3] 实测保持 16:00 收盘价 → 收盘定格；
+    - pre 或 closed 且 et_hour<4：f[4] 实测已切换为昨日常规收盘 → 定格兜底；
+    - 非 regular：基准缺失时退化填当轮 f[4]（仅缺的 symbol，已维护的不覆盖）。
+    """
+    base_closes: dict = state.setdefault("base_closes", {})
+    close_prices: dict = state.setdefault("close_prices", {})
+    state.setdefault("base_logged", False)
+    et_hour = et_dt.hour
+    if session == "regular":
+        # regular：腾讯昨收(f[4])即一场基准，每轮刷新；收盘定格跟随实时价
+        # （定格于 16:00 最后一条采样），实时累计=定格、夜盘增量=0
+        for sym, q in quotes.items():
+            if q.get("pre_close"):
+                base_closes[sym] = q["pre_close"]
+            if q.get("price"):
+                close_prices[sym] = q["price"]
+    elif session == "post" or (session == "closed" and et_hour >= 16):
+        # post/晚间 closed：腾讯现价(f[3])实测保持 16:00 收盘价 → 收盘定格
+        for sym, q in quotes.items():
+            if q.get("price"):
+                close_prices[sym] = q["price"]
+    elif session == "pre" or (session == "closed" and et_hour < 4):
+        # 次日凌晨/盘前：腾讯昨收(f[4])实测已切换为昨日常规收盘 → 定格兜底
+        for sym, q in quotes.items():
+            if q.get("pre_close"):
+                close_prices[sym] = q["pre_close"]
+    state["base_fallback"] = []
+    if session != "regular":
+        # 非 regular 沿用已维护基准；冷启动/重启缺失时退化用当轮 f[4]
+        # （次日凌晨该值可能已是次日语义，存在隔夜偏差，09:30 开盘自愈）
+        missing = [s for s, q in quotes.items()
+                   if s not in base_closes and q.get("pre_close")]
+        for sym in missing:
+            base_closes[sym] = quotes[sym]["pre_close"]
+        if missing and not state["base_logged"]:
+            state["base_fallback"] = missing
+            state["base_logged"] = True
 
 
 def build_positions(holdings: list[dict], us_quotes: dict[str, dict],
@@ -397,6 +461,8 @@ def build_positions(holdings: list[dict], us_quotes: dict[str, dict],
     - 收盘定格 close_price = close_overrides[sym]（常规收盘定格价），缺失退化
       实时价（无定格信息时夜盘增量视为 0）；
     - close_pnl = Σ(close_price-场基准)×qty/fx；overnight_pnl = day_pnl-close_pnl。
+    每持仓行统一下发 overnight_change_pct=(price-close_price)/close_price×100
+    （夜盘增量%，close_price 缺失为 None），前端徽标直接消费。
 
     us_quotes: parse_tencent_us 结果（ext_price 已合并）
     fund: {"nav": float, "prev_nav": float, "nav_date": date, "nav_change_pct": float} 或 None
@@ -506,6 +572,10 @@ def _position(h: dict, price, value, today, pnl, ext, stale,
     qty, cost = float(h["quantity"]), float(h["cost_price"])
     if cost_usd is None:
         cost_usd = cost * qty
+    # 夜盘增量%后端统一下发：(现价-收盘定格)/收盘定格×100；定格价缺失（stale 行）
+    # 为 None，前端直接消费不再二次推导，与 overnight_pnl=day_pnl-close_pnl 同源
+    overnight_change_pct = ((price - close_price) / close_price * 100
+                            if (close_price and price) else None)
     return {
         "id": h.get("id"),
         "symbol": h["symbol"], "name": h.get("name", ""), "market": h.get("market", "US"),
@@ -518,9 +588,11 @@ def _position(h: dict, price, value, today, pnl, ext, stale,
         "position_pnl": pnl if pnl is not None else None,
         "position_pnl_pct": pnl / cost_usd * 100 if (cost_usd > 0 and pnl is not None) else None,
         "cost_usd": cost_usd,
-        # 一场口径：常规收盘定格价与实时累计涨跌%（基准=base_overrides 优先）
+        # 一场口径：常规收盘定格价、实时累计涨跌%（基准=base_overrides 优先）、
+        # 夜盘增量%（基准=收盘定格价，后端统一下发）
         "close_price": close_price,
         "live_change_pct": live_change_pct,
+        "overnight_change_pct": overnight_change_pct,
         "ext": ext, "stale": stale,
         "quote_time": quote_time, "nav_date": nav_date, "nav_change_pct": nav_change_pct,
     }
