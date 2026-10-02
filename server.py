@@ -1463,7 +1463,8 @@ async def _crypto_probe_loop():
                 direct_ok = resp.status_code == 200
             except Exception:
                 direct_ok = False
-            server._crypto_direct_ok = direct_ok
+            global _crypto_direct_ok
+            _crypto_direct_ok = direct_ok
             if direct_ok:
                 logger.info("加密市场数据源直连可用，代理无需境外分类")
             else:
