@@ -99,15 +99,18 @@ def should_fetch_ext(session: str, now_et: datetime) -> bool:
     """判定当前是否应拉取新浪盘前/盘后扩展价（纯函数，供 fetch_quotes 调用）。
 
     - pre/post 时段：恒拉取；
-    - closed 且工作日的 16:00 后（当日盘后）与凌晨 <04:00（前一交易日盘后残留，
-      简化口径按美东小时判断，不含节假日）：仍拉取——新浪 gb_ 夜间返回当日最后
-      盘后价，保证夜盘时段前端保留盘后价不"倒退"；
-    - 其余 closed（周六/周日、工作日 04:00-16:00 空窗）：不拉取。
+    - closed 且工作日（周一~周五）的 16:00 后（当日盘后）与凌晨 <04:00（前一交易
+      日盘后残留，简化口径按美东小时判断，不含节假日）：仍拉取——新浪 gb_ 夜间返
+      回当日最后盘后价，保证夜盘时段前端保留盘后价不"倒退"；
+    - closed 且周六凌晨 <04:00：周五盘后残留的延伸窗口，仍拉取；
+    - 其余 closed（周六 04:00 起/周日、工作日 04:00-16:00 空窗）：不拉取。
     """
     if session in ("pre", "post"):
         return True
-    if session == "closed" and now_et.weekday() < 5:
-        return now_et.hour >= 16 or now_et.hour < 4
+    if session == "closed":
+        wd = now_et.weekday()
+        hour = now_et.hour
+        return (wd < 5 and (hour >= 16 or hour < 4)) or (wd == 5 and hour < 4)
     return False
 
 

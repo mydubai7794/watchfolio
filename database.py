@@ -271,7 +271,8 @@ async def init_tables():
             total_pnl_usd  DECIMAL(16,2) NOT NULL DEFAULT 0 COMMENT '持仓盈亏USD',
             day_pnl_pct    DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '今日收益率%',
             total_pnl_pct DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '累计收益率%',
-            INDEX idx_trade_ts (trade_date, ts)
+            INDEX idx_trade_ts (trade_date, ts),
+            INDEX idx_ts (ts)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='组合市值采样(盘中10s/扩展时段30s)'
         """,
         _pool=pool,

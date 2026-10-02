@@ -6,6 +6,7 @@ import io
 import json
 import logging
 import random
+import re
 import secrets
 import time
 from datetime import datetime, timedelta
@@ -527,6 +528,9 @@ async def etf_list():
 
 @app.post("/api/etf")
 async def etf_add(data: EtfInput):
+    # code 白名单校验：仅允许字母数字与点（新浪/腾讯代码口径），防注入与 onclick 属性逃逸
+    if not re.fullmatch(r"[0-9A-Za-z.]{1,16}", data.code or ""):
+        return JSONResponse(status_code=400, content={"ok": False, "message": "code 仅允许字母数字与点"})
     affected = await db.add_etf(data.code, data.name, data.futures_index)
     if affected:
         return {"ok": True}
@@ -1326,11 +1330,11 @@ async def portfolio_overview():
 
 @app.get("/api/portfolio/intraday")
 async def portfolio_intraday(trade_date: str = Query(default=""),
-                             hours: int = Query(default=0)):
+                             hours: int = Query(default=0, ge=0, le=48)):
     """当日（或指定美东交易日）分时点；hours>0 时返回最近 N 小时窗口（跨日分时）。"""
     if hours > 0:
         rows = await db.get_portfolio_recent(hours)
-        return {"ok": True, "window": "24h" if hours else "day", "points": [
+        return {"ok": True, "window": f"{hours}h", "points": [
             {"ts": r["ts"].strftime("%m-%d %H:%M") if isinstance(r["ts"], datetime) else str(r["ts"]),
              "v": float(r["total_value_usd"]), "p": float(r["day_pnl_usd"])} for r in rows]}
     if not trade_date:

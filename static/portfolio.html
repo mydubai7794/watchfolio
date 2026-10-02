@@ -348,12 +348,12 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
 </div>
 
 <script>
-// HTML 转义：名称/代码等用户可控字段插入 DOM 前统一转义（含双引号），防止 XSS
+// HTML 转义：名称/代码等用户可控字段插入 DOM 前统一转义（含双/单引号），防止 XSS
 function esc(str) {
   if (!str) return '';
   var div = document.createElement('div');
   div.appendChild(document.createTextNode(str));
-  return div.innerHTML.replace(/"/g, '&quot;');
+  return div.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // 全局拦截 fetch 响应，401 时跳转登录页
@@ -630,13 +630,16 @@ function switchRange(mode, btn) {
   btn.classList.add('active');
   loadChart();
 }
+let chartReqId = 0;           // 请求序号：快速切换区间时丢弃晚到的过期响应，防旧图覆盖新图
 async function loadChart() {
+  const rid = ++chartReqId;
   // 24h 跨日窗口 / 当日（hours=0）/ 日线区间
   const url = chartMode === 'h24' ? '/api/portfolio/intraday?hours=24'
             : chartMode === 'intraday' ? '/api/portfolio/intraday'
             : '/api/portfolio/daily?range=' + chartMode;
   try {
     const d = await (await fetch(url)).json();
+    if (rid !== chartReqId) return;   // 响应期间已有更新的请求发出，丢弃本次过期响应
     chartData = isIntradayMode()
       ? (d.points || []).map(q => ({x: q.ts, y: q.p, v: q.v}))
       : (d.days || []).map(q => ({x: q.date, y: q.v}));
@@ -671,7 +674,8 @@ function drawChart() {
     ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 1.5; ctx.stroke();
   }
 }
-// 分时图：画当日盈亏 p，0 轴 #C7C7CC 虚线基准、对称 y 域、2px 线 + 渐变填充
+// 分时图：画当日盈亏 p，0 轴 #C7C7CC 虚线基准、对称 y 域、2px 线 + 渐变填充。
+// 24h 跨日窗口按 ts 日期前缀分段：断线处 moveTo 重起（不画跨日斜线），各段渐变独立闭合到 0 轴
 function drawIntraday(ctx, pts, W, H) {
   const ys = pts.map(p => p.y);
   const m = Math.max(...ys.map(Math.abs), 1e-9) * 1.1;   // y 域以 0 居中对称（留 10% 余量）
@@ -684,17 +688,31 @@ function drawIntraday(ctx, pts, W, H) {
   ctx.setLineDash([]);
   const up = ys[ys.length - 1] >= 0;
   const color = up ? UP_COLOR : DOWN_COLOR;
-  // 线与 0 轴之间渐变填充（12% 透明 → 0）
+  // 线与 0 轴之间渐变填充（12% 透明 → 0），跨日各段共用同一渐变
   const grad = ctx.createLinearGradient(0, CH.t, 0, H - CH.b);
   grad.addColorStop(0, up ? 'rgba(229,68,59,.12)' : 'rgba(0,168,112,.12)');
   grad.addColorStop(1, up ? 'rgba(229,68,59,0)' : 'rgba(0,168,112,0)');
+  // 按 ts 前 5 字符（"MM-DD"）日期变化切分为连续段，避免跨日出现斜线
+  const segs = [];
+  let start = 0;
+  for (let i = 1; i <= pts.length; i++) {
+    if (i === pts.length || String(pts[i].x).slice(0, 5) !== String(pts[start].x).slice(0, 5)) {
+      segs.push([start, i - 1]);
+      start = i;
+    }
+  }
+  // 各段渐变填充：独立闭合到本段首尾的 0 轴
+  segs.forEach(([s, e]) => {
+    ctx.beginPath();
+    for (let i = s; i <= e; i++) i === s ? ctx.moveTo(px(i), py(pts[i].y)) : ctx.lineTo(px(i), py(pts[i].y));
+    ctx.lineTo(px(e), py(0)); ctx.lineTo(px(s), py(0)); ctx.closePath();
+    ctx.fillStyle = grad; ctx.fill();
+  });
+  // 折线 2px：段内连续，段间 moveTo 断开（末点正负定语义色）
   ctx.beginPath();
-  pts.forEach((p, i) => i ? ctx.lineTo(px(i), py(p.y)) : ctx.moveTo(px(i), py(p.y)));
-  ctx.lineTo(px(pts.length - 1), py(0)); ctx.lineTo(px(0), py(0)); ctx.closePath();
-  ctx.fillStyle = grad; ctx.fill();
-  // 折线 2px：末点正负定语义色
-  ctx.beginPath();
-  pts.forEach((p, i) => i ? ctx.lineTo(px(i), py(p.y)) : ctx.moveTo(px(i), py(p.y)));
+  segs.forEach(([s, e]) => {
+    for (let i = s; i <= e; i++) i === s ? ctx.moveTo(px(i), py(pts[i].y)) : ctx.lineTo(px(i), py(pts[i].y));
+  });
   ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
   ctx.stroke();
   pixPts = pts.map((p, i) => ({px: px(i), py: py(p.y)}));
@@ -741,9 +759,12 @@ function chartHover(clientX) {
   showTip(best);
 }
 function chartLeave() { if (hoverIdx >= 0) { hoverIdx = -1; drawChart(); } hideTip(); }
+let lastTipIdx = -1;          // 上次 tooltip 已展示的数据点下标（showTip 同点去抖）
 // HTML tooltip：白底轻阴影圆角 12；分时显示盈亏两项、日线显示资产+区间%；左右边界自动翻转
 function showTip(i) {
   const tip = document.getElementById('chartTip');
+  // 同一点且 tooltip 已在显示：位置/内容无变化，直接返回避免重复排版抖动
+  if (i === lastTipIdx && tip.classList.contains('show')) return;
   const wrap = tip.parentElement;
   const pts = chartData || [];
   const p = pts[i];
@@ -770,8 +791,12 @@ function showTip(i) {
   if (top < 4) top = q.py + 14;
   tip.style.left = left + 'px';
   tip.style.top = top + 'px';
+  lastTipIdx = i;
 }
-function hideTip() { document.getElementById('chartTip').classList.remove('show'); }
+function hideTip() {
+  document.getElementById('chartTip').classList.remove('show');
+  lastTipIdx = -1;
+}
 // hover/touch 事件绑定：mouse 系 + touch 系（touch-action:pan-y 保留纵向滚动）
 (function bindChartEvents() {
   const cv = document.getElementById('chart');

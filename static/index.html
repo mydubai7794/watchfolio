@@ -815,7 +815,8 @@ function esc(str) {
   if (!str) return '';
   var div = document.createElement('div');
   div.appendChild(document.createTextNode(str));
-  return div.innerHTML;
+  // 额外转义单引号：esc 结果常拼进 onclick='...' 单引号属性，防属性逃逸 XSS
+  return div.innerHTML.replace(/'/g, '&#39;');
 }
 
 // ---------------------------------------------------------------------------
