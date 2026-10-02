@@ -2,152 +2,195 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>我的持仓</title>
 <style>
+/* ================= Fintech White =================
+   页面底 #F5F5F7 / 卡片纯白(无描边+轻阴影) / 文字三级灰
+   彩色仅两处：涨跌语义色(--up/--down)、交互激活(--accent)
+   圆角：卡片 16 / 胶囊按钮 999 / 小容器 12
+   间距只用 8/12/16/24/32 */
 :root {
-  --bg: #0d1017;          /* 页面近黑 */
-  --card: #161a23;        /* 卡片 */
-  --card2: #1d2230;       /* 次级/表头 */
-  --line: #262c3a;        /* 分隔线 */
-  --txt: #e8ecf3; --txt2: #9aa3b5; --txt3: #5c6675;
-  --up: #f04a5e; --down: #2ebd85;   /* 红涨绿跌 */
-  --accent: #f04a5e;
+  --bg: #F5F5F7;
+  --card: #FFFFFF;
+  --txt: #111114; --txt2: #8A8A8E; --txt3: #C7C7CC;
+  --up: #E5443B; --down: #00A870; --accent: #2A6CF0;
+  --shadow: 0 1px 3px rgba(0,0,0,0.05);
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { background: var(--bg); color: var(--txt); font-size: 14px;
+html { -webkit-text-size-adjust: 100%; }
+body { background: var(--bg); color: var(--txt); font-size: 15px;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif;
-  min-height: 100vh; font-variant-numeric: tabular-nums; }
+  min-height: 100vh; line-height: 1.5; font-variant-numeric: tabular-nums; }
 a { text-decoration: none; }
-
-/* ---- 顶栏 ---- */
-.header { background: var(--card); border-bottom: 1px solid var(--line); padding: 10px 20px;
-  display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
-.header-title { font-size: 17px; font-weight: 700; }
-.link { color: var(--txt2); cursor: pointer; font-size: 13px; }
-.link:hover { color: var(--txt); }
-.btn { padding: 6px 14px; border: none; border-radius: 8px; cursor: pointer; font-size: 13px; }
-.btn:hover { opacity: .85; }
-.btn-ghost { background: var(--card2); border: 1px solid var(--line); color: var(--txt2); }
-.btn-primary { background: var(--accent); color: #fff; }
-.status-area { margin-left: auto; display: flex; align-items: center; gap: 12px; font-size: 12px; color: var(--txt3); }
-.badge { padding: 2px 10px; border-radius: 10px; font-size: 12px; }
-.badge-pre { background: #3d5a8a; color: #cfe0ff; }
-.badge-regular { background: #143528; color: var(--down); }
-.badge-post { background: #8a6d3d; color: #ffe9c2; }
-.badge-closed { background: var(--card2); color: var(--txt3); }
-
-/* ---- 布局 ---- */
-.content { padding: 16px 20px 40px; max-width: 1200px; margin: 0 auto; }
-.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
-.section-head { display: flex; align-items: center; gap: 10px; margin: 18px 2px 10px; }
-.section-title { font-size: 14px; font-weight: 700; }
-.section-note { font-size: 12px; color: var(--txt3); }
-
-/* ---- 账户总览大卡（单张卡内多段指标） ---- */
-.overview-card { display: flex; align-items: stretch; padding: 22px 26px; gap: 20px; flex-wrap: wrap; }
-.ov-main { flex: 1.3; min-width: 220px; display: flex; flex-direction: column; justify-content: center; gap: 6px; }
-.ov-label { font-size: 12px; color: var(--txt2); }
-.ov-big { font-size: 28px; font-weight: 700; letter-spacing: .3px; line-height: 1.15; }
-.ov-sub { font-size: 12px; color: var(--txt3); }
-.ov-metrics { flex: 2; min-width: 300px; display: flex; }
-.ov-metric { flex: 1; padding: 4px 0 4px 22px; border-left: 1px solid var(--line); margin-left: 4px;
-  display: flex; flex-direction: column; justify-content: center; gap: 5px; }
-.ov-val { font-size: 19px; font-weight: 700; }
-
-/* ---- 红涨绿跌 ---- */
+button { font-family: inherit; }
 .text-red { color: var(--up); } .text-green { color: var(--down); }
 
-/* ---- 市场看板 ---- */
-.market-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }
-.mkt-card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
-  padding: 10px 12px 8px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.mkt-head { display: flex; justify-content: space-between; align-items: baseline; gap: 4px; font-size: 12px; color: var(--txt2); }
-.mkt-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.mkt-note { font-style: normal; font-size: 10px; color: var(--txt3); margin-left: 3px; }
-.mkt-pct { font-size: 12px; flex-shrink: 0; }
-.mkt-price { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.mkt-price em { font-style: normal; font-size: 10px; font-weight: 400; color: var(--txt3); margin-left: 2px; }
-.mkt-spark { width: 100%; height: 32px; display: block; margin-top: 2px; }
+/* ---- 顶栏（白底 sticky） ---- */
+.header { position: sticky; top: 0; z-index: 20; background: var(--card);
+  box-shadow: 0 1px 0 rgba(0,0,0,0.04);
+  padding: 12px 24px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.header-title { font-size: 17px; font-weight: 600; line-height: 1.2; }
+.link { color: var(--txt2); cursor: pointer; font-size: 13px; }
+.link:hover { color: var(--txt); }
+.btn { border: none; border-radius: 999px; cursor: pointer; font-weight: 500; }
+.btn:hover { opacity: .85; }
+.btn-primary { background: var(--accent); color: #fff; padding: 8px 16px; font-size: 13px; }
+.btn-ghost { background: var(--bg); color: var(--txt); padding: 8px 16px; font-size: 13px; }
+/* 灰胶囊：session 徽章 / 持仓 tag 统一 */
+.pill { display: inline-block; padding: 2px 10px; border-radius: 999px;
+  background: var(--bg); color: var(--txt2); font-size: 11px; font-weight: 400; white-space: nowrap; }
+.tag { margin-left: 6px; vertical-align: 1px; }
+.tag-stale { color: var(--txt3); }
+.header-status { margin-left: auto; display: flex; align-items: center; gap: 12px;
+  font-size: 11px; color: var(--txt3); line-height: 1.2; }
 
-/* ---- 图表卡 ---- */
-.chart-box { padding: 14px 16px 12px; }
-.chart-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
-.chart-title { font-size: 14px; font-weight: 700; }
-.range-btn { padding: 3px 12px; font-size: 12px; background: transparent; border: 1px solid var(--line);
-  color: var(--txt3); border-radius: 7px; cursor: pointer; }
-.range-btn:hover { color: var(--txt2); }
-.range-btn.active { border-color: var(--accent); color: var(--accent); }
-#chart { width: 100%; height: 240px; display: block; }
-.chart-info { margin-top: 8px; font-size: 12px; color: var(--txt2); flex-wrap: wrap; }
-.chart-info b { font-weight: 600; color: var(--txt); }
+/* ---- 布局 ---- */
+.content { padding: 16px 24px 40px; max-width: 1200px; margin: 0 auto;
+  display: flex; flex-direction: column; gap: 16px; }
+.card { background: var(--card); border-radius: 16px; box-shadow: var(--shadow); }
+.pad { padding: 24px; }
+.card-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.card-title { font-size: 17px; font-weight: 600; line-height: 1.2; }
+.card-note { font-size: 11px; color: var(--txt3); }
 
-/* ---- 持仓表 ---- */
-.holdings-wrap { overflow: hidden; }
+/* ---- 账户总览：桌面四段横排，移动 2×2 ---- */
+.overview-card { display: grid; grid-template-columns: 1.5fr 1fr 1fr 1fr; gap: 24px; padding: 24px; }
+.ov-label { font-size: 12px; color: var(--txt2); }
+.ov-display { font-size: 30px; font-weight: 600; line-height: 1.2; letter-spacing: .2px; margin-top: 4px; }
+.ov-value { font-size: 17px; font-weight: 500; line-height: 1.2; margin-top: 6px; }
+.ov-micro { font-size: 11px; color: var(--txt3); line-height: 1.2; margin-top: 4px; }
+.ov-item + .ov-item { border-left: 1px solid var(--bg); padding-left: 24px; }
+
+/* ---- 市场看板：桌面 5 列 / 平板 3 列 / 移动 2 列大格 ---- */
+.market-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; }
+.mkt-card { background: var(--bg); border-radius: 12px; padding: 12px;
+  display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.mkt-head { display: flex; justify-content: space-between; align-items: baseline; gap: 4px; }
+.mkt-name { font-size: 12px; color: var(--txt2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mkt-note { font-style: normal; font-size: 11px; color: var(--txt3); }
+.mkt-pct { font-size: 11px; flex-shrink: 0; line-height: 1.2; }
+.mkt-price { font-size: 17px; font-weight: 500; line-height: 1.2;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mkt-price em { font-style: normal; font-size: 11px; font-weight: 400; color: var(--txt3); margin-left: 2px; }
+.mkt-spark { width: 100%; height: 36px; display: block; }
+
+/* ---- 图表白卡：tab 胶囊组 + 信息条 + canvas ---- */
+.seg { display: inline-flex; background: var(--bg); border-radius: 999px; padding: 3px; gap: 2px;
+  margin-left: auto; }
+.seg-btn { border: none; background: transparent; padding: 6px 14px; border-radius: 999px;
+  font-size: 13px; color: var(--txt2); cursor: pointer; line-height: 1.2; }
+.seg-btn.active { background: var(--accent); color: #fff; font-weight: 500; }
+.chart-info { font-size: 12px; color: var(--txt2); margin-bottom: 12px; min-height: 18px; }
+.chart-info b { font-weight: 500; color: var(--txt); font-size: 13px; }
+.chart-wrap { position: relative; }
+#chart { width: 100%; height: 240px; display: block; touch-action: pan-y; }
+/* hover/touch tooltip：白底轻阴影圆角 12，绝对定位防溢出 */
+.chart-tip { position: absolute; top: 0; left: 0; background: #fff; border-radius: 12px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.10); padding: 10px 12px; pointer-events: none;
+  display: none; z-index: 5; min-width: 132px; }
+.chart-tip.show { display: block; }
+.tip-time { font-size: 12px; color: var(--txt2); margin-bottom: 6px; white-space: nowrap; }
+.tip-row { display: flex; justify-content: space-between; gap: 12px; font-size: 12px;
+  color: var(--txt2); line-height: 1.8; white-space: nowrap; }
+.tip-row b { font-weight: 500; font-size: 14px; line-height: 1.2; }
+
+/* ---- 分析看板：桌面三列 / 移动堆叠 ---- */
+.analysis-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 24px; }
+.ana-col { min-width: 0; }
+.ana-title { font-size: 12px; color: var(--txt2); margin-bottom: 12px; }
+.donut-flex { display: flex; gap: 16px; align-items: center; }
+.donut-cv { width: 200px; height: 200px; flex: none; }
+.ana-legend { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.lg-item { display: flex; align-items: center; gap: 8px; font-size: 12px; line-height: 1.5; }
+.lg-dot { width: 12px; height: 12px; border-radius: 4px; flex: none; }
+.lg-name { color: var(--txt); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lg-pct { color: var(--txt2); font-size: 11px; line-height: 1.2; }
+.ana-cv { width: 100%; display: block; }
+
+/* ---- 持仓表（桌面） ---- */
+.table-wrap { overflow-x: auto; margin: 0 -24px -24px; padding: 0 24px 24px; }
 table.holdings { width: 100%; border-collapse: collapse; }
-.holdings th, .holdings td { padding: 10px 12px; text-align: right; border-bottom: 1px solid var(--line); font-size: 13px; white-space: nowrap; }
-.holdings th { color: var(--txt2); font-weight: 500; background: var(--card2); user-select: none; }
-.holdings th:first-child, .holdings td:first-child { text-align: left; }
+.holdings th, .holdings td { padding: 10px 12px; text-align: right; border-bottom: 1px solid var(--bg);
+  white-space: nowrap; }
+.holdings th:first-child, .holdings td:first-child { text-align: left; padding-left: 4px; }
+.holdings td:last-child, .holdings th:last-child { padding-right: 4px; }
+.holdings th { color: var(--txt2); font-weight: 400; font-size: 12px; user-select: none; }
+.holdings td { font-size: 14px; line-height: 1.2; }
 .holdings tbody tr:last-child td { border-bottom: none; }
-.holdings tbody tr:hover td { background: rgba(255,255,255,.02); }
+.holdings tbody tr:hover td { background: var(--bg); }
 th.sortable { cursor: pointer; }
 th.sortable:hover { color: var(--txt); }
 .arrow { font-size: 9px; color: var(--accent); }
-.sym { color: var(--txt3); font-size: 12px; }
-.tag { font-size: 10px; padding: 1px 6px; border-radius: 4px; margin-left: 6px; }
-.tag-pre { background: #3d5a8a; color: #cfe0ff; }
-.tag-post { background: #8a6d3d; color: #ffe9c2; }
-.tag-fund { background: #143528; color: #57d9a3; }
-.tag-stale { background: var(--card2); color: var(--txt3); }
-.empty { text-align: center; color: var(--txt3); padding: 28px 0 !important; }
+.sym { color: var(--txt3); font-size: 11px; line-height: 1.2; margin-top: 2px; }
+.empty { text-align: center; color: var(--txt3); padding: 24px 0 !important; font-size: 13px; }
 
-/* ---- 移动端持仓卡片列表（默认隐藏，≤768px 显示） ---- */
+/* ---- 移动端持仓卡片列表（≤768px） ---- */
 .mobile-list { display: none; }
-.m-card { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.m-card { padding: 12px 0; border-bottom: 1px solid var(--bg); }
 .m-card:last-child { border-bottom: none; }
 .m-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
-.m-name { font-weight: 600; }
-.m-right { flex-shrink: 0; font-weight: 600; }
-.m-right em { font-style: normal; font-size: 12px; margin-left: 4px; }
-.m-sym { font-size: 11px; color: var(--txt3); margin-top: 2px; }
-.m-bottom { display: flex; justify-content: space-between; gap: 8px; margin-top: 8px; font-size: 12px; color: var(--txt3); }
-.m-bottom b { font-weight: 600; margin-left: 3px; }
+.m-name { font-size: 15px; font-weight: 500; line-height: 1.5; }
+.m-quote { flex-shrink: 0; text-align: right; font-size: 15px; font-weight: 500; line-height: 1.2; }
+.m-quote em { font-style: normal; font-size: 11px; font-weight: 400; margin-left: 6px; }
+.m-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 8px;
+  padding-top: 8px; border-top: 1px solid var(--bg);
+  font-size: 11px; color: var(--txt2); line-height: 1.5; }
+.m-meta b { font-weight: 500; color: var(--txt); }
+.m-div { width: 1px; align-self: stretch; background: var(--bg); }
 
-/* ---- 编辑弹窗 ---- */
-.modal-mask { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.65); z-index: 10;
+/* ---- 编辑弹窗：白卡圆角 16、移动全屏 ---- */
+.modal-mask { display: none; position: fixed; inset: 0; background: rgba(17,17,20,.45); z-index: 30;
   align-items: center; justify-content: center; }
 .modal-mask.show { display: flex; }
-.modal { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px;
-  width: 680px; max-width: 94vw; max-height: 86vh; overflow: auto; }
-.modal h3 { margin-bottom: 12px; font-size: 16px; }
-.table-wrap { overflow-x: auto; }   /* 编辑表格横向滚动 */
+.modal { background: var(--card); border-radius: 16px; padding: 24px;
+  width: 720px; max-width: 94vw; max-height: 88vh; overflow: auto;
+  box-shadow: 0 8px 32px rgba(0,0,0,.12); }
+.modal h3 { margin-bottom: 16px; font-size: 17px; font-weight: 600; }
 .modal table { width: 100%; border-collapse: collapse; }
-.modal th, .modal td { padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--line); font-size: 13px; white-space: nowrap; }
-.modal th { color: var(--txt2); font-weight: 500; background: var(--card2); }
-.modal table td input { width: 100%; min-width: 70px; }
-.form-row { display: flex; gap: 10px; margin: 10px 0; flex-wrap: wrap; }
-.form-row input, .form-row select { flex: 1; min-width: 90px; padding: 7px 9px; background: var(--card2);
-  border: 1px solid var(--line); border-radius: 8px; color: var(--txt); font-size: 13px; }
-.editable td:hover { background: rgba(255,255,255,.02); cursor: pointer; }
-.chk { display: flex; align-items: center; gap: 4px; color: var(--txt2); font-size: 12px; flex: none; align-self: center; }
+.modal th, .modal td { padding: 8px 12px 8px 0; text-align: left; border-bottom: 1px solid var(--bg);
+  font-size: 13px; white-space: nowrap; }
+.modal th { color: var(--txt2); font-weight: 400; font-size: 12px; }
+.modal table td input, .modal table td select { width: 100%; min-width: 70px; }
+.form-row { display: flex; gap: 12px; margin: 16px 0; flex-wrap: wrap; }
+/* 输入框：浅灰底、圆角 12、无描边，focus 蓝色 focus ring */
+input, select { background: var(--bg); border: none; border-radius: 12px;
+  padding: 8px 12px; color: var(--txt); font-size: 14px; font-family: inherit; outline: none; }
+input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
+.form-row input, .form-row select { flex: 1; min-width: 90px; }
+.chk { display: flex; align-items: center; gap: 4px; color: var(--txt2); font-size: 12px;
+  flex: none; align-self: center; }
+.chk input { width: 16px; height: 16px; padding: 0; background: transparent; }
+.ref-tag { font-style: normal; font-size: 11px; color: var(--txt2); background: var(--bg);
+  padding: 1px 8px; border-radius: 999px; margin-left: 4px; font-weight: 400; }
 
-/* ---- 移动端适配 ---- */
+/* ---- 响应式 ---- */
 @media (max-width: 992px) {
-  .market-grid { grid-template-columns: repeat(4, 1fr); }
+  .market-grid { grid-template-columns: repeat(3, 1fr); }
+  .analysis-grid { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 768px) {
-  .content { padding: 12px 12px 32px; }
-  .header { padding: 8px 12px; gap: 10px; }
-  .status-area { gap: 8px; font-size: 11px; }
-  .btn { padding: 5px 10px; font-size: 12px; }
-  /* 总览大卡纵向堆叠 */
-  .overview-card { flex-direction: column; gap: 14px; padding: 16px; }
-  .ov-metrics { flex-direction: column; min-width: 0; }
-  .ov-metric { border-left: none; border-top: 1px solid var(--line); margin: 0; padding: 10px 0 0; }
-  /* 持仓表格换卡片列表 */
+  .header { padding: 8px 12px; gap: 8px; }
+  .header-status { gap: 8px; }
+  .content { padding: 12px 12px 32px; gap: 12px; }
+  .pad { padding: 16px; }
+  /* 总览 2×2：偶数段保留竖分隔线，奇数段取消 */
+  .overview-card { grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px; }
+  .ov-item + .ov-item { border-left: none; padding-left: 0; }
+  .ov-item:nth-child(even) { border-left: 1px solid var(--bg); padding-left: 16px; }
+  /* 市场看板移动 2 列大格 */
+  .market-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .seg { width: 100%; justify-content: space-between; margin-left: 0; overflow-x: auto; }
+  .seg-btn { padding: 6px 10px; flex: none; }
+  #chart { height: 200px; }
+  .analysis-grid { grid-template-columns: 1fr; gap: 24px; }
+  .donut-flex { flex-direction: column; align-items: flex-start; }
+  .donut-cv { width: 168px; height: 168px; }
+  .ana-legend { width: 100%; }
+  .table-wrap { margin: 0 -16px -16px; padding: 0 16px 16px; }
   table.holdings { display: none; }
   .mobile-list { display: block; }
-  .chart-info { flex-wrap: wrap; }
+  .card-note { display: none; }
   /* 弹窗全屏 */
   .modal-mask { align-items: stretch; }
   .modal { width: 100%; height: 100%; max-width: none; max-height: none; border-radius: 0; }
@@ -155,95 +198,129 @@ th.sortable:hover { color: var(--txt); }
 </style>
 </head>
 <body>
-<div class="header">
+
+<header class="header">
   <a class="link" href="/static/index.html">‹ 监控</a>
   <div class="header-title">我的持仓</div>
-  <span class="badge badge-closed" id="sessionBadge">--</span>
+  <span class="pill" id="sessionBadge">--</span>
   <button class="btn btn-primary" onclick="openEditor()">编辑持仓</button>
-  <div class="status-area">
+  <div class="header-status">
     <span id="fetchTime">--:--:--</span>
     <span id="fxInfo"></span>
     <a class="link" href="#" onclick="logout();return false;">登出</a>
   </div>
-</div>
+</header>
 
-<div class="content">
-  <!-- 账户总览大卡：总资产 | 今日盈亏 | 持仓盈亏 | 现金 -->
-  <div class="card overview-card">
-    <div class="ov-main">
+<main class="content">
+
+  <!-- 账户总览：总资产 Display + 昨收 Micro | 今日盈亏 | 持仓盈亏 | 现金 -->
+  <section class="card overview-card">
+    <div class="ov-item">
       <div class="ov-label">总资产 (USD)</div>
-      <div class="ov-big" id="totalValue">$0.00</div>
-      <div class="ov-sub" id="prevCloseInfo"></div>
+      <div class="ov-display" id="totalValue">$0.00</div>
+      <div class="ov-micro" id="prevCloseInfo"></div>
     </div>
-    <div class="ov-metrics">
-      <div class="ov-metric">
-        <div class="ov-label" id="dayPnlLabel">今日盈亏</div>
-        <div class="ov-val" id="dayPnl">--</div>
-        <div class="ov-sub" id="dayPnlPct"></div>
-      </div>
-      <div class="ov-metric">
-        <div class="ov-label">持仓盈亏</div>
-        <div class="ov-val" id="totalPnl">--</div>
-        <div class="ov-sub" id="totalPnlPct"></div>
-      </div>
-      <div class="ov-metric">
-        <div class="ov-label">现金 (USD)</div>
-        <div class="ov-val" id="cashVal">--</div>
-        <div class="ov-sub" id="cashSub"></div>
-      </div>
+    <div class="ov-item">
+      <div class="ov-label" id="dayPnlLabel">今日盈亏</div>
+      <div class="ov-value" id="dayPnl">--</div>
+      <div class="ov-micro" id="dayPnlPct"></div>
     </div>
-  </div>
-
-  <!-- 资产走势 -->
-  <div class="section-head">
-    <div class="section-title">资产走势</div>
-    <div style="margin-left:auto; display:flex; gap:6px">
-      <button class="range-btn active" data-r="intraday" onclick="switchRange('intraday',this)">当日分时</button>
-      <button class="range-btn" data-r="30" onclick="switchRange('30',this)">1月</button>
-      <button class="range-btn" data-r="90" onclick="switchRange('90',this)">3月</button>
-      <button class="range-btn" data-r="all" onclick="switchRange('all',this)">全部</button>
+    <div class="ov-item">
+      <div class="ov-label">持仓盈亏</div>
+      <div class="ov-value" id="totalPnl">--</div>
+      <div class="ov-micro" id="totalPnlPct"></div>
     </div>
-  </div>
-  <div class="card chart-box">
-    <canvas id="chart" width="1100" height="480"></canvas>
-    <div class="chart-info" id="chartInfo">加载中…</div>
-  </div>
+    <div class="ov-item">
+      <div class="ov-label">现金 (USD)</div>
+      <div class="ov-value" id="cashVal">--</div>
+      <div class="ov-micro" id="cashSub"></div>
+    </div>
+  </section>
 
   <!-- 市场看板 -->
-  <div class="section-head">
-    <div class="section-title">市场看板</div>
-    <div class="section-note">参考行情 · 60s 更新</div>
-  </div>
-  <div class="market-grid" id="marketGrid"></div>
+  <section class="card pad">
+    <div class="card-head">
+      <div class="card-title">市场看板</div>
+      <div class="card-note">参考行情 · 60s 更新</div>
+    </div>
+    <div class="market-grid" id="marketGrid"></div>
+  </section>
+
+  <!-- 资产走势：tab 胶囊组 + 信息条 + 无轴图表 -->
+  <section class="card pad">
+    <div class="card-head">
+      <div class="card-title">资产走势</div>
+      <div class="seg">
+        <button class="seg-btn active" data-r="h24" onclick="switchRange('h24',this)">24小时</button>
+        <button class="seg-btn" data-r="intraday" onclick="switchRange('intraday',this)">当日</button>
+        <button class="seg-btn" data-r="30" onclick="switchRange('30',this)">1月</button>
+        <button class="seg-btn" data-r="90" onclick="switchRange('90',this)">3月</button>
+        <button class="seg-btn" data-r="all" onclick="switchRange('all',this)">全部</button>
+      </div>
+    </div>
+    <div class="chart-info" id="chartInfo">加载中…</div>
+    <div class="chart-wrap">
+      <canvas id="chart"></canvas>
+      <div class="chart-tip" id="chartTip"></div>
+    </div>
+  </section>
+
+  <!-- 分析看板：资产构成环形图 / 持仓收益率 / 当日贡献 -->
+  <section class="card pad">
+    <div class="card-head">
+      <div class="card-title">分析看板</div>
+      <div class="card-note">基于当前持仓与现金</div>
+    </div>
+    <div class="analysis-grid">
+      <div class="ana-col">
+        <div class="ana-title">资产构成</div>
+        <div class="donut-flex">
+          <canvas id="donutCv" class="donut-cv"></canvas>
+          <div class="ana-legend" id="donutLegend"></div>
+        </div>
+      </div>
+      <div class="ana-col">
+        <div class="ana-title">持仓收益率</div>
+        <canvas id="pnlBarCv" class="ana-cv"></canvas>
+      </div>
+      <div class="ana-col">
+        <div class="ana-title">当日贡献</div>
+        <canvas id="contribCv" class="ana-cv"></canvas>
+      </div>
+    </div>
+  </section>
 
   <!-- 持仓明细 -->
-  <div class="section-head">
-    <div class="section-title">持仓明细</div>
-    <div class="section-note">点击表头排序</div>
-  </div>
-  <div class="card holdings-wrap">
-    <table class="holdings" id="posTable">
-      <thead><tr>
-        <th>名称/代码</th>
-        <th class="sortable" onclick="sortBy('price')">现价 <span class="arrow" id="ar_price"></span></th>
-        <th class="sortable" onclick="sortBy('change_pct')">涨跌幅 <span class="arrow" id="ar_change_pct"></span></th>
-        <th class="sortable" onclick="sortBy('value')">市值(USD) <span class="arrow" id="ar_value"></span></th>
-        <th class="sortable" onclick="sortBy('today_pnl')">今日盈亏 <span class="arrow" id="ar_today_pnl"></span></th>
-        <th class="sortable" onclick="sortBy('position_pnl')">持仓盈亏 <span class="arrow" id="ar_position_pnl"></span></th>
-        <th class="sortable" onclick="sortBy('position_pnl_pct')">盈亏比例 <span class="arrow" id="ar_position_pnl_pct"></span></th>
-        <th class="sortable" onclick="sortBy('cost_price')">成本价 <span class="arrow" id="ar_cost_price"></span></th>
-        <th class="sortable" onclick="sortBy('quantity')">数量 <span class="arrow" id="ar_quantity"></span></th>
-      </tr></thead>
-      <tbody></tbody>
-    </table>
-    <div class="mobile-list" id="mobileList"></div>
-  </div>
-</div>
+  <section class="card pad">
+    <div class="card-head">
+      <div class="card-title">持仓明细</div>
+      <div class="card-note">点击表头排序</div>
+    </div>
+    <div class="table-wrap">
+      <table class="holdings" id="posTable">
+        <thead><tr>
+          <th>名称/代码</th>
+          <th class="sortable" onclick="sortBy('price')">现价 <span class="arrow" id="ar_price"></span></th>
+          <th class="sortable" onclick="sortBy('change_pct')">涨跌幅 <span class="arrow" id="ar_change_pct"></span></th>
+          <th class="sortable" onclick="sortBy('value')">市值(USD) <span class="arrow" id="ar_value"></span></th>
+          <th class="sortable" onclick="sortBy('today_pnl')">今日盈亏 <span class="arrow" id="ar_today_pnl"></span></th>
+          <th class="sortable" onclick="sortBy('position_pnl')">持仓盈亏 <span class="arrow" id="ar_position_pnl"></span></th>
+          <th class="sortable" onclick="sortBy('position_pnl_pct')">盈亏比例 <span class="arrow" id="ar_position_pnl_pct"></span></th>
+          <th class="sortable" onclick="sortBy('cost_price')">成本价 <span class="arrow" id="ar_cost_price"></span></th>
+          <th class="sortable" onclick="sortBy('quantity')">数量 <span class="arrow" id="ar_quantity"></span></th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="mobile-list" id="mobileList"></div>
+    </div>
+  </section>
+
+</main>
 
 <div class="modal-mask" id="editorMask">
   <div class="modal">
     <h3>编辑持仓</h3>
-    <div class="table-wrap">
+    <div style="overflow-x:auto">
       <table id="editTable"><thead><tr>
         <th>代码</th><th>名称</th><th>市场</th><th>数量</th><th>成本价</th><th>币种</th><th>启用</th><th></th>
       </tr></thead><tbody></tbody></table>
@@ -258,13 +335,13 @@ th.sortable:hover { color: var(--txt); }
       <label class="chk"><input type="checkbox" id="n_deduct">扣现金</label>
       <button class="btn btn-primary" onclick="addHolding()">新增</button>
     </div>
-    <div class="form-row" id="cashRow" style="margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
-      <span style="align-self:center;color:var(--txt3)">现金：</span>
-      <input id="c_usd" placeholder="USD" type="number" step="any" style="max-width:110px">
-      <input id="c_hkd" placeholder="HKD" type="number" step="any" style="max-width:110px">
+    <div class="form-row" id="cashRow" style="margin-top:16px;border-top:1px solid var(--bg);padding-top:16px">
+      <span style="align-self:center;color:var(--txt2);font-size:12px">现金：</span>
+      <input id="c_usd" placeholder="USD" type="number" step="any" style="max-width:120px">
+      <input id="c_hkd" placeholder="HKD" type="number" step="any" style="max-width:120px">
       <button class="btn btn-ghost" onclick="saveCash()">保存现金</button>
     </div>
-    <div style="text-align:right;margin-top:10px">
+    <div style="text-align:right;margin-top:8px">
       <button class="btn btn-ghost" onclick="closeEditor()">关闭</button>
     </div>
   </div>
@@ -292,9 +369,17 @@ function esc(str) {
   };
 })();
 
+// ===== 常量与工具 =====
 const SESSION_LABEL = {pre:'盘前', regular:'盘中', post:'盘后', closed:'休市'};
-const UP_COLOR = '#f04a5e', DOWN_COLOR = '#2ebd85';
-const AXIS_COLOR = '#5c6675', GRID_COLOR = 'rgba(255,255,255,.045)';
+const UP_COLOR = '#E5443B', DOWN_COLOR = '#00A870';
+const TXT = '#111114', TXT2 = '#8A8A8E', TXT3 = '#C7C7CC';
+const FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif';
+const F11 = '11px ' + FONT, F12 = '12px ' + FONT, F600_16 = '600 16px ' + FONT;
+// 环形图蓝色系单色梯度（前 8 大持仓按市值降序），现金 #C7C7CC、其余合并 #8A8A8E
+const DONUT_ALPHAS = [.95, .83, .71, .59, .47, .35, .25, .15];
+// 主图内边距（无轴设计，仅留呼吸空间）
+const CH = { t: 14, b: 10, l: 6, r: 6 };
+// 金额千分位；涨跌必带 +/- 且与语义色同步
 const fmt = (v, d=2) => (v===null||v===undefined) ? '--' : Number(v).toLocaleString('en-US',{minimumFractionDigits:d,maximumFractionDigits:d});
 const usd = v => (v===null||v===undefined) ? '--' : (v<0?'-$':'$') + fmt(Math.abs(v));
 const cls = v => v>0 ? 'text-red' : (v<0 ? 'text-green' : '');
@@ -305,10 +390,41 @@ async function logout() {
   location.href = '/static/login.html';
 }
 
-let lastOverview = null;      // 最近一次 overview 响应（排序重渲染用）
-let baseTotalCache = 0;       // 昨收总资产 = base_value + cash_usd（分时右轴百分比基数）
+let lastOverview = null;      // 最近一次 overview 响应（排序/resize 重渲染用）
+let baseTotalCache = 0;       // 昨收总资产 = base_value + cash_usd（分时百分比基数）
 
-// ---- 市场看板 ----
+// canvas 高分屏初始化：按 devicePixelRatio 放大物理像素，ctx 缩放回 CSS 坐标
+function setupCanvas(cv, cssH) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth || cv.parentElement.clientWidth || 300;
+  const h = (cssH != null) ? cssH : (cv.clientHeight || 100);
+  if (cssH != null) cv.style.height = cssH + 'px';
+  cv.width = Math.max(1, Math.round(w * dpr));
+  cv.height = Math.max(1, Math.round(h * dpr));
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  cv._cssW = w; cv._cssH = h;
+  return ctx;
+}
+// 圆角矩形路径（条形图圆条用）
+function rr(ctx, x, y, w, h, r) {
+  r = Math.min(r, h / 2, Math.abs(w) / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+// canvas 文本超宽截断加省略号
+function fitText(ctx, text, maxW) {
+  if (ctx.measureText(text).width <= maxW) return text;
+  while (text.length > 1 && ctx.measureText(text + '…').width > maxW) text = text.slice(0, -1);
+  return text + '…';
+}
+
+// ===== 市场看板 =====
 // 看板小数位规则：美债收益率 3 位、恒指 1 位、汇率 4 位、其余 2 位
 function mktDecimals(m) {
   if (m.key === 'US30Y' || m.key === 'US10Y') return 3;
@@ -325,6 +441,7 @@ function mktSuffix(m) {
 function renderMarket(d) {
   const box = document.getElementById('marketGrid');
   box.innerHTML = '';
+  if (!d) return;
   const list = (d.market || []).slice();
   // 美元/港元从 overview 汇率拼装（后端看板不含此项），fx 缺失时不展示
   if (d.fx_usdhkd != null) {
@@ -333,29 +450,42 @@ function renderMarket(d) {
   list.forEach(m => {
     const card = document.createElement('div');
     card.className = 'mkt-card';
-    const hasSpark = m.spark && m.spark.length > 2;
+    const hasSpark = m.spark && m.spark.length > 2;   // 数据 >2 点才画
     const note = (m.key === 'US30Y' || m.key === 'US10Y') ? '<i class="mkt-note">收益率%</i>' : '';
     card.innerHTML = `<div class="mkt-head"><span class="mkt-name">${esc(m.name)}${note}</span>
         <span class="mkt-pct ${cls(m.change_pct)}">${m.change_pct===null||m.change_pct===undefined?'':sign(m.change_pct)+fmt(m.change_pct)+'%'}</span></div>
       <div class="mkt-price ${cls(m.change_pct)}">${m.price==null?'--':fmt(m.price, mktDecimals(m))}${mktSuffix(m)}</div>
-      <canvas class="mkt-spark" width="240" height="64" ${hasSpark?'':'style="display:none"'}></canvas>`;
+      <canvas class="mkt-spark" ${hasSpark?'':'style="display:none"'}></canvas>`;
     box.appendChild(card);
-    if (hasSpark) drawSpark(card.querySelector('canvas'), m.spark, m.change_pct >= 0);
+    if (hasSpark) drawSpark(card.querySelector('canvas'), m.spark, (m.change_pct == null) || m.change_pct >= 0);
   });
 }
-// sparkline：红随涨绿随跌
+// sparkline：2px 折线 + 15%→0 渐变填充、无轴
 function drawSpark(cv, data, up) {
-  const ctx = cv.getContext('2d'), W = cv.width, H = cv.height;
+  const ctx = setupCanvas(cv, 36);
+  const W = cv._cssW, H = cv._cssH;
   ctx.clearRect(0, 0, W, H);
+  const color = up ? UP_COLOR : DOWN_COLOR;
   const mn = Math.min(...data), mx = Math.max(...data), rg = (mx - mn) || 1;
-  const px = i => 4 + (W - 8) * i / (data.length - 1);
-  const py = v => 6 + (H - 12) * (1 - (v - mn) / rg);
-  ctx.strokeStyle = up ? UP_COLOR : DOWN_COLOR; ctx.lineWidth = 2.5; ctx.beginPath();
+  const padV = 5;
+  const px = i => 2 + (W - 4) * i / (data.length - 1);
+  const py = v => padV + (H - 2 * padV) * (1 - (v - mn) / rg);
+  // 渐变填充：线色 15% 透明 → 全透明
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, up ? 'rgba(229,68,59,.15)' : 'rgba(0,168,112,.15)');
+  grad.addColorStop(1, up ? 'rgba(229,68,59,0)' : 'rgba(0,168,112,0)');
+  ctx.beginPath();
   data.forEach((v, i) => i ? ctx.lineTo(px(i), py(v)) : ctx.moveTo(px(i), py(v)));
+  ctx.lineTo(px(data.length - 1), H); ctx.lineTo(px(0), H); ctx.closePath();
+  ctx.fillStyle = grad; ctx.fill();
+  // 折线 2px
+  ctx.beginPath();
+  data.forEach((v, i) => i ? ctx.lineTo(px(i), py(v)) : ctx.moveTo(px(i), py(v)));
+  ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
   ctx.stroke();
 }
 
-// ---- 持仓表头排序 ----
+// ===== 持仓表头排序（8 键 + null 沉底） =====
 let sortKey = 'value', sortDir = -1;   // 默认市值降序
 const SORTABLE = {price:1, change_pct:1, value:1, today_pnl:1,
                   position_pnl:1, position_pnl_pct:1, cost_price:1, quantity:1};
@@ -372,13 +502,12 @@ function updateSortArrows() {
   });
 }
 
-// 持仓行 tag：港基官方日频 / 美股扩展时段(按 session 显示盘前盘后) / 无行情
+// 持仓行 tag：港基官方日频 / 美股扩展时段(按 session 显示盘前盘后) / 无行情，统一灰胶囊
 function positionTags(p, session) {
-  if (p.market === 'HKFUND') return '<span class="tag tag-fund">官方日频</span>';
+  if (p.market === 'HKFUND') return '<span class="pill tag">官方日频</span>';
   if (p.ext === 'pre/post') {
-    const isPre = session === 'pre';
-    const label = isPre ? '盘前' : (session === 'post' ? '盘后' : '扩展时段');
-    return `<span class="tag ${isPre || session !== 'post' ? 'tag-pre' : 'tag-post'}">${label}</span>`;
+    const label = session === 'pre' ? '盘前' : (session === 'post' ? '盘后' : '扩展时段');
+    return '<span class="pill tag">' + label + '</span>';
   }
   return '';
 }
@@ -407,7 +536,7 @@ function renderPositions(d) {
     return;
   }
   positions.forEach(p => {
-    const tags = positionTags(p, session) + (p.stale ? '<span class="tag tag-stale">无行情</span>' : '');
+    const tags = positionTags(p, session) + (p.stale ? '<span class="pill tag tag-stale">无行情</span>' : '');
     const sub = p.market === 'HKFUND' ? (p.nav_date || '') : (p.quote_time || '');
     const chgHtml = p.change_pct===null||p.change_pct===undefined ? '--' : sign(p.change_pct)+fmt(p.change_pct)+'%';
     const tr = document.createElement('tr');
@@ -420,17 +549,19 @@ function renderPositions(d) {
       <td class="${cls(p.position_pnl_pct)}">${p.position_pnl_pct===null?'--':sign(p.position_pnl_pct)+fmt(p.position_pnl_pct)+'%'}</td>
       <td>${fmt(p.cost_price)}</td><td>${fmt(p.quantity,0)}</td>`;
     tbody.appendChild(tr);
-    // 移动端卡片：行1 名称+tags+现价+涨跌幅；行2 市值/今日/持仓三列
+    // 移动端卡片：行1 名称+tags | 现价+涨跌幅；行2 三段 Micro（市值·数量·成本 | 今日 | 持仓）
     const mc = document.createElement('div');
     mc.className = 'm-card';
     mc.innerHTML = `<div class="m-top"><span class="m-name">${esc(p.name||p.symbol)}${tags}</span>
-        <span class="m-right">${p.price ? fmt(p.price, p.market==='HKFUND'?4:2) : '--'}
+        <span class="m-quote ${cls(p.change_pct)}">${p.price ? fmt(p.price, p.market==='HKFUND'?4:2) : '--'}
           <em class="${cls(p.change_pct)}">${chgHtml}</em></span></div>
-      <div class="m-sym">${esc(p.symbol)} ${esc(sub)}</div>
-      <div class="m-bottom">
-        <span>市值<b>$${fmt(p.value)}</b></span>
-        <span>今日<b class="${cls(p.today_pnl)}">${p.today_pnl===null?'--':sign(p.today_pnl)+'$'+fmt(Math.abs(p.today_pnl))}</b></span>
-        <span>持仓<b class="${cls(p.position_pnl)}">${p.position_pnl===null?'--':sign(p.position_pnl)+'$'+fmt(Math.abs(p.position_pnl))}</b></span>
+      <div class="m-meta">
+        <span>市值 <b>$${fmt(p.value)}</b> · 数量 ${fmt(p.quantity,0)} · 成本 <b>$${fmt(p.cost_price)}</b></span>
+        <span class="m-div"></span>
+        <span>今日 <b class="${cls(p.today_pnl)}">${p.today_pnl===null?'--':sign(p.today_pnl)+'$'+fmt(Math.abs(p.today_pnl))}</b></span>
+        <span class="m-div"></span>
+        <span>持仓 <b class="${cls(p.position_pnl)}">${p.position_pnl===null?'--':sign(p.position_pnl)+'$'+fmt(Math.abs(p.position_pnl))}</b>
+          <b class="${cls(p.position_pnl_pct)}">${p.position_pnl_pct===null?'':'('+sign(p.position_pnl_pct)+fmt(p.position_pnl_pct)+'%)'}</b></span>
       </div>`;
     mlist.appendChild(mc);
   });
@@ -440,43 +571,54 @@ function renderOverview(d) {
   if (!d || !d.ok && !d.positions) return;
   lastOverview = d;
   const s = d.summary || {};
-  document.getElementById('totalValue').textContent = usd(s.total_value);
-  // 昨收总资产 = 持仓昨收口径 base_value + 现金；同时缓存作分时图右轴百分比基数
+  // 总资产 Display：语义色随当日盈亏
+  const tv = document.getElementById('totalValue');
+  tv.textContent = usd(s.total_value);
+  tv.className = 'ov-display ' + cls(s.day_pnl);
+  // 昨收总资产 = 持仓昨收口径 base_value + 现金；同时缓存作分时图百分比基数
   const prev = (s.base_value != null) ? s.base_value + (s.cash_usd || 0) : null;
   if (prev != null && prev > 0) baseTotalCache = prev;
   document.getElementById('prevCloseInfo').textContent = prev ? '昨收 $' + fmt(prev) : '';
   const dp = document.getElementById('dayPnl');
-  dp.textContent = sign(s.day_pnl) + usd(s.day_pnl); dp.className = 'ov-val ' + cls(s.day_pnl);
-  document.getElementById('dayPnlPct').textContent = sign(s.day_pnl_pct) + fmt(s.day_pnl_pct) + '%';
-  document.getElementById('dayPnlPct').className = 'ov-sub ' + cls(s.day_pnl);
-  // 盘前/盘后时段行情不完整，今日盈亏标注「参考」
-  document.getElementById('dayPnlLabel').textContent =
-    '今日盈亏' + (d.session === 'pre' || d.session === 'post' ? ' (参考)' : '');
+  dp.textContent = sign(s.day_pnl) + usd(s.day_pnl); dp.className = 'ov-value ' + cls(s.day_pnl);
+  const dpp = document.getElementById('dayPnlPct');
+  dpp.textContent = sign(s.day_pnl_pct) + fmt(s.day_pnl_pct) + '%';
+  dpp.className = 'ov-micro ' + cls(s.day_pnl);
+  // 盘前/盘后时段行情不完整，今日盈亏标注「参考」灰胶囊
+  document.getElementById('dayPnlLabel').innerHTML =
+    '今日盈亏' + (d.session === 'pre' || d.session === 'post' ? ' <i class="ref-tag">参考</i>' : '');
   const tp = document.getElementById('totalPnl');
-  tp.textContent = sign(s.total_pnl) + usd(s.total_pnl); tp.className = 'ov-val ' + cls(s.total_pnl);
-  document.getElementById('totalPnlPct').textContent = sign(s.total_pnl_pct) + fmt(s.total_pnl_pct) + '%';
-  document.getElementById('totalPnlPct').className = 'ov-sub ' + cls(s.total_pnl);
+  tp.textContent = sign(s.total_pnl) + usd(s.total_pnl); tp.className = 'ov-value ' + cls(s.total_pnl);
+  const tpp = document.getElementById('totalPnlPct');
+  tpp.textContent = sign(s.total_pnl_pct) + fmt(s.total_pnl_pct) + '%';
+  tpp.className = 'ov-micro ' + cls(s.total_pnl);
   document.getElementById('cashVal').textContent = usd(s.cash_usd);
   document.getElementById('cashSub').textContent =
     (s.cash_usd != null && d.fx_usdhkd) ? '≈ HK$' + fmt(s.cash_usd * d.fx_usdhkd, 0) : '';
+  // session 徽章：文字化灰胶囊
   const badge = document.getElementById('sessionBadge');
-  badge.textContent = SESSION_LABEL[d.session] || d.session;
-  badge.className = 'badge badge-' + (d.session || 'closed');
-  document.getElementById('fetchTime').textContent = d.fetch_time || '--';
+  badge.textContent = SESSION_LABEL[d.session] || d.session || '--';
+  document.getElementById('fetchTime').textContent = d.fetch_time || '--:--:--';
   document.getElementById('fxInfo').textContent = 'USD/HKD ' + fmt(d.fx_usdhkd, 4) + (d.fx_fallback ? '(默认)' : '');
 
   renderMarket(d);
   renderPositions(d);
+  drawAnalysis(d);
   // overview 到达即触发分时重绘：baseTotalCache 已更新，消除最长 30s 轮询空窗的口径偏差
-  if (chartMode === 'intraday' && chartData && chartData.length) { drawChart(); }
+  if (isIntradayMode() && chartData && chartData.length) { drawChart(); }
 }
 
-// ---- 走势图 ----
-let chartData = null, chartMode = 'intraday';
+// ===== 走势图（无轴 + hover/touch tooltip） =====
+let chartData = null;         // 统一映射 [{x, y, v}]：分时 y=p(当日盈亏)、日线 y=v(总资产)
+let chartMode = 'h24';        // h24(默认)/intraday(当日)/30/90/all
+let hoverIdx = -1;            // 当前吸附的数据点下标
+let pixPts = [];              // 数据点像素坐标（hover 吸引用）
+function isIntradayMode() { return chartMode === 'h24' || chartMode === 'intraday'; }
+
 // 分时图昨收基数：优先 refresh 缓存，兜底用分时最新点 v - p
 function baseTotalFor() {
   if (baseTotalCache > 0) return baseTotalCache;
-  if (chartMode === 'intraday' && chartData && chartData.length) {
+  if (isIntradayMode() && chartData && chartData.length) {
     const last = chartData[chartData.length - 1];
     if (last.v != null && last.y != null && (last.v - last.y) > 0) return last.v - last.y;
   }
@@ -484,131 +626,174 @@ function baseTotalFor() {
 }
 function switchRange(mode, btn) {
   chartMode = mode;
-  document.querySelectorAll('.range-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.seg-btn').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   loadChart();
 }
 async function loadChart() {
-  let url = chartMode === 'intraday' ? '/api/portfolio/intraday' : '/api/portfolio/daily?range=' + chartMode;
+  // 24h 跨日窗口 / 当日（hours=0）/ 日线区间
+  const url = chartMode === 'h24' ? '/api/portfolio/intraday?hours=24'
+            : chartMode === 'intraday' ? '/api/portfolio/intraday'
+            : '/api/portfolio/daily?range=' + chartMode;
   try {
     const d = await (await fetch(url)).json();
-    // 分时映射 p（当日盈亏，昨收基线口径）；日线映射 v（总资产绝对值）
-    chartData = chartMode === 'intraday'
-      ? (d.points || []).map(p => ({x: p.ts, y: p.p, v: p.v}))
-      : (d.days || []).map(p => ({x: p.date, y: p.v}));
+    chartData = isIntradayMode()
+      ? (d.points || []).map(q => ({x: q.ts, y: q.p, v: q.v}))
+      : (d.days || []).map(q => ({x: q.date, y: q.v}));
+    hoverIdx = -1;
     drawChart();
     updateChartInfo();
   } catch (e) { console.warn(e); }
 }
 function drawChart() {
-  const cv = document.getElementById('chart'), ctx = cv.getContext('2d');
-  const W = cv.width = cv.clientWidth * 2, H = cv.height = 480;
+  const cv = document.getElementById('chart');
+  const ctx = setupCanvas(cv);
+  const W = cv._cssW, H = cv._cssH;
   ctx.clearRect(0, 0, W, H);
+  pixPts = [];
+  hideTip();
   const pts = chartData || [];
   if (pts.length < 2) {
-    ctx.fillStyle = AXIS_COLOR; ctx.font = '28px sans-serif'; ctx.textAlign = 'center';
-    ctx.fillText(pts.length ? '数据积累中…' : '暂无历史数据', W/2, H/2);
+    ctx.fillStyle = TXT3; ctx.font = F12; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(pts.length ? '数据积累中…' : '暂无历史数据', W / 2, H / 2);
     return;
   }
-  if (chartMode === 'intraday') drawIntraday(ctx, pts, W, H);
-  else drawDaily(ctx, pts, W, H);
+  let lineColor;
+  if (isIntradayMode()) lineColor = drawIntraday(ctx, pts, W, H);
+  else lineColor = drawDaily(ctx, pts, W, H);
+  // hover/touch 高亮：竖直参考线 + 4px 语义色圆点（白描边）
+  if (hoverIdx >= 0 && pixPts[hoverIdx]) {
+    const q = pixPts[hoverIdx];
+    ctx.strokeStyle = TXT3; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(q.px, CH.t); ctx.lineTo(q.px, H - CH.b); ctx.stroke();
+    ctx.fillStyle = lineColor;
+    ctx.beginPath(); ctx.arc(q.px, q.py, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 1.5; ctx.stroke();
+  }
 }
-// 分时图：昨收基线口径（画当日盈亏 p，0 居中对称，基线=昨收）
+// 分时图：画当日盈亏 p，0 轴 #C7C7CC 虚线基准、对称 y 域、2px 线 + 渐变填充
 function drawIntraday(ctx, pts, W, H) {
   const ys = pts.map(p => p.y);
-  const m = Math.max(...ys.map(Math.abs), 1e-9) * 1.1;   // y 域以 0 居中对称
+  const m = Math.max(...ys.map(Math.abs), 1e-9) * 1.1;   // y 域以 0 居中对称（留 10% 余量）
   const ymin = -m, ymax = m;
-  const L = 120, R = 120, T = 16, B = 36;
-  const px = i => L + (W - L - R) * i / (pts.length - 1);
-  const py = v => T + (H - T - B) * (1 - (v - ymin) / (ymax - ymin));
-  const base = baseTotalFor();
-  const dec = m >= 1000 ? 0 : (m >= 100 ? 1 : 2);
-  ctx.font = '20px sans-serif';
-  // 网格 + 左轴 ±$ 盈亏额 + 右轴相对昨收百分比
-  for (let i = 0; i <= 4; i++) {
-    const v = ymin + (ymax - ymin) * i / 4, y = py(v);
-    ctx.strokeStyle = GRID_COLOR; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(W - R, y); ctx.stroke();
-    ctx.fillStyle = AXIS_COLOR;
-    ctx.textAlign = 'right';
-    ctx.fillText((v > 0 ? '+$' : v < 0 ? '-$' : '$') + fmt(Math.abs(v), dec), L - 10, y + 7);
-    const pct = base > 0 ? v / base * 100 : 0;
-    ctx.textAlign = 'left';
-    ctx.fillText((pct > 0 ? '+' : '') + fmt(pct, 2) + '%', W - R + 10, y + 7);
-  }
-  // 昨收基线（y=0 中位虚线）
-  ctx.setLineDash([8, 6]); ctx.strokeStyle = AXIS_COLOR; ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.moveTo(L, py(0)); ctx.lineTo(W - R, py(0)); ctx.stroke();
+  const px = i => CH.l + (W - CH.l - CH.r) * i / (pts.length - 1);
+  const py = v => CH.t + (H - CH.t - CH.b) * (1 - (v - ymin) / (ymax - ymin));
+  // 0 轴虚线基准
+  ctx.setLineDash([4, 4]); ctx.strokeStyle = TXT3; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(CH.l, py(0)); ctx.lineTo(W - CH.r, py(0)); ctx.stroke();
   ctx.setLineDash([]);
   const up = ys[ys.length - 1] >= 0;
-  // 曲线与昨收基线之间半透明面积填充
+  const color = up ? UP_COLOR : DOWN_COLOR;
+  // 线与 0 轴之间渐变填充（12% 透明 → 0）
+  const grad = ctx.createLinearGradient(0, CH.t, 0, H - CH.b);
+  grad.addColorStop(0, up ? 'rgba(229,68,59,.12)' : 'rgba(0,168,112,.12)');
+  grad.addColorStop(1, up ? 'rgba(229,68,59,0)' : 'rgba(0,168,112,0)');
   ctx.beginPath();
   pts.forEach((p, i) => i ? ctx.lineTo(px(i), py(p.y)) : ctx.moveTo(px(i), py(p.y)));
   ctx.lineTo(px(pts.length - 1), py(0)); ctx.lineTo(px(0), py(0)); ctx.closePath();
-  ctx.fillStyle = up ? 'rgba(240,74,94,.15)' : 'rgba(46,189,133,.15)';
-  ctx.fill();
-  // 折线：末点正负定红绿
-  ctx.strokeStyle = up ? UP_COLOR : DOWN_COLOR; ctx.lineWidth = 3; ctx.lineJoin = 'round';
+  ctx.fillStyle = grad; ctx.fill();
+  // 折线 2px：末点正负定语义色
   ctx.beginPath();
   pts.forEach((p, i) => i ? ctx.lineTo(px(i), py(p.y)) : ctx.moveTo(px(i), py(p.y)));
+  ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
   ctx.stroke();
-  // X 轴标签（等间隔取 5 个）
-  ctx.fillStyle = AXIS_COLOR; ctx.textAlign = 'center';
-  for (let i = 0; i < 5; i++) {
-    const idx = Math.round((pts.length - 1) * i / 4);
-    ctx.fillText(String(pts[idx].x), px(idx), H - 8);
-  }
+  pixPts = pts.map((p, i) => ({px: px(i), py: py(p.y)}));
+  return color;
 }
-// 日线图：总资产绝对值曲线 + 首值虚线 + 右轴区间百分比
+// 日线图：画总资产 v，首值虚线基准、2px 线 + 渐变填充（填至画布底）
 function drawDaily(ctx, pts, W, H) {
   const ys = pts.map(p => p.y);
   let ymin = Math.min(...ys), ymax = Math.max(...ys);
   if (ymax - ymin < 1e-9) { ymax += 1; ymin -= 1; }
   const pad = (ymax - ymin) * 0.1; ymin -= pad; ymax += pad;
   const v0 = ys[0];
-  const L = 120, R = 120, T = 16, B = 36;
-  const px = i => L + (W - L - R) * i / (pts.length - 1);
-  const py = v => T + (H - T - B) * (1 - (v - ymin) / (ymax - ymin));
-  const dec = (ymax - ymin) >= 1000 ? 0 : ((ymax - ymin) >= 100 ? 1 : 2);
-  ctx.font = '20px sans-serif';
-  for (let i = 0; i <= 4; i++) {
-    const v = ymin + (ymax - ymin) * i / 4, y = py(v);
-    ctx.strokeStyle = GRID_COLOR; ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(L, y); ctx.lineTo(W - R, y); ctx.stroke();
-    ctx.fillStyle = AXIS_COLOR;
-    ctx.textAlign = 'right';
-    ctx.fillText('$' + fmt(v, dec), L - 10, y + 7);
-    const pct = v0 ? (v - v0) / v0 * 100 : 0;
-    ctx.textAlign = 'left';
-    ctx.fillText((pct > 0 ? '+' : '') + fmt(pct, 2) + '%', W - R + 10, y + 7);
-  }
+  const px = i => CH.l + (W - CH.l - CH.r) * i / (pts.length - 1);
+  const py = v => CH.t + (H - CH.t - CH.b) * (1 - (v - ymin) / (ymax - ymin));
   // 首值虚线基准
-  ctx.setLineDash([8, 6]); ctx.strokeStyle = AXIS_COLOR; ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.moveTo(L, py(v0)); ctx.lineTo(W - R, py(v0)); ctx.stroke();
+  ctx.setLineDash([4, 4]); ctx.strokeStyle = TXT3; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(CH.l, py(v0)); ctx.lineTo(W - CH.r, py(v0)); ctx.stroke();
   ctx.setLineDash([]);
   const up = ys[ys.length - 1] >= v0;
-  ctx.strokeStyle = up ? UP_COLOR : DOWN_COLOR; ctx.lineWidth = 3; ctx.lineJoin = 'round';
+  const color = up ? UP_COLOR : DOWN_COLOR;
+  const grad = ctx.createLinearGradient(0, CH.t, 0, H - CH.b);
+  grad.addColorStop(0, up ? 'rgba(229,68,59,.12)' : 'rgba(0,168,112,.12)');
+  grad.addColorStop(1, up ? 'rgba(229,68,59,0)' : 'rgba(0,168,112,0)');
   ctx.beginPath();
   pts.forEach((p, i) => i ? ctx.lineTo(px(i), py(p.y)) : ctx.moveTo(px(i), py(p.y)));
+  ctx.lineTo(px(pts.length - 1), H - CH.b); ctx.lineTo(px(0), H - CH.b); ctx.closePath();
+  ctx.fillStyle = grad; ctx.fill();
+  ctx.beginPath();
+  pts.forEach((p, i) => i ? ctx.lineTo(px(i), py(p.y)) : ctx.moveTo(px(i), py(p.y)));
+  ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
   ctx.stroke();
-  ctx.fillStyle = AXIS_COLOR; ctx.textAlign = 'center';
-  for (let i = 0; i < 5; i++) {
-    const idx = Math.round((pts.length - 1) * i / 4);
-    ctx.fillText(String(pts[idx].x), px(idx), H - 8);
-  }
+  pixPts = pts.map((p, i) => ({px: px(i), py: py(p.y)}));
+  return color;
 }
-// 图表信息条：分时「昨收 $x → $y (+$p/+x.x%)」，日线区间首末对比
+// hover/touch：吸附最近数据点，重绘高亮并显示 tooltip
+function chartHover(clientX) {
+  if (!pixPts.length) return;
+  const cv = document.getElementById('chart');
+  const rect = cv.getBoundingClientRect();
+  const x = clientX - rect.left;
+  let best = 0, bd = Infinity;
+  pixPts.forEach((p, i) => { const d = Math.abs(p.px - x); if (d < bd) { bd = d; best = i; } });
+  if (best !== hoverIdx) { hoverIdx = best; drawChart(); }
+  showTip(best);
+}
+function chartLeave() { if (hoverIdx >= 0) { hoverIdx = -1; drawChart(); } hideTip(); }
+// HTML tooltip：白底轻阴影圆角 12；分时显示盈亏两项、日线显示资产+区间%；左右边界自动翻转
+function showTip(i) {
+  const tip = document.getElementById('chartTip');
+  const wrap = tip.parentElement;
+  const pts = chartData || [];
+  const p = pts[i];
+  if (!p || !pixPts[i]) return;
+  let rows;
+  if (isIntradayMode()) {
+    const base = baseTotalFor();
+    const pct = base > 0 ? p.y / base * 100 : 0;
+    rows = `<div class="tip-row"><span>盈亏</span><b class="${cls(p.y)}">${sign(p.y)}$${fmt(Math.abs(p.y))} (${sign(pct)}${fmt(Math.abs(pct))}%)</b></div>
+      <div class="tip-row"><span>总资产</span><b>$${fmt(p.v != null ? p.v : base + p.y)}</b></div>`;
+  } else {
+    const v0 = pts[0].y;
+    const diff = p.y - v0, pct = v0 ? diff / v0 * 100 : 0;
+    rows = `<div class="tip-row"><span>总资产</span><b>$${fmt(p.y)}</b></div>
+      <div class="tip-row"><span>区间</span><b class="${cls(diff)}">${sign(diff)}$${fmt(Math.abs(diff))} (${sign(pct)}${fmt(Math.abs(pct))}%)</b></div>`;
+  }
+  tip.innerHTML = '<div class="tip-time">' + esc(String(p.x)) + '</div>' + rows;
+  tip.classList.add('show');
+  const q = pixPts[i];
+  let left = q.px + 12;
+  if (left + tip.offsetWidth > wrap.clientWidth - 4) left = q.px - tip.offsetWidth - 12;
+  if (left < 4) left = 4;
+  let top = q.py - tip.offsetHeight - 14;
+  if (top < 4) top = q.py + 14;
+  tip.style.left = left + 'px';
+  tip.style.top = top + 'px';
+}
+function hideTip() { document.getElementById('chartTip').classList.remove('show'); }
+// hover/touch 事件绑定：mouse 系 + touch 系（touch-action:pan-y 保留纵向滚动）
+(function bindChartEvents() {
+  const cv = document.getElementById('chart');
+  cv.addEventListener('mousemove', e => chartHover(e.clientX));
+  cv.addEventListener('mouseleave', chartLeave);
+  cv.addEventListener('touchstart', e => { if (e.touches[0]) chartHover(e.touches[0].clientX); }, {passive: true});
+  cv.addEventListener('touchmove', e => { if (e.touches[0]) chartHover(e.touches[0].clientX); }, {passive: true});
+  cv.addEventListener('touchend', chartLeave);
+  cv.addEventListener('touchcancel', chartLeave);
+})();
+// 图表信息条：分时「昨收 $x → 现价 $y (±盈亏/±%)」，日线区间首末对比
 function updateChartInfo() {
   const el = document.getElementById('chartInfo');
   const pts = chartData || [];
   if (!pts.length) { el.textContent = '暂无数据'; return; }
   const last = pts[pts.length - 1];
-  if (chartMode === 'intraday') {
+  if (isIntradayMode()) {
     const base = baseTotalFor();
     if (!(base > 0)) { el.textContent = '分时数据加载中…'; return; }
     const v = (last.v != null) ? last.v : base + last.y;
     const pct = last.y / base * 100;
-    el.innerHTML = `昨收 <b>$${fmt(base)}</b> → <b>$${fmt(v)}</b>
+    el.innerHTML = `昨收 <b>$${fmt(base)}</b> → 现价 <b>$${fmt(v)}</b>
       <span class="${cls(last.y)}">(${sign(last.y)}$${fmt(Math.abs(last.y))} / ${sign(pct)}${fmt(pct)}%)</span>`;
   } else {
     const v0 = pts[0].y, diff = last.y - v0, pct = v0 ? diff / v0 * 100 : 0;
@@ -617,6 +802,120 @@ function updateChartInfo() {
   }
 }
 
+// ===== 分析看板（Canvas 手绘，零依赖） =====
+// ① 环形占比图：各持仓市值 + 现金，前 8 大其余合并「其他」，蓝色系单色梯度，中心总资产
+function drawDonut(d) {
+  const cv = document.getElementById('donutCv');
+  const ctx = setupCanvas(cv);
+  const W = cv._cssW, H = cv._cssH;
+  ctx.clearRect(0, 0, W, H);
+  const isMobile = W < 180;
+  const ro = isMobile ? 64 : 72, ri = isMobile ? 44 : 48;
+  const s = d.summary || {};
+  const positions = (d.positions || [])
+    .filter(p => p.value != null && p.value > 0.005)
+    .sort((a, b) => b.value - a.value);
+  const cash = s.cash_usd || 0;
+  const items = [];
+  positions.slice(0, 8).forEach((p, i) =>
+    items.push({name: p.name || p.symbol, value: p.value, color: 'rgba(42,108,240,' + DONUT_ALPHAS[i] + ')'}));
+  const restVal = positions.slice(8).reduce((t, p) => t + p.value, 0);
+  if (restVal > 0.005) items.push({name: '其他', value: restVal, color: TXT2});
+  if (cash > 0.005) items.push({name: '现金', value: cash, color: TXT3});
+  const total = items.reduce((t, x) => t + x.value, 0);
+  const legend = document.getElementById('donutLegend');
+  if (!(total > 0)) {
+    ctx.fillStyle = TXT3; ctx.font = F12; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('暂无数据', W / 2, H / 2);
+    legend.innerHTML = '<div class="lg-item" style="color:' + TXT3 + '">暂无数据</div>';
+    return;
+  }
+  // 扇区绘制：白缝分隔，12 点方向起始
+  let a0 = -Math.PI / 2;
+  items.forEach(it => {
+    const a1 = a0 + it.value / total * Math.PI * 2;
+    ctx.beginPath();
+    ctx.arc(W / 2, H / 2, ro, a0, a1);
+    ctx.arc(W / 2, H / 2, ri, a1, a0, true);
+    ctx.closePath();
+    ctx.fillStyle = it.color; ctx.fill();
+    ctx.strokeStyle = '#FFFFFF'; ctx.lineWidth = 2; ctx.stroke();
+    a0 = a1;
+  });
+  // 中心文字：Label 总资产 + Value 金额（整数，避免溢出内圈）
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = TXT2; ctx.font = F12;
+  ctx.fillText('总资产 (USD)', W / 2, H / 2 - 9);
+  ctx.fillStyle = TXT; ctx.font = F600_16;
+  ctx.fillText('$' + fmt(s.total_value, 0), W / 2, H / 2 + 11);
+  // 图例：色点 + 名称 + 占比%
+  legend.innerHTML = items.map(it =>
+    '<div class="lg-item"><i class="lg-dot" style="background:' + it.color + '"></i>' +
+    '<span class="lg-name">' + esc(it.name) + '</span>' +
+    '<span class="lg-pct">' + fmt(it.value / total * 100, 1) + '%</span></div>').join('');
+}
+// ②③ 横向条形图：名称左 / 0 轴内嵌条形中 / 数值右端（语义色）
+// key：取值字段；fmtVal：数值格式化；emptyText：空态文案
+function drawHBar(cvId, positions, key, fmtVal, emptyText) {
+  const cv = document.getElementById(cvId);
+  const rows = (positions || []).filter(p => p[key] != null)
+    .sort((a, b) => Math.abs(b[key]) - Math.abs(a[key]));
+  const ctx = setupCanvas(cv, rows.length ? rows.length * 30 + 6 : 56);
+  const W = cv._cssW, H = cv._cssH;
+  ctx.clearRect(0, 0, W, H);
+  if (!rows.length) {
+    ctx.fillStyle = TXT3; ctx.font = F12; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(emptyText, W / 2, H / 2);
+    return;
+  }
+  // 布局度量：名称列 / 数值列宽按内容自适应（设上限防挤压条形区）
+  ctx.font = F12;
+  let nameW = 0;
+  rows.forEach(r => { nameW = Math.max(nameW, ctx.measureText(r.name || r.symbol).width); });
+  nameW = Math.min(nameW + 8, Math.round(W * 0.34));
+  ctx.font = F11;
+  let valW = 0;
+  rows.forEach(r => { valW = Math.max(valW, ctx.measureText(fmtVal(r[key])).width); });
+  valW = Math.min(valW + 8, Math.round(W * 0.3));
+  // 0 轴位置按正负极值比例内嵌
+  const vals = rows.map(r => r[key]);
+  const maxPos = Math.max(0, ...vals), maxNeg = Math.max(0, ...vals.map(v => -v));
+  const dom = maxPos + maxNeg;
+  const barL = nameW + 12, barR = W - valW - 12;
+  const zeroX = dom > 0 ? barL + (barR - barL) * (maxNeg / dom) : barL;
+  // 0 轴基准竖线
+  ctx.strokeStyle = TXT3; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(zeroX, 3); ctx.lineTo(zeroX, H - 3); ctx.stroke();
+  const rowH = 30;
+  rows.forEach((r, i) => {
+    const cy = i * rowH + rowH / 2 + 3;
+    const v = r[key];
+    // 名称（左，12px 主文字色）
+    ctx.font = F12; ctx.fillStyle = TXT; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillText(fitText(ctx, r.name || r.symbol, nameW - 6), 2, cy);
+    // 条形（10px 高圆角，正红负绿）
+    const len = dom > 0 ? Math.abs(v) / dom * (barR - barL) : 0;
+    if (len > 0.5) {
+      const x0 = v >= 0 ? zeroX : zeroX - len;
+      ctx.fillStyle = v >= 0 ? UP_COLOR : DOWN_COLOR;
+      rr(ctx, x0, cy - 5, Math.max(len, 3), 10, 5);
+      ctx.fill();
+    }
+    // 数值（右端，11px 语义色）
+    ctx.font = F11; ctx.fillStyle = v >= 0 ? UP_COLOR : DOWN_COLOR; ctx.textAlign = 'right';
+    ctx.fillText(fmtVal(v), W - 2, cy);
+  });
+}
+function drawAnalysis(d) {
+  if (!d) return;
+  drawDonut(d);
+  drawHBar('pnlBarCv', d.positions, 'position_pnl_pct',
+    v => sign(v) + fmt(Math.abs(v), 1) + '%', '暂无收益率数据');
+  drawHBar('contribCv', d.positions, 'today_pnl',
+    v => sign(v) + '$' + fmt(Math.abs(v)), '暂无当日贡献');
+}
+
+// ===== 轮询 =====
 let cashData = [];  // overview 缓存的现金账户列表（编辑弹窗填充用）
 async function refresh() {
   try {
@@ -626,7 +925,7 @@ async function refresh() {
   } catch (e) { console.warn(e); }
 }
 
-// ---- 编辑器 ----
+// ===== 编辑器 =====
 let editRows = [];
 function fillCashInputs() {
   const usdRow = cashData.find(c => c.currency === 'USD');
@@ -719,10 +1018,21 @@ async function saveCash() {
 }
 const val = id => document.getElementById(id).value.trim();
 
-window.addEventListener('resize', drawChart);  // 窗口尺寸变化时重绘走势图
+// ===== 启动与全局事件 =====
+// resize 防抖重绘：走势图 + 分析图 + 市场 spark（全部依赖容器宽度）
+let rsTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(rsTimer);
+  rsTimer = setTimeout(() => {
+    renderMarket(lastOverview);
+    drawChart();
+    drawAnalysis(lastOverview);
+  }, 120);
+});
 refresh(); loadChart();
 setInterval(refresh, 10000);
-setInterval(() => { if (chartMode === 'intraday') loadChart(); }, 30000);
+// 分时（24h/当日）30s 轮询；日线区间不轮询
+setInterval(() => { if (isIntradayMode()) loadChart(); }, 30000);
 </script>
 </body>
 </html>
