@@ -42,6 +42,8 @@ button { font-family: inherit; }
   background: var(--bg); color: var(--txt2); font-size: 11px; font-weight: 400; white-space: nowrap; }
 .tag { margin-left: 6px; vertical-align: 1px; }
 .tag-stale { color: var(--txt3); }
+/* 胶囊语义色覆盖（夜盘增量徽标）：在 .pill 默认灰字之上按涨跌着色 */
+.pill-up { color: var(--up); } .pill-down { color: var(--down); }
 .header-status { margin-left: auto; display: flex; align-items: center; gap: 12px;
   font-size: 11px; color: var(--txt3); line-height: 1.2; }
 
@@ -60,6 +62,10 @@ button { font-family: inherit; }
 .ov-display { font-size: 30px; font-weight: 600; line-height: 1.2; letter-spacing: .2px; margin-top: 4px; }
 .ov-value { font-size: 17px; font-weight: 500; line-height: 1.2; margin-top: 6px; }
 .ov-micro { font-size: 11px; color: var(--txt3); line-height: 1.2; margin-top: 4px; }
+/* 今日盈亏副行：收盘定格 Micro 灰字 +「昨收以来」徽标（灰底胶囊、语义色文字） */
+.ov-sub { font-size: 11px; color: var(--txt2); line-height: 1.4; margin-top: 4px;
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ov-pill { padding: 1px 8px; border-radius: 999px; background: var(--bg); white-space: nowrap; }
 .ov-item + .ov-item { border-left: 1px solid var(--bg); padding-left: 24px; }
 
 /* ---- 市场看板：桌面 5 列 / 平板 3 列 / 移动 2 列大格 ---- */
@@ -224,6 +230,7 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
       <div class="ov-label" id="dayPnlLabel">今日盈亏</div>
       <div class="ov-value" id="dayPnl">--</div>
       <div class="ov-micro" id="dayPnlPct"></div>
+      <div class="ov-sub" id="dayPnlSub" style="display:none"></div>
     </div>
     <div class="ov-item">
       <div class="ov-label">持仓盈亏</div>
@@ -243,6 +250,7 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
       <div class="card-title">市场看板</div>
       <div class="card-note">参考行情 · 60s 更新</div>
     </div>
+    <div class="card-note" id="nightHint" style="display:none;margin-bottom:8px">夜盘时段行情暂不可用，价格定格于盘后收盘</div>
     <div class="market-grid" id="marketGrid"></div>
   </section>
 
@@ -370,7 +378,8 @@ function esc(str) {
 })();
 
 // ===== 常量与工具 =====
-const SESSION_LABEL = {pre:'盘前', regular:'盘中', post:'盘后', closed:'休市'};
+// session 徽章口径：盘前计入上一场 / 盘后实时累计；夜盘（美东 20:00-04:00）单独覆盖为「数据定格」
+const SESSION_BADGE = {pre:'盘前 · 计入上一场', regular:'盘中', post:'盘后 · 实时累计', closed:'休市'};
 const UP_COLOR = '#E5443B', DOWN_COLOR = '#00A870';
 const TXT = '#111114', TXT2 = '#8A8A8E', TXT3 = '#C7C7CC';
 const FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif';
@@ -512,6 +521,16 @@ function positionTags(p, session) {
   return '';
 }
 
+// 夜盘增量小徽标：盘后/夜盘时段在现价旁显示「实时累计% − 收盘定格涨跌%」胶囊；
+// live_change_pct/close_price/pre_close 任一缺失则口径不可算，省略不显示
+function nightBadge(p, session, night) {
+  if (session !== 'post' && !night) return '';
+  if (p.live_change_pct == null || p.close_price == null || !p.pre_close) return '';
+  const inc = p.live_change_pct - (p.close_price - p.pre_close) / p.pre_close * 100;
+  const tone = inc > 0 ? ' pill-up' : (inc < 0 ? ' pill-down' : '');
+  return '<span class="pill tag' + tone + '">' + sign(inc) + fmt(inc, 1) + '%</span>';
+}
+
 function renderPositions(d) {
   if (!d) return;
   const session = d.session || 'closed';
@@ -538,11 +557,16 @@ function renderPositions(d) {
   positions.forEach(p => {
     const tags = positionTags(p, session) + (p.stale ? '<span class="pill tag tag-stale">无行情</span>' : '');
     const sub = p.market === 'HKFUND' ? (p.nav_date || '') : (p.quote_time || '');
-    const chgHtml = p.change_pct===null||p.change_pct===undefined ? '--' : sign(p.change_pct)+fmt(p.change_pct)+'%';
+    // 涨跌幅口径：实时累计%（live_change_pct，基准=场基准）优先，缺失回退常规涨跌幅（基准=昨收）
+    const liveChg = (p.live_change_pct != null) ? p.live_change_pct : p.change_pct;
+    const chgHtml = liveChg==null ? '--' : sign(liveChg)+fmt(liveChg)+'%';
+    // 现价 + 夜盘增量徽标（盘后/夜盘时段且字段齐备才显示）
+    const priceHtml = p.price ? fmt(p.price, p.market==='HKFUND'?4:2) : '--';
+    const nb = nightBadge(p, session, d.night_session);
     const tr = document.createElement('tr');
     tr.innerHTML = `<td><div>${esc(p.name||p.symbol)}${tags}</div><div class="sym">${esc(p.symbol)} ${esc(sub)}</div></td>
-      <td>${p.price ? fmt(p.price, p.market==='HKFUND'?4:2) : '--'}</td>
-      <td class="${cls(p.change_pct)}">${chgHtml}</td>
+      <td>${priceHtml}${nb}</td>
+      <td class="${cls(liveChg)}">${chgHtml}</td>
       <td>$${fmt(p.value)}</td>
       <td class="${cls(p.today_pnl)}">${p.today_pnl===null?'--':sign(p.today_pnl)+'$'+fmt(Math.abs(p.today_pnl))}</td>
       <td class="${cls(p.position_pnl)}">${p.position_pnl===null?'--':sign(p.position_pnl)+'$'+fmt(Math.abs(p.position_pnl))}</td>
@@ -553,8 +577,8 @@ function renderPositions(d) {
     const mc = document.createElement('div');
     mc.className = 'm-card';
     mc.innerHTML = `<div class="m-top"><span class="m-name">${esc(p.name||p.symbol)}${tags}</span>
-        <span class="m-quote ${cls(p.change_pct)}">${p.price ? fmt(p.price, p.market==='HKFUND'?4:2) : '--'}
-          <em class="${cls(p.change_pct)}">${chgHtml}</em></span></div>
+        <span class="m-quote ${cls(liveChg)}">${priceHtml}${nb}
+          <em class="${cls(liveChg)}">${chgHtml}</em></span></div>
       <div class="m-meta">
         <span>市值 <b>$${fmt(p.value)}</b> · 数量 ${fmt(p.quantity,0)} · 成本 <b>$${fmt(p.cost_price)}</b></span>
         <span class="m-div"></span>
@@ -584,9 +608,23 @@ function renderOverview(d) {
   const dpp = document.getElementById('dayPnlPct');
   dpp.textContent = sign(s.day_pnl_pct) + fmt(s.day_pnl_pct) + '%';
   dpp.className = 'ov-micro ' + cls(s.day_pnl);
-  // 盘前/盘后时段行情不完整，今日盈亏标注「参考」灰胶囊
+  // 标签口径：盘前/盘后/夜盘时段主数值为实时累计，标注「实时累计」（替代旧「参考」）
+  const extLive = d.session === 'pre' || d.session === 'post' || d.night_session;
   document.getElementById('dayPnlLabel').innerHTML =
-    '今日盈亏' + (d.session === 'pre' || d.session === 'post' ? ' <i class="ref-tag">参考</i>' : '');
+    '今日盈亏' + (extLive ? ' <i class="ref-tag">实时累计</i>' : '');
+  // 一场口径副行：收盘定格（Micro 灰字）+「昨收以来」夜盘增量徽标（仅盘后/夜盘/次日盘前且字段非空）
+  const subEl = document.getElementById('dayPnlSub');
+  if (s.close_pnl != null) {
+    let subHtml = '<span>收盘定格 ' + sign(s.close_pnl) + usd(s.close_pnl) + '</span>';
+    if (extLive && s.overnight_pnl != null) {
+      subHtml += '<span class="ov-pill ' + cls(s.overnight_pnl) + '">昨收以来 '
+        + sign(s.overnight_pnl) + usd(s.overnight_pnl) + '</span>';
+    }
+    subEl.innerHTML = subHtml;
+    subEl.style.display = '';
+  } else {
+    subEl.style.display = 'none';
+  }
   const tp = document.getElementById('totalPnl');
   tp.textContent = sign(s.total_pnl) + usd(s.total_pnl); tp.className = 'ov-value ' + cls(s.total_pnl);
   const tpp = document.getElementById('totalPnlPct');
@@ -595,11 +633,11 @@ function renderOverview(d) {
   document.getElementById('cashVal').textContent = usd(s.cash_usd);
   document.getElementById('cashSub').textContent =
     (s.cash_usd != null && d.fx_usdhkd) ? '≈ HK$' + fmt(s.cash_usd * d.fx_usdhkd, 0) : '';
-  // session 徽章：文字化灰胶囊；夜盘时段（美东 20:00-04:00）无免费实时源，
-  // 价格定格 19:59 盘后价，追加提示避免误读为实时行情
+  // session 徽章口径：盘前计入上一场/盘后实时累计；夜盘时段（美东 20:00-04:00）无免费实时源，
+  // 价格定格 19:59 盘后价，徽章覆盖为「数据定格」并在看板区顶部追加灰提示行避免误读
   const badge = document.getElementById('sessionBadge');
-  badge.textContent = (SESSION_LABEL[d.session] || d.session || '--')
-    + (d.night_session ? ' · 夜盘定格' : '');
+  badge.textContent = d.night_session ? '夜盘 · 数据定格' : (SESSION_BADGE[d.session] || d.session || '--');
+  document.getElementById('nightHint').style.display = d.night_session ? '' : 'none';
   document.getElementById('fetchTime').textContent = d.fetch_time || '--:--:--';
   document.getElementById('fxInfo').textContent = 'USD/HKD ' + fmt(d.fx_usdhkd, 4) + (d.fx_fallback ? '(默认)' : '');
 
