@@ -824,6 +824,15 @@ async def get_portfolio_intraday(trade_date) -> list[dict]:
     )
 
 
+async def get_portfolio_recent(hours: int) -> list[dict]:
+    """返回最近 N 小时的采样点（跨日分时窗口，字段与 get_portfolio_intraday 一致）。"""
+    return await execute_dict(
+        "SELECT ts, total_value_usd, day_pnl_usd FROM portfolio_ticks "
+        "WHERE ts >= NOW() - INTERVAL %s HOUR ORDER BY ts",
+        (hours,),
+    )
+
+
 async def get_portfolio_daily(days: int) -> list[dict]:
     """返回近 N 天的日线（每美东交易日取最后一条采样）。"""
     return await execute_dict(

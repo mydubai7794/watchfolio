@@ -1325,12 +1325,18 @@ async def portfolio_overview():
 
 
 @app.get("/api/portfolio/intraday")
-async def portfolio_intraday(trade_date: str = Query(default="")):
-    """当日（或指定美东交易日）分时点。"""
+async def portfolio_intraday(trade_date: str = Query(default=""),
+                             hours: int = Query(default=0)):
+    """当日（或指定美东交易日）分时点；hours>0 时返回最近 N 小时窗口（跨日分时）。"""
+    if hours > 0:
+        rows = await db.get_portfolio_recent(hours)
+        return {"ok": True, "window": "24h" if hours else "day", "points": [
+            {"ts": r["ts"].strftime("%m-%d %H:%M") if isinstance(r["ts"], datetime) else str(r["ts"]),
+             "v": float(r["total_value_usd"]), "p": float(r["day_pnl_usd"])} for r in rows]}
     if not trade_date:
         trade_date = portfolio_cache.get("trade_date") or datetime.now().strftime("%Y-%m-%d")
     rows = await db.get_portfolio_intraday(trade_date)
-    return {"ok": True, "trade_date": trade_date, "points": [
+    return {"ok": True, "window": "day", "trade_date": trade_date, "points": [
         {"ts": r["ts"].strftime("%H:%M:%S") if isinstance(r["ts"], datetime) else str(r["ts"]),
          "v": float(r["total_value_usd"]), "p": float(r["day_pnl_usd"])} for r in rows]}
 

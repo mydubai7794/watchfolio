@@ -129,6 +129,61 @@ def test_cash_update_invalid_currency(monkeypatch):
         client.cookies.clear()
 
 
+def test_intraday_hours_window(monkeypatch):
+    """GET /api/portfolio/intraday?hours=24 → 走最近24h窗口查询：window=24h，ts 带日期跨日可读。"""
+    captured = {}
+
+    async def fake_recent(hours):
+        captured["recent_hours"] = hours
+        return [{"ts": datetime(2026, 10, 1, 21, 30, 0), "total_value_usd": 100.5, "day_pnl_usd": 1.5}]
+
+    async def fake_intraday(trade_date):
+        captured["day_trade_date"] = trade_date
+        return []
+
+    monkeypatch.setattr(server.db, "get_portfolio_recent", fake_recent)
+    monkeypatch.setattr(server.db, "get_portfolio_intraday", fake_intraday)
+    _login_as(monkeypatch, "test-token-intraday-24h")
+    try:
+        r = client.get("/api/portfolio/intraday", params={"hours": 24})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["window"] == "24h"
+        assert captured["recent_hours"] == 24
+        # hours>0 不得触发 trade_date 当日分支
+        assert "day_trade_date" not in captured
+        assert "trade_date" not in data
+        # ts 带 %m-%d %H:%M 日期，跨日分时可读
+        assert data["points"][0]["ts"] == "10-01 21:30"
+        assert data["points"][0]["v"] == 100.5
+        assert data["points"][0]["p"] == 1.5
+    finally:
+        client.cookies.clear()
+
+
+def test_intraday_default_day(monkeypatch):
+    """GET /api/portfolio/intraday 不带 hours → 保持原当日逻辑：window=day，ts 仅时分秒。"""
+
+    async def fake_recent(hours):
+        raise AssertionError("hours=0 不应触发 recent 窗口查询")
+
+    async def fake_intraday(trade_date):
+        return [{"ts": datetime(2026, 10, 1, 10, 0, 0), "total_value_usd": 99.0, "day_pnl_usd": 0.5}]
+
+    monkeypatch.setattr(server.db, "get_portfolio_recent", fake_recent)
+    monkeypatch.setattr(server.db, "get_portfolio_intraday", fake_intraday)
+    _login_as(monkeypatch, "test-token-intraday-day")
+    try:
+        r = client.get("/api/portfolio/intraday")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["window"] == "day"
+        assert data["trade_date"]
+        assert data["points"][0]["ts"] == "10:00:00"
+    finally:
+        client.cookies.clear()
+
+
 def test_cash_update_ok(monkeypatch):
     """PUT /api/portfolio/cash 合法币种 → 200，set_cash 收到规整大写币种。"""
     calls = {}

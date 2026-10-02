@@ -28,6 +28,33 @@ class TestUsMarketSession:
         assert pf.us_market_session(datetime(2026, 10, 3, 12, 0, tzinfo=ET))[0] == "closed"
 
 
+class TestShouldFetchExt:
+    """扩展时段 ext 拉取判定：pre/post 恒拉；工作日 closed 的 16:00 后与凌晨 <04:00 也拉
+    （新浪 gb_ 夜间返回当日最后盘后价，保证夜盘时段前端保留盘后价不"倒退"）。"""
+
+    def test_pre_true(self):
+        assert pf.should_fetch_ext("pre", datetime(2026, 10, 1, 8, 0, tzinfo=ET)) is True
+
+    def test_post_true(self):
+        assert pf.should_fetch_ext("post", datetime(2026, 10, 1, 17, 0, tzinfo=ET)) is True
+
+    def test_closed_friday_night_true(self):
+        # 2026-10-02 周五 21:00 美东：当日盘后残留窗口，应拉取
+        assert pf.should_fetch_ext("closed", datetime(2026, 10, 2, 21, 0, tzinfo=ET)) is True
+
+    def test_closed_saturday_false(self):
+        # 2026-10-03 周六：非工作日一律不拉
+        assert pf.should_fetch_ext("closed", datetime(2026, 10, 3, 21, 0, tzinfo=ET)) is False
+
+    def test_closed_wednesday_day_false(self):
+        # 2026-09-30 周三 10:00（盘后已过、凌晨未到的常规 closed 空窗）：不拉
+        assert pf.should_fetch_ext("closed", datetime(2026, 9, 30, 10, 0, tzinfo=ET)) is False
+
+    def test_closed_wednesday_early_morning_false(self):
+        # 2026-09-30 周三 05:00：凌晨盘后残留窗口已结束（>=04:00），不拉
+        assert pf.should_fetch_ext("closed", datetime(2026, 9, 30, 5, 0, tzinfo=ET)) is False
+
+
 TENCENT_RAW = 'v_usMU="200~美光科技~MU.OQ~1065.11~1065.11~0.00~2125925~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~~2026-10-01 09:30:00~0.00~0.00~1083.50~1062.36~USD~1035004~193308777~0.01~12.55~~44.05~";\nv_usSKHY="200~SK海力士~SKHY.OQ~184.15~184.15~0.00~1035004~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~0~~2026-10-01 09:30:00~0.00~0.00~189.14~183.00~USD~1035004~193308777~0.01~12.55~~44.05~";\n'
 
 

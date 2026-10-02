@@ -95,6 +95,22 @@ def us_market_session(now_et: datetime | None = None) -> tuple[str, date, str]:
     return session, now.date(), now.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def should_fetch_ext(session: str, now_et: datetime) -> bool:
+    """判定当前是否应拉取新浪盘前/盘后扩展价（纯函数，供 fetch_quotes 调用）。
+
+    - pre/post 时段：恒拉取；
+    - closed 且工作日的 16:00 后（当日盘后）与凌晨 <04:00（前一交易日盘后残留，
+      简化口径按美东小时判断，不含节假日）：仍拉取——新浪 gb_ 夜间返回当日最后
+      盘后价，保证夜盘时段前端保留盘后价不"倒退"；
+    - 其余 closed（周六/周日、工作日 04:00-16:00 空窗）：不拉取。
+    """
+    if session in ("pre", "post"):
+        return True
+    if session == "closed" and now_et.weekday() < 5:
+        return now_et.hour >= 16 or now_et.hour < 4
+    return False
+
+
 # ---------------------------------------------------------------------------
 # 解析纯函数
 # ---------------------------------------------------------------------------
@@ -474,8 +490,9 @@ async def fetch_quotes(us_symbols: list[str], hk_symbols: list[str],
     else:
         _em_fail_streak += 1
 
-    # 扩展时段合并新浪盘前盘后价（仅美股；港股无扩展时段概念）
-    if session in ("pre", "post") and quotes and us_symbols:
+    # 扩展时段合并新浪盘前盘后价（仅美股；港股无扩展时段概念）。
+    # closed 的晚间/凌晨窗口也拉取：新浪夜间返回当日最后盘后价，避免夜盘价格"倒退"
+    if should_fetch_ext(session, datetime.now(ET_TZ)) and quotes and us_symbols:
         raw2 = await _get_text_resilient(
             SINA_US_URL.format(symbols=",".join("gb_" + s.lower() for s in us_symbols)),
             headers=SINA_HEADERS, proxy_urls=proxy_urls,
