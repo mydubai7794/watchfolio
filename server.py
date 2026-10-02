@@ -1221,9 +1221,18 @@ async def _portfolio_loop():
                 except Exception:
                     pass
             # ---- 一场口径状态机维护（base=场基准 / close=常规收盘定格）----
-            # 夜盘/周末时段：币安 bStocks 代理价（7×24 有价，偏差 0.02%-0.1%）
-            # 覆盖美股现价 → 组合总值 24h 曲线连续；无对应交易对/失败的标的
-            # 自然缺省，维持 19:59 盘后价定格口径
+            # 必须先于夜盘覆盖：状态机吃原始腾讯价（f[3]/f[4] 口径），确保
+            # close_prices 定格不被币安代理价污染（尤其周末 closed+hour>=16 分支
+            # 会用 q["price"] 写定格——若先覆盖，隔夜增量语义错乱）
+            pf.update_session_state(portfolio_session_state, session, et_dt, quotes)
+            fallback_syms = portfolio_session_state.pop("base_fallback", [])
+            if fallback_syms:
+                logger.info("一场口径基准冷启动退化: 非 regular 时段用腾讯昨收充当场基准 "
+                            "(存在隔夜偏差, 09:30 开盘自愈): %s", fallback_syms)
+            # ---- 夜盘/周末代理价覆盖（状态机维护之后，仅影响展示与 tick）----
+            # 币安 bStocks 代理价（7×24 有价，偏差 0.02%-0.1%）覆盖美股现价 →
+            # 组合总值 24h 曲线连续；无对应交易对/失败的标的自然缺省，
+            # 维持 19:59 盘后价定格口径
             overnight_used = 0
             if night_window and us_symbols:
                 overnight = await pf.fetch_overnight_quotes(us_symbols, proxy_urls=proxies)
@@ -1235,13 +1244,6 @@ async def _portfolio_loop():
                         q["ext_price"] = 0.0
                         q["ext_time"] = "夜盘"
                         overnight_used += 1
-            # 状态机纯函数（无 IO）：base_closes/close_prices/base_logged 就地更新；
-            # 冷启动退化标注由 base_fallback 传递，日志在循环侧打（保持函数可离线测试）
-            pf.update_session_state(portfolio_session_state, session, et_dt, quotes)
-            fallback_syms = portfolio_session_state.pop("base_fallback", [])
-            if fallback_syms:
-                logger.info("一场口径基准冷启动退化: 非 regular 时段用腾讯昨收充当场基准 "
-                            "(存在隔夜偏差, 09:30 开盘自愈): %s", fallback_syms)
             base_overrides = {s: b for s, b in portfolio_session_state["base_closes"].items() if b}
             close_overrides = {s: c for s, c in portfolio_session_state["close_prices"].items() if c}
             positions, summary = pf.build_positions(
@@ -1395,6 +1397,7 @@ async def _fund_nav_loop():
 
 _BACKFILL_MAX_AGE_SEC = 1800.0   # 分时 backfill 阈值：库内最新 tick 距今超 30 分钟才补拉一次全量
 _BACKFILL_COOLDOWN_SEC = 14400.0  # backfill 成功后冷却 4h（闭市标的价不变会持续满足条件，幂等补拉限频）
+_BACKFILL_RETRY_SEC = 300.0       # backfill 失败后 5min 重试（防源持续故障时每轮全量放大请求）
 
 
 def backfill_keys(last_map: dict[str, tuple | None], now_dt: datetime,
@@ -1433,6 +1436,7 @@ async def _market_loop():
     logger.info("市场看板采集循环启动")
     yahoo_day: dict[str, dict] = {}     # US30Y/US10Y/VIX 主价缓存（backfill 轮顺带刷新）
     backfill_at: dict[str, float] = {}  # key → 上次 backfill 成功的 monotonic 时刻（4h 冷却）
+    backfill_fail: dict[str, float] = {}  # key → 上次 backfill 失败时刻（5min 重试节流）
     while True:
         interval = 60.0
         try:
@@ -1442,8 +1446,8 @@ async def _market_loop():
             now_mono = time.monotonic()
 
             # ---- 分时 backfill：库内断档的标的并发拉一次全量分时并落库 ----
-            # 冷却 4h：闭市标的价不变（主价快照不写新 tick）会持续满足补拉条件，
-            # 幂等补拉限频（成功才计冷却，失败下轮重试）
+            # 成功冷却 4h（闭市标的价不变持续满足条件，幂等补拉限频）；
+            # 失败 5min 后重试（防源持续故障时每轮全量请求放大）
             last_map: dict[str, tuple | None] = {}
             for key in pf.DAY_MINUTE_KEYS:
                 try:
@@ -1451,7 +1455,8 @@ async def _market_loop():
                 except Exception:
                     last_map[key] = None
             due = [k for k in backfill_keys(last_map, now_utc, pf.DAY_MINUTE_KEYS)
-                   if now_mono - backfill_at.get(k, 0.0) >= _BACKFILL_COOLDOWN_SEC]
+                   if now_mono - backfill_at.get(k, 0.0) >= _BACKFILL_COOLDOWN_SEC
+                   and now_mono - backfill_fail.get(k, 0.0) >= _BACKFILL_RETRY_SEC]
 
             async def _refresh_minutes(key: str) -> None:
                 if key in ("US30Y", "US10Y", "VIX"):
@@ -1470,9 +1475,10 @@ async def _market_loop():
                                                return_exceptions=True)
                 for key, r in zip(due, results):
                     if isinstance(r, Exception):
-                        logger.warning("看板分时 backfill %s 拉取失败(下轮重试): %s", key, r)
+                        logger.warning("看板分时 backfill %s 拉取失败(5min 后重试): %s", key, r)
+                        backfill_fail[key] = now_mono   # 失败短冷却，防持续故障请求放大
                     else:
-                        backfill_at[key] = now_mono   # 成功才计冷却
+                        backfill_at[key] = now_mono   # 成功才计 4h 冷却
 
             # ---- spark 读库（每标的当日全程分时，降采样 ≤60 点）+ 主价快轮组装 ----
             spark_map: dict[str, list[float]] = {}

@@ -585,6 +585,26 @@ class TestUpdateSessionState:
         assert state["base_fallback"] == []   # base_logged 已置位，不再标注
 
 
+class TestNightOverrideAfterStateMachine:
+    """币安夜盘代理价覆盖时序：状态机必须先于覆盖执行（吃原始腾讯价），
+    否则周末 closed+hour>=16 分支会把代理价写进 close_prices 定格，
+    隔夜增量(代理价-被污染定格)语义错乱（edc2e67 评审修复的回归防线）。"""
+
+    Q_RAW = {"AMD": {"price": 615.78, "pre_close": 611.65}}   # 腾讯原始（周六=f[3]保持周五收盘）
+
+    def test_weekend_evening_close_not_polluted_by_bstock(self):
+        # 周六 18:00 closed（hour>=16 分支）：先状态机再覆盖 → 定格=615.78（周五收盘），
+        # 覆盖后的 q["price"]=币安代理价 620.9 只进展示/tick，不回写定格
+        state = {"base_closes": {"AMD": 611.65}, "close_prices": {}, "base_logged": True}
+        quotes = {"AMD": dict(self.Q_RAW["AMD"])}
+        pf.update_session_state(state, "closed",
+                                datetime(2026, 10, 3, 18, 0, tzinfo=ET), quotes)
+        # 夜盘覆盖（server 顺序：状态机之后）
+        quotes["AMD"]["price"] = 620.9
+        assert state["close_prices"]["AMD"] == 615.78   # 定格未被代理价污染
+        assert quotes["AMD"]["price"] == 620.9          # 展示价=代理价
+
+
 class TestStripSpikePoints:
     """intraday 读出口毛刺清洗：孤立单点剔除（首尾不判），双端过滤的读侧兜底。"""
 
