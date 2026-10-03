@@ -22,12 +22,14 @@ v3 盘点已人工闭环全部资金链（11 笔入金、点差 43.32 USD、净�
 CREATE TABLE IF NOT EXISTS ledger_events (
   id INT AUTO_INCREMENT PRIMARY KEY,
   event_date DATE NOT NULL,
-  event_type VARCHAR(20) NOT NULL,  -- inflow/fx/fee/reward/expense/transfer/realized
+  event_type VARCHAR(20) NOT NULL,  -- inflow/fx/fee/reward/expense/transfer/realized/balance
   account VARCHAR(20) NOT NULL,     -- ccb/cmb/cib/za_bank/za_sec/hsbc/zf/external
   channel VARCHAR(40),              -- 建行购汇汇出/汇丰柜台/众安App换U/兴业SWIFT/招行原币/致富/支付宝
   direction CHAR(1) NOT NULL,       -- '+'/'-'
-  amount_ccy VARCHAR(5) NOT NULL,   -- HKD/USD/CNY
-  amount DECIMAL(14,2) NOT NULL,    -- 事件币种金额
+  amount_ccy VARCHAR(5) NOT NULL,   -- HKD/USD/CNY（付出币种）
+  amount DECIMAL(14,2) NOT NULL,    -- 付出金额
+  recv_ccy VARCHAR(5),              -- 换汇类：收到币种
+  recv_amount DECIMAL(14,2),        -- 换汇类：实际得到金额
   usd_equivalent DECIMAL(14,2),     -- USD 等值（inflow/expense/transfer/realized 必填）
   cny_amount DECIMAL(14,2),         -- CNY 口径（inflow 必填；邮件自动入账可 NULL 待补）
   mid_rate DECIMAL(12,6),           -- 换汇类：ECB 当日中间价快照（对币种：HKD→usd_hkd，CNY→usd_cny）
@@ -73,7 +75,7 @@ CREATE TABLE IF NOT EXISTS ledger_fx_rates (
 | 点差合计 | Σ（负点差=收益，如同事代换 −1.80%） | 43.32 USD |
 | 通道排名 | fx 事件 GROUP BY channel，按量加权平均点差 | 汇丰柜台 0.41~0.43% 最贵 |
 | 显性费用 | Σ fee.usd_equivalent | 13.14 USD |
-| 奖励合计 | Σ reward | ≈161.01 USD |
+| 奖励合计 | Σ reward | 163.03 USD（v3 "≈161" 为估算，种子实算 163.03） |
 | 已实现盈亏 | Σ realized.usd_equivalent | −36.68 USD |
 | 消耗 | Σ expense.usd_equivalent（电费） | 36.73 USD |
 | 保活转出 | transfer 至 external 的面值回流 | 17.76 HKD |
@@ -100,18 +102,18 @@ CREATE TABLE IF NOT EXISTS ledger_fx_rates (
 
 ## 7. 种子数据与验证
 
-- v3 全部事件一次性入库约 55 笔（11 inflow + 17 fx[购汇10+同事代换1+账户内6] + ~7 fee + ~13 reward + 1 expense + 3 transfer + 6 realized，明细以 v3 文档第二~七节为准）。
-- 新增 `tests/test_ledger.py`：报表断言必须精确等于 v3 基线（§4 右列全部数字；恒等式容差 ±0.5 CNY 为汇率舍入余量）。
-- 基线 198 → 预计 ~210。
+- v3 全部事件一次性入库 67 笔（11 inflow + 17 fx[购汇10+同事代换1+账户内6] + 6 fee + 19 reward + 1 expense + 3 transfer + 6 realized + 4 balance 余额快照，明细以 v3 文档第二~八节为准）。
+- 新增 `tests/test_ledger.py`：报表断言必须精确等于 v3 基线（§4 右列全部数字；恒等式容差 ±1 CNY 为汇率舍入余量）。
+- 基线 198（2026-10-03 实测，含 2 个时间敏感测试修复）→ 预计 ~216。
 - 部署后线上验证：`GET /api/ledger/report` 与 v3 文档逐项比对。
 
 ## 8. 修数四项（随本模块一并执行，已拍板）
 
 | 对象 | 现值 | 改为 | 依据 |
 |---|---|---|---|
-| cash_accounts HKD | 70.48 | 32.52 | 众安 8/9 月流水闭环 |
+| cash_accounts HKD | 70.48 | **52.72** | 跨账户合并桶：众安 32.52 + 汇丰 20.20（原写 32.52 会少记汇丰留存） |
 | cash_accounts USD | 371.11 | 371.79 | 用户口述实数（145.80+225.99） |
-| holdings NVDA cost_price | 222.4038 | 213.98 | 赠股按 0 成本：(229.80+51.97+0)/1.3169 |
+| holdings NVDA cost_price | 222.4038 | 213.9616 | 赠股按 0 成本：(229.80+51.97+0)/1.3169（v3 写 213.98 为笔误） |
 | sys_config cny_invested | 84560 | 84270 | 口径A（电费为 expense 非投入）；修后须等于 Σ inflow.cny_amount（纳入测试断言） |
 
 ## 9. Skill 交付物

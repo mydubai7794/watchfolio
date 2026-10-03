@@ -230,22 +230,37 @@ class TestApplyTrade:
         assert calls["insert"][0]["trade_no"] == "P741002"
 
     def test_buy_add_existing(self, monkeypatch):
-        """BUY 已有持仓 → update 仅累加数量，成本价/名称/排序保留原值。"""
+        """BUY 已有持仓 → update 累加数量，成本价加权平均摊薄 (10×900+1×229.8)/11=839.0727。"""
         calls = _patch_db(monkeypatch, holdings=[_holding()])
         r = asyncio.run(et.apply_trade(_trade()))
         assert r["status"] == "applied"
         assert calls["upsert"] == []
-        assert calls["update"] == [(5, "NVIDIA CORP", "US", 11.0, 900.0, "USD", 1, 3)]
+        assert calls["update"] == [(5, "NVIDIA CORP", "US", 11.0, 839.0727, "USD", 1, 3)]
         assert calls["deduct"] == [("USD", 229.80)]
 
+    def test_buy_add_existing_zero_cost(self, monkeypatch):
+        """BUY 加仓但原成本为 0 → 以本次成交价充当新成本。"""
+        calls = _patch_db(monkeypatch, holdings=[_holding(cost_price=0)])
+        r = asyncio.run(et.apply_trade(_trade()))
+        assert r["status"] == "applied"
+        assert calls["update"] == [(5, "NVIDIA CORP", "US", 11.0, 229.80, "USD", 1, 3)]
+
     def test_sell_reduce_and_add_cash(self, monkeypatch):
-        """SELL → update 减数量（10→9）+ 负数扣现金即入账。"""
+        """SELL → update 减数量（10→9）+ 负数扣现金即入账；亏损减仓摊薄拉高成本 (9000−229.8)/9=974.4667。"""
         calls = _patch_db(monkeypatch, holdings=[_holding()])
         r = asyncio.run(et.apply_trade(
             _trade(side="SELL", trade_no="P741100", message_id="<m2@x>")))
         assert r["status"] == "applied"
-        assert calls["update"] == [(5, "NVIDIA CORP", "US", 9.0, 900.0, "USD", 1, 3)]
+        assert calls["update"] == [(5, "NVIDIA CORP", "US", 9.0, 974.4667, "USD", 1, 3)]
         assert calls["deduct"] == [("USD", -229.80)]
+
+    def test_sell_profit_lowers_cost(self, monkeypatch):
+        """盈利减仓摊薄压低成本：10 股@100 卖 1 股@200 → (1000−200)/9=88.8889。"""
+        calls = _patch_db(monkeypatch, holdings=[_holding(cost_price=100.0)])
+        r = asyncio.run(et.apply_trade(
+            _trade(side="SELL", quantity=1.0, price=200.0, message_id="<m6@x>")))
+        assert r["status"] == "applied"
+        assert calls["update"] == [(5, "NVIDIA CORP", "US", 9.0, 88.8889, "USD", 1, 3)]
 
     def test_sell_to_zero_keeps_row(self, monkeypatch):
         """SELL 减到 0：保留行（enabled 照旧），数量归零。"""
@@ -321,7 +336,8 @@ class TestPollOnce:
     def test_poll_once_enlarged_window_on_downtime(self, monkeypatch):
         """停机 3 天恢复：回溯窗口放大为 4 天（宁多勿漏，幂等去重兜底）。"""
         calls = _patch_db(monkeypatch, holdings=[],
-                          last_poll="2026-09-29T10:00:00")  # 距今 3 天
+                          last_poll=(datetime.now() - timedelta(days=3))
+                          .isoformat(timespec="seconds"))  # 距今 3 天（动态构造防时间炸弹）
         seen_days = []
 
         def fake_fetch(days=1):
@@ -424,14 +440,14 @@ class TestIsRecent:
     Date 头落在最近 N 天内保留；无日期宁可不处理（防历史交易重复入账）。"""
 
     def test_today_kept(self):
-        assert et._is_recent(datetime(2026, 10, 2, 12, 0), 1) is True
+        assert et._is_recent(datetime.now(), 1) is True
 
     def test_yesterday_kept(self):
         # days=1 → 窗口含昨天整天（since = today-1 的 00:00 起）
-        assert et._is_recent(datetime(2026, 10, 1, 0, 30), 1) is True
+        assert et._is_recent(datetime.now() - timedelta(days=1), 1) is True
 
     def test_older_dropped(self):
-        assert et._is_recent(datetime(2026, 9, 30, 23, 59), 1) is False
+        assert et._is_recent(datetime.now() - timedelta(days=3), 1) is False
 
     def test_no_date_dropped(self):
         assert et._is_recent(None, 1) is False
