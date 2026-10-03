@@ -750,9 +750,11 @@ function renderOverview(d) {
     cpEl.textContent = (cny.pnl < 0 ? '-¥' : (cny.pnl > 0 ? '+¥' : '¥')) + fmt(Math.abs(cny.pnl));
     cpEl.className = 'ov-value ' + cls(cny.pnl);
     document.getElementById('cnySub').textContent =
-      sign(cny.pnl_pct) + fmt(cny.pnl_pct) + '% · 投入 ¥' + fmt(cny.invested, 0);
+      sign(cny.pnl_pct) + fmt(cny.pnl_pct) + '% · 净投入 ¥' + fmt(cny.invested, 0);
     document.getElementById('cnyItem').title =
-      '折算总值 ¥' + fmt(cny.value) + ' · USDCNH ' + fmt(cny.rate, 4);
+      '总投入 ¥' + fmt(cny.invested_gross, 0) + ' − 个人消费 ¥' + fmt(cny.expense, 0) +
+      ' = 净投入 ¥' + fmt(cny.invested, 0) + ' · 折算总值 ¥' + fmt(cny.value) +
+      ' · USDCNH ' + fmt(cny.rate, 4);
   } else {
     cpEl.textContent = '--';
     cpEl.className = 'ov-value';

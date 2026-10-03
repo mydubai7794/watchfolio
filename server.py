@@ -1352,14 +1352,20 @@ async def _portfolio_loop():
             if denom > 0:
                 summary["day_pnl_pct"] = summary["day_pnl"] / denom * 100
             # 人民币累计口径看板：总资产 × USDCNH（看板缓存复用，零新增请求）
-            # 对比 sys_config.cny_invested 投入本金；本金未配置/汇率未就绪 → None
+            # 对比净投入本金 = cny_invested − expense_cny（个人消费折 CNY，
+            # 与记账页 invest_net_cny 同口径）；未配置/汇率未就绪 → None
             try:
                 cny_invested = float(await db.get_config("cny_invested") or 0)
             except (TypeError, ValueError):
                 cny_invested = 0.0
+            try:
+                expense_cny = float(await db.get_config("expense_cny") or 0)
+            except (TypeError, ValueError):
+                expense_cny = 0.0
             usdcnh = next((m.get("price") for m in market_cache
                            if m.get("key") == "USDCNH" and m.get("price")), None)
-            cny_summary = pf.build_cny_summary(summary["total_value"], usdcnh, cny_invested)
+            cny_summary = pf.build_cny_summary(summary["total_value"], usdcnh,
+                                               cny_invested, expense_cny)
             # 一场口径交易日：次日凌晨(<09:30)采样归上一交易场，24h 曲线连续累计不重置
             session_key = pf.trading_session_key(et_dt)
             portfolio_cache = {

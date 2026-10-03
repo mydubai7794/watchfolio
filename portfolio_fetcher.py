@@ -56,6 +56,13 @@ CRYPTO_PING_URL = "https://data-api.binance.vision/api/v3/ping"   # 代理境外
 # QQQM 与 QQQ 为同一基金的两份额类，净值比率恒定 → QQQM 夜盘价 =
 # QQQM 收盘定格 × (QQQ 加密中间价 / QQQ 收盘定格)
 CRYPTO_ALIAS = {"QQQM": "QQQ"}
+# 加密市场数据源·股票行情端点（equity quote，另一套接口）：bookTicker 无对应
+# 交易对的美股标的（如 AMKR/PCG/F，FUSDT 是 Findora 币禁误配）夜盘活价补齐；
+# 仅支持单 symbol 逐只请求（weight=1/只），网关域名境内直连可达（免代理），
+# 双层鉴权：X-Auth-Token（网关）+ X-MBX-APIKEY（业务），两值相同
+EQUITY_QUOTE_URL = "***REMOVED***"
+# key 支持环境变量注入（默认保留现值，部署无需改动）
+EQUITY_API_KEY = os.getenv("EQUITY_API_KEY", "***REMOVED***")
 # twelvedata 接口型美股/港股行情兜底（有 key 不 ban IP；免费 8 credits/min，
 # 批量请求 credits=symbol 数，故单次批量上限 8 并轮换指针覆盖全部持仓）
 TWELVEDATA_QUOTE_URL = "https://api.twelvedata.com/quote"
@@ -843,6 +850,35 @@ def derive_alias_prices(overnight: dict[str, dict], close_map: dict[str, float],
     return added
 
 
+def build_cny_summary(total_value_usd: float | None, usdcnh: float | None,
+                      cny_invested: float | None,
+                      expense_cny: float = 0.0) -> dict | None:
+    """人民币累计口径看板（纯函数）：净投入口径的累计盈亏。
+
+    个人收益直觉口径：当前总资产(USD 含现金) × USDCNH = 折人民币总值，
+    与净投入本金（sys_config.cny_invested 累计投入 − expense_cny 个人消费
+    折 CNY，与记账页 identity.invest_net_cny 同口径）之差即「赚了多少人民币」；
+    汇率取市场看板 USDCNH 项（新浪 fx_susdcnh，复用既有数据流零新增请求）。
+    任一输入缺失（未配置本金/看板未就绪）返回 None，前端降级显示 --。
+    """
+    if not (total_value_usd and usdcnh and cny_invested):
+        return None
+    invested_net = cny_invested - (expense_cny or 0.0)
+    if invested_net <= 0:
+        return None
+    value = total_value_usd * usdcnh
+    pnl = value - invested_net
+    return {
+        "rate": usdcnh,
+        "invested": round(invested_net, 2),
+        "invested_gross": round(cny_invested, 2),
+        "expense": round(expense_cny or 0.0, 2),
+        "value": round(value, 2),
+        "pnl": round(pnl, 2),
+        "pnl_pct": round(pnl / invested_net * 100, 2),
+    }
+
+
 async def fetch_td_session_anchors(us_symbols: list[str]) -> dict[str, dict]:
     """冷启动一场口径锚点恢复：twelvedata quote 批量拉当日 previous_close/close。
 
@@ -969,6 +1005,36 @@ async def fetch_overnight_quotes(us_symbols: list[str],
     if not bmap:
         return {}
     return await fetch_crypto_prices(bmap, proxy_urls)
+
+
+async def fetch_equity_overnight_quotes(symbols: list[str]) -> dict[str, dict]:
+    """股票行情端点补齐：bookTicker 无交易对美股标的的夜盘活价（逐只并发）。
+
+    加密市场数据源 bookTicker 覆盖不到、亦无同标的替代的标的（如 AMKR/PCG/F）
+    经 equity quote 端点逐只补齐（接口仅支持单 symbol，weight=1/只，gather
+    并发一轮一次往返），取买卖一中间价 (bid+ask)/2 与 bookTicker 同口径；
+    网关域名境内直连可达（免代理）。失败/零价/symbol 不符的标的自然缺省，
+    维持盘后价定格口径。返回 {美股代码: {"price": 中间价}}。
+    """
+    if not symbols:
+        return {}
+    headers = {"X-Auth-Token": EQUITY_API_KEY, "X-MBX-APIKEY": EQUITY_API_KEY}
+
+    async def _one(client: httpx.AsyncClient, sym: str) -> tuple[str, dict | None]:
+        try:
+            resp = await client.get(EQUITY_QUOTE_URL, params={"symbol": sym})
+            data = resp.json()
+            mid = (Decimal(str(data.get("bidPrice", "0")))
+                   + Decimal(str(data.get("askPrice", "0")))) / 2
+            if data.get("symbol") == sym and mid > 0:
+                return sym, {"price": float(mid)}
+        except Exception:
+            pass
+        return sym, None
+
+    async with httpx.AsyncClient(timeout=10, headers=headers) as client:
+        pairs = await asyncio.gather(*(_one(client, s) for s in symbols))
+    return {s: q for s, q in pairs if q}
 
 
 async def fetch_fx_usdhkd(proxy_urls: list[str] | None = None) -> tuple[float, bool]:

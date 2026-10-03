@@ -850,6 +850,87 @@ class TestFetchOvernightQuotes:
             == {"AMD": {"price": 620.06}}
 
 
+class TestFetchEquityOvernightQuotes:
+    """股票行情端点补齐：无交易对标的（AMKR/PCG/F）夜盘价，中间价口径与容错。"""
+
+    def test_equity_mid_price_per_symbol(self, monkeypatch):
+        """逐只单 symbol 请求，取 (bid+ask)/2 中间价（与 bookTicker 同口径）。"""
+        calls = []
+
+        async def fake_client_get(self, url, **kw):
+            calls.append(kw.get("params", {}).get("symbol"))
+
+            class R:
+                def json(self):
+                    return {"symbol": kw["params"]["symbol"],
+                            "bidPrice": "53.92", "askPrice": "54.60",
+                            "bidSize": 100, "askSize": 100}
+            return R()
+
+        monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_client_get)
+        out = asyncio.run(pf.fetch_equity_overnight_quotes(["AMKR", "F", "PCG"]))
+        assert sorted(calls) == ["AMKR", "F", "PCG"]   # 逐只补齐缺口标的
+        assert out == {"AMKR": {"price": pytest.approx(54.26)},
+                       "F": {"price": pytest.approx(54.26)},
+                       "PCG": {"price": pytest.approx(54.26)}}
+
+    def test_equity_bad_rows_skipped(self, monkeypatch):
+        """异常/零价/symbol 不符的标的跳过，自然缺省维持定格口径。"""
+
+        async def fake_client_get(self, url, **kw):
+            sym = kw["params"]["symbol"]
+
+            class R:
+                def json(self):
+                    if sym == "AMKR":
+                        return {"symbol": "AMKR", "bidPrice": "0", "askPrice": "0"}
+                    if sym == "F":
+                        return {"symbol": "OTHER", "bidPrice": "12", "askPrice": "13"}
+                    raise ValueError("gateway error")
+
+            return R()
+
+        monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_client_get)
+        out = asyncio.run(pf.fetch_equity_overnight_quotes(["AMKR", "F", "PCG"]))
+        assert out == {}
+
+    def test_equity_empty_symbols_no_request(self, monkeypatch):
+        """缺口为空 → 不发请求。"""
+        async def fake_client_get(self, url, **kw):
+            raise AssertionError("空列表不应发起请求")
+        monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_client_get)
+        assert asyncio.run(pf.fetch_equity_overnight_quotes([])) == {}
+
+
+class TestBuildCnySummary:
+    """人民币累计口径看板：总资产 × USDCNH 对比净投入本金，缺输入降级 None。"""
+
+    def test_cny_summary_math(self):
+        """value=总资产×汇率；pnl=value-本金；pct 以本金为分母。"""
+        out = pf.build_cny_summary(12000.0, 7.0, 84850.0)
+        assert out == {"rate": 7.0, "invested": 84850.0,
+                       "invested_gross": 84850.0, "expense": 0.0,
+                       "value": 84000.0, "pnl": -850.0,
+                       "pnl_pct": pytest.approx(-1.0, abs=0.01)}
+
+    def test_cny_summary_net_invested(self):
+        """净投入口径：消费从本金扣除，pnl/pct 以净投入为分母（与记账页一致）。"""
+        out = pf.build_cny_summary(12000.0, 7.0, 84850.0, 246.32)
+        assert out["invested"] == 84603.68
+        assert out["invested_gross"] == 84850.0
+        assert out["expense"] == 246.32
+        assert out["pnl"] == pytest.approx(84000.0 - 84603.68, abs=0.01)
+        assert out["pnl_pct"] == pytest.approx(-603.68 / 84603.68 * 100, abs=0.02)
+
+    def test_cny_summary_missing_inputs(self):
+        """汇率未就绪/本金未配置/总资产为空/净投入非正 → None（前端降级 --）。"""
+        assert pf.build_cny_summary(12000.0, None, 84850.0) is None
+        assert pf.build_cny_summary(12000.0, 7.0, None) is None
+        assert pf.build_cny_summary(12000.0, 7.0, 0.0) is None
+        assert pf.build_cny_summary(None, 7.0, 84850.0) is None
+        assert pf.build_cny_summary(12000.0, 7.0, 100.0, 100.0) is None
+
+
 class TestTwelveDataFallback:
     """twelvedata 接口型兜底（替换东财 ulist）：批量 ≤8 只轮换覆盖、字段映射。"""
 
