@@ -152,3 +152,42 @@ class TestEcb:
     def test_parse_ecb_bad_payload(self):
         assert ledger.parse_ecb_payload({}) == []
         assert ledger.parse_ecb_payload({"rates": {"d1": {}}}) == []
+
+
+class TestLedgerFxLoop:
+    def test_next_run_before_2235(self):
+        import server
+        assert server._next_ledger_fx_run(datetime(2026, 10, 3, 10, 0)) == \
+               datetime(2026, 10, 3, 22, 35)
+
+    def test_next_run_after_2235(self):
+        import server
+        assert server._next_ledger_fx_run(datetime(2026, 10, 3, 23, 0)) == \
+               datetime(2026, 10, 4, 22, 35)
+
+    def test_sync_once_backfills(self, monkeypatch):
+        """循环体：库空 → 从 ledger 起点一次区间拉取 → 逐条 upsert。"""
+        import server
+        calls = {"fetch": 0, "upsert": 0}
+
+        async def fake_fetch(start, end, proxy_urls=None):
+            calls["fetch"] += 1
+            assert start == server.ledger.LEDGER_FX_START  # 空库从起点回填
+            return [("2026-10-02", 6.7044, 7.8463)]
+
+        async def fake_upsert(d, cny, hkd):
+            calls["upsert"] += 1
+            assert (d, cny, hkd) == ("2026-10-02", 6.7044, 7.8463)
+
+        async def fake_for_date(d):
+            return None
+
+        async def fake_proxies():
+            return []
+
+        monkeypatch.setattr(server.ledger, "fetch_ecb_rates", fake_fetch)
+        monkeypatch.setattr(server.db, "upsert_ledger_fx_rate", fake_upsert)
+        monkeypatch.setattr(server.db, "get_ledger_fx_for_date", fake_for_date)
+        monkeypatch.setattr(server.db, "get_alive_proxies", fake_proxies)
+        run(server._ledger_fx_sync_once())
+        assert calls == {"fetch": 1, "upsert": 1}

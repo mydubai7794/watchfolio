@@ -9,7 +9,7 @@ import random
 import re
 import secrets
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date
 from typing import Optional
 
 from contextlib import asynccontextmanager
@@ -22,6 +22,7 @@ from pydantic import BaseModel
 import database as db
 import email_trader as et
 import fetcher
+import ledger
 import portfolio_fetcher as pf
 import scorer
 from config import (
@@ -150,6 +151,10 @@ async def lifespan(app: FastAPI):
     global email_task
     email_task = asyncio.create_task(_email_loop())
 
+    # ECB 参考价每日补拉（记账模块汇率缓存）
+    global ledger_fx_task
+    ledger_fx_task = asyncio.create_task(_ledger_fx_loop())
+
     yield
     global monitor_running
     monitor_running = False
@@ -165,6 +170,8 @@ async def lifespan(app: FastAPI):
         crypto_probe_task.cancel()
     if email_task:
         email_task.cancel()
+    if ledger_fx_task:
+        ledger_fx_task.cancel()
     if candidate_refresh_task:
         candidate_refresh_task.cancel()
     if daily_task:
@@ -1238,7 +1245,13 @@ async def _portfolio_loop():
                                            proxy_urls=proxies) if (us_symbols or hk_symbols) else {}
             if quotes:
                 try:
-                    await db.update_holding_names({s: q["name"] for s, q in quotes.items() if q.get("name")})
+                    # 仅回填 name 为空的持仓（行情接口取名）；用户手动改过
+                    # 名称的不再覆盖，保留自定义名称
+                    await db.update_holding_names({
+                        h["symbol"]: quotes[h["symbol"]]["name"]
+                        for h in holdings
+                        if not (h.get("name") or "").strip()
+                        and quotes.get(h["symbol"], {}).get("name")})
                 except Exception:
                     pass
             # ---- 一场口径锚点恢复（冷启动，先于状态机）----
@@ -1302,6 +1315,12 @@ async def _portfolio_loop():
                 # 替代标的(QQQ)涨跌幅——把加密价的百分点映射过来得最新净值
                 overnight.update(pf.derive_alias_prices(
                     overnight, portfolio_session_state.get("close_prices", {}), us_symbols))
+                # bookTicker 无交易对且别名推导仍缺的标的（如 AMKR/PCG/F），
+                # 经加密市场数据源股票行情端点逐只补齐（单 symbol weight=1，
+                # 网关境内直连免代理）；失败标的自然缺省，维持定格口径
+                equity_gap = [s for s in us_symbols if s not in overnight]
+                if equity_gap:
+                    overnight.update(await pf.fetch_equity_overnight_quotes(equity_gap))
                 for sym, oq in overnight.items():
                     q = quotes.get(sym)
                     if q and oq.get("price"):
@@ -1332,6 +1351,15 @@ async def _portfolio_loop():
             denom = summary["base_value"] + cash_usd
             if denom > 0:
                 summary["day_pnl_pct"] = summary["day_pnl"] / denom * 100
+            # 人民币累计口径看板：总资产 × USDCNH（看板缓存复用，零新增请求）
+            # 对比 sys_config.cny_invested 投入本金；本金未配置/汇率未就绪 → None
+            try:
+                cny_invested = float(await db.get_config("cny_invested") or 0)
+            except (TypeError, ValueError):
+                cny_invested = 0.0
+            usdcnh = next((m.get("price") for m in market_cache
+                           if m.get("key") == "USDCNH" and m.get("price")), None)
+            cny_summary = pf.build_cny_summary(summary["total_value"], usdcnh, cny_invested)
             # 一场口径交易日：次日凌晨(<09:30)采样归上一交易场，24h 曲线连续累计不重置
             session_key = pf.trading_session_key(et_dt)
             portfolio_cache = {
@@ -1355,6 +1383,7 @@ async def _portfolio_loop():
                 "fx_usdhkd": fx_state["rate"],
                 "fx_fallback": fx_state["fallback"],
                 "fx_time": fx_state["time"],
+                "cny": cny_summary,
                 "positions": positions,
                 "summary": summary,
                 "cash": cash_rows,
@@ -1420,6 +1449,47 @@ def _next_fund_nav_run(now: datetime) -> datetime:
     targets = [now.replace(hour=14, minute=0, second=0, microsecond=0),
                now.replace(hour=20, minute=0, second=0, microsecond=0)]
     return next((t for t in targets if t > now), targets[0] + timedelta(days=1))
+
+
+def _next_ledger_fx_run(now: datetime) -> datetime:
+    """ECB 参考价下次拉取时刻：每日 22:35（ECB 定盘约 22:00 北京时间后）。"""
+    target = now.replace(hour=22, minute=35, second=0, microsecond=0)
+    if now >= target:
+        target = (now + timedelta(days=1)).replace(hour=22, minute=35, second=0, microsecond=0)
+    return target
+
+
+async def _ledger_fx_sync_once() -> int:
+    """补齐 ECB 参考价缓存：从 ledger 起点或库内最新日期次日到今天，一次区间请求。"""
+    last = await db.get_ledger_fx_for_date(date.today())
+    start = (date.fromisoformat(last["rate_date"]) + timedelta(days=1)).isoformat() \
+        if last else ledger.LEDGER_FX_START
+    end = date.today().isoformat()
+    if start > end:
+        return 0
+    proxies = [r["url"] for r in await db.get_alive_proxies()]
+    rows = await ledger.fetch_ecb_rates(start, end, proxy_urls=proxies)
+    for d, cny, hkd in rows:
+        await db.upsert_ledger_fx_rate(d, cny, hkd)
+    if rows:
+        logger.info("ECB 参考价缓存 +%d 条(%s..%s)", len(rows), rows[0][0], rows[-1][0])
+    return len(rows)
+
+
+async def _ledger_fx_loop():
+    """每日 22:35 补拉 ECB 参考价；失败次日再试（不做短周期重试放大请求）。"""
+    logger.info("ECB 参考价循环启动 (每日 22:35)")
+    while True:
+        try:
+            delay = (_next_ledger_fx_run(datetime.now()) - datetime.now()).total_seconds()
+            await asyncio.sleep(max(1, delay))
+            await _ledger_fx_sync_once()
+        except asyncio.CancelledError:
+            logger.info("ECB 参考价循环已停止")
+            break
+        except Exception as e:
+            logger.warning("ECB 参考价同步失败(次日重试): %s", e)
+            await asyncio.sleep(3600)
 
 
 async def _refresh_fx_spark(proxies: list[str]) -> None:
