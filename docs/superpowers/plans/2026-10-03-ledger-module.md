@@ -453,14 +453,14 @@ python3 -c "
 from ledger_seed import SEED_EVENTS
 refs = [e['ref_no'] for e in SEED_EVENTS]
 assert len(refs) == len(set(refs)) == 67, len(refs)
-assert sum(e['cny_amount'] for e in SEED_EVENTS if e['event_type']=='inflow') == 84270
+assert sum(e['cny_amount'] for e in SEED_EVENTS if e['event_type']=='inflow') == 84850
 usd_in = sum(e['usd_equivalent'] for e in SEED_EVENTS if e['event_type']=='inflow')
 assert abs(usd_in - 12478.27) < 0.01, usd_in
 fee = sum(e['usd_equivalent'] for e in SEED_EVENTS if e['event_type']=='fee')
 assert abs(fee - 13.14) < 0.01, fee
 real = sum(e['usd_equivalent'] for e in SEED_EVENTS if e['event_type']=='realized')
 assert abs(real - (-36.68)) < 0.01, real
-print('种子自检通过: 67笔/投入84270/USD入账%.2f/费用%.2f/已实现%.2f' % (usd_in, fee, real))"
+print('种子自检通过: 67笔/投入84850/USD入账%.2f/费用%.2f/已实现%.2f' % (usd_in, fee, real))"
 ```
 预期输出：`种子自检通过: 67笔/投入84270/USD入账12478.27/费用13.14/已实现-36.68`
 
@@ -495,9 +495,9 @@ class TestBuildReport:
     def test_v3_baselines(self):
         r = self._report()
         s = r["summary"]
-        assert s["total_cny_invested"] == 84270.0
+        assert s["total_cny_invested"] == 84850.0
         assert abs(s["usd_in"] - 12478.27) < 0.05
-        assert abs(s["avg_cost"] - 6.7533) < 0.0005          # v3: 6.7533
+        assert abs(s["avg_cost"] - 6.7998) < 0.0005          # 勘误后: 84850/12478.27
         assert abs(s["fx_loss_usd"] - 43.32) < 0.15           # v3: 43.32(购汇30.19+账户内13.13)
         assert abs(s["fee_usd"] - 13.14) < 0.05
         assert abs(s["reward_usd"] - 163.03) < 0.5            # v3估算161,种子实算163.03
@@ -511,9 +511,9 @@ class TestBuildReport:
         i = r["identity"]
         assert abs(i["gain_usd"] - 1210.44) < 0.5             # v3: 1210.38
         assert abs(i["gain_pct"] - 9.73) < 0.05
-        assert abs(i["fx_loss_cny"] - (-589.0)) < 1.5         # v3: -589.05
+        assert abs(i["fx_loss_cny"] - (-1169.5)) < 1.5        # 勘误后(v3的-589基于错误avg)
         assert abs(i["expense_cny"] - 246.4) < 0.5
-        assert abs(i["net_cny"] - 7281.54) < 0.5              # 主口径精确
+        assert abs(i["net_cny"] - 6701.54) < 0.5              # 主口径精确(勘误后)
         assert abs(i["net_pct"] - 8.64) < 0.05
         assert abs(i["identity_check_cny"] - i["net_cny"]) < 1.0  # 分解式闭环±1
 
@@ -968,8 +968,8 @@ class TestLedgerApi:
             assert r.status_code == 200
             data = r.json()
             assert data["ok"] is True
-            assert abs(data["summary"]["total_cny_invested"] - 84270) < 0.01
-            assert abs(data["identity"]["net_cny"] - 7281.54) < 0.5
+            assert abs(data["summary"]["total_cny_invested"] - 84850) < 0.01
+            assert abs(data["identity"]["net_cny"] - 6701.54) < 0.5
         finally:
             client.cookies.clear()
 ```
@@ -1262,7 +1262,7 @@ ssh root@***REMOVED*** "mysql -h127.0.0.1 -P3914 -udubai -p'***REMOVED***' qdii 
 UPDATE cash_accounts SET amount=52.72 WHERE currency='HKD';
 UPDATE cash_accounts SET amount=371.79 WHERE currency='USD';
 UPDATE holdings SET cost_price=213.9616 WHERE symbol='NVDA' AND cost_price<>213.9616;
-UPDATE sys_config SET value='84270' WHERE \\\`key\\\`='cny_invested';
+UPDATE sys_config SET value='84850' WHERE \\\`key\\\`='cny_invested';
 SELECT * FROM cash_accounts; SELECT symbol,cost_price FROM holdings WHERE symbol='NVDA';\""
 ```
 预期：HKD 52.72 / USD 371.79 / NVDA 213.9616 / cny_invested 84270
@@ -1279,7 +1279,7 @@ ssh root@***REMOVED*** "cd /opt/qdii && python3 ledger_seed.py && systemctl rest
 ```bash
 ssh root@***REMOVED*** "TOKEN=\$(mysql -h127.0.0.1 -P3914 -udubai -p'***REMOVED***' qdii -N -e \"SELECT token FROM sessions ORDER BY created_at DESC LIMIT 1\"); curl -s -H \"Cookie: session_token=\$TOKEN\" http://127.0.0.1:8888/api/ledger/report | python3 -m json.tool | head -40"
 ```
-核对：total_cny_invested=84270 / avg_cost≈6.7533 / fx_loss_usd≈43.32 / identity.net_cny≈7281.54（±1，USDCNH 行情浮动）/ balances.diff HKD、USD 均 ✓（待 portfolio 循环下一轮把总资产刷新后恒等式精确）。
+核对：total_cny_invested=84850 / avg_cost≈6.7998 / fx_loss_usd≈43.32 / identity.net_cny≈6701.54（±1，USDCNH 行情浮动）/ balances.diff HKD、USD 均 ✓（待 portfolio 循环下一轮把总资产刷新后恒等式精确）。
 
 ---
 
@@ -1290,7 +1290,7 @@ ssh root@***REMOVED*** "TOKEN=\$(mysql -h127.0.0.1 -P3914 -udubai -p'***REMOVED*
 - Modify: `AGENTS.md`
 
 - [ ] **Step 1: 加载 skill-creator 写 skill**——内容：触发词（处理月结单/录入结单/ledger ingest）；SOP：PDF→`python3 -c "import fitz;..."` pymupdf 提取 → 按 v3 版式规则表解析新事件（ZA/HSBC INVSTM0011/HSBC One IPSSTM0007/致富）→ `SELECT MAX(event_date)` 防重 → curl POST `/api/ledger/events`（token 取 sessions 表）→ GET report 回归核对（恒等式 ±1 / 对账位 diff）→ 输出差异清单待确认；附 ref_no 规则 `{YYYYMM}-{account}-{seq}` 与 pending 补全流程。
-- [ ] **Step 2: AGENTS.md 更新**——模块结构表加 `ledger.py / ledger_seed.py` 行；「关键口径契约」加 ledger 恒等式一行（口径=盘点 v3，HKD→USD 7.846 静态，cny_invested=84270 口径A）；测试基线数更新。
+- [ ] **Step 2: AGENTS.md 更新**——模块结构表加 `ledger.py / ledger_seed.py` 行；「关键口径契约」加 ledger 恒等式一行（口径=盘点 v3，HKD→USD 7.846 静态，cny_invested=84850 全额口径（勘误：84,270 系电费双重扣减））；测试基线数更新。
 - [ ] **Step 3: 提交**
 
 ```bash
