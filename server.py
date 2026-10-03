@@ -1952,6 +1952,69 @@ async def holding_delete(holding_id: int):
 
 
 # ---------------------------------------------------------------------------
+# Ledger (记账事件流)
+# ---------------------------------------------------------------------------
+
+_LEDGER_TYPES = {"inflow", "fx", "fee", "reward", "expense", "transfer", "realized", "balance"}
+_LEDGER_ACCOUNTS = {"za_bank", "za_sec", "hsbc", "zf", "ccb", "cmb", "cib", "external"}
+_LEDGER_CCYS = {"CNY", "HKD", "USD"}
+
+
+@app.post("/api/ledger/events")
+async def ledger_events_post(data: dict):
+    """批量幂等入库记账事件（AI 唯一录入通道；同 ref_no=覆盖更新）。"""
+    events = data.get("events") or []
+    if not events or not isinstance(events, list):
+        return JSONResponse(status_code=400, content={"ok": False, "message": "events 非空列表"})
+    for ev in events:
+        if ev.get("event_type") not in _LEDGER_TYPES:
+            return JSONResponse(status_code=400,
+                                content={"ok": False, "message": f"非法 event_type: {ev.get('event_type')}"})
+        if ev.get("account") not in _LEDGER_ACCOUNTS:
+            return JSONResponse(status_code=400,
+                                content={"ok": False, "message": f"非法 account: {ev.get('account')}"})
+        if ev.get("direction") not in ("+", "-"):
+            return JSONResponse(status_code=400,
+                                content={"ok": False, "message": "direction 仅 + 或 -"})
+        if ev.get("amount_ccy") not in _LEDGER_CCYS:
+            return JSONResponse(status_code=400,
+                                content={"ok": False, "message": "amount_ccy 仅 CNY/HKD/USD"})
+        if not ev.get("ref_no") or not ev.get("event_date"):
+            return JSONResponse(status_code=400, content={"ok": False, "message": "ref_no/event_date 必填"})
+    for ev in events:
+        await db.upsert_ledger_event(
+            event_date=ev["event_date"], event_type=ev["event_type"],
+            account=ev["account"], channel=ev.get("channel"),
+            direction=ev["direction"], amount_ccy=ev["amount_ccy"],
+            amount=ev["amount"], recv_ccy=ev.get("recv_ccy"),
+            recv_amount=ev.get("recv_amount"), usd_equivalent=ev.get("usd_equivalent"),
+            cny_amount=ev.get("cny_amount"), mid_rate=ev.get("mid_rate"),
+            note=ev.get("note"), ref_no=ev["ref_no"])
+    return {"ok": True, "applied": len(events)}
+
+
+@app.get("/api/ledger/events")
+async def ledger_events_get(event_type: Optional[str] = Query(None, alias="type"),
+                            year: Optional[int] = Query(None),
+                            account: Optional[str] = Query(None)):
+    return {"ok": True, "events": await db.get_ledger_events(event_type, year, account)}
+
+
+@app.get("/api/ledger/report")
+async def ledger_report():
+    """全套记账报表（纯实时计算，口径=盘点v3勘误版）。"""
+    events = await db.get_ledger_events()
+    total_assets = await db.get_latest_portfolio_value()
+    cash = await db.get_cash_accounts()
+    usdcnh = next((m.get("price") for m in market_cache
+                   if m.get("key") == "USDCNH" and m.get("price")), None)
+    report = ledger.build_report(events, total_assets_usd=total_assets,
+                                 usdcnh=usdcnh, cash_accounts=cash)
+    report["ok"] = True
+    return report
+
+
+# ---------------------------------------------------------------------------
 # Static files & root redirect
 # ---------------------------------------------------------------------------
 

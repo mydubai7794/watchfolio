@@ -191,3 +191,82 @@ class TestLedgerFxLoop:
         monkeypatch.setattr(server.db, "get_alive_proxies", fake_proxies)
         run(server._ledger_fx_sync_once())
         assert calls == {"fetch": 1, "upsert": 1}
+
+
+# ---------------------------------------------------------------------------
+# API 端点（TestClient 不用 with 上下文避免 lifespan，同 test_server_auth 模式）
+# ---------------------------------------------------------------------------
+import time
+
+from fastapi.testclient import TestClient
+
+import server
+
+client = TestClient(server.app)
+
+
+def _fake_valid_session(token: str = "tester"):
+    async def fake_get_session(t):
+        return {"username": token, "expires": time.time() + 3600}
+    return fake_get_session
+
+
+class TestLedgerApi:
+    def test_post_events_upsert(self, monkeypatch):
+        upserted = []
+
+        async def fake_upsert(**ev):
+            upserted.append(ev)
+            return 1
+
+        monkeypatch.setattr(server.db, "upsert_ledger_event", fake_upsert)
+        monkeypatch.setattr(server.db, "get_session", _fake_valid_session())
+        client.cookies.set("session_token", "t-ledger-1")
+        try:
+            r = client.post("/api/ledger/events", json={"events": [
+                {"event_date": "2026-10-05", "event_type": "inflow", "account": "hsbc",
+                 "direction": "+", "amount_ccy": "USD", "amount": 100, "ref_no": "TEST-1",
+                 "usd_equivalent": 100, "cny_amount": 680}]})
+            assert r.status_code == 200 and r.json()["ok"] is True
+            assert r.json()["applied"] == 1
+            assert upserted[0]["ref_no"] == "TEST-1"
+        finally:
+            client.cookies.clear()
+
+    def test_post_events_bad_type_rejected(self, monkeypatch):
+        monkeypatch.setattr(server.db, "get_session", _fake_valid_session())
+        client.cookies.set("session_token", "t-ledger-2")
+        try:
+            r = client.post("/api/ledger/events", json={"events": [
+                {"event_date": "2026-10-05", "event_type": "hack", "account": "hsbc",
+                 "direction": "+", "amount_ccy": "USD", "amount": 1, "ref_no": "TEST-2"}]})
+            assert r.status_code == 400
+        finally:
+            client.cookies.clear()
+
+    def test_report_endpoint(self, monkeypatch):
+        async def fake_events(event_type=None, year=None, account=None):
+            return SEED_EVENTS
+
+        async def fake_value():
+            return 13651.98
+
+        async def fake_cash():
+            return [{"currency": "HKD", "amount": 52.72}, {"currency": "USD", "amount": 371.79}]
+
+        monkeypatch.setattr(server.db, "get_ledger_events", fake_events)
+        monkeypatch.setattr(server.db, "get_latest_portfolio_value", fake_value)
+        monkeypatch.setattr(server.db, "get_cash_accounts", fake_cash)
+        monkeypatch.setattr(server.db, "get_session", _fake_valid_session())
+        monkeypatch.setattr(server, "market_cache",
+                            [{"key": "USDCNH", "price": 6.7061}], raising=False)
+        client.cookies.set("session_token", "t-ledger-3")
+        try:
+            r = client.get("/api/ledger/report")
+            assert r.status_code == 200
+            data = r.json()
+            assert data["ok"] is True
+            assert abs(data["summary"]["total_cny_invested"] - 84850) < 0.01
+            assert abs(data["identity"]["net_cny"] - 6701.54) < 0.5
+        finally:
+            client.cookies.clear()
