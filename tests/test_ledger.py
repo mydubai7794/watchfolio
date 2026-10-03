@@ -99,13 +99,15 @@ class TestBuildReport:
     def test_v3_identity(self):
         r = self._report()
         i = r["identity"]
-        assert abs(i["gain_usd"] - 1210.44) < 0.5             # 增值与投入口径无关
+        assert abs(i["gain_usd"] - 1210.44) < 0.5             # 增值(消耗回流口径)
         assert abs(i["gain_pct"] - 9.73) < 0.05
         assert abs(i["fx_loss_cny"] - (-1169.5)) < 1.5        # 勘误后(v3的-589基于错误avg)
         assert abs(i["expense_cny"] - 246.4) < 0.5
-        assert abs(i["net_cny"] - 6701.54) < 0.5              # 勘误后主口径精确
-        assert abs(i["net_pct"] - 7.90) < 0.05
-        assert abs(i["identity_check_cny"] - i["net_cny"]) < 1.0  # 分解式闭环±1
+        assert abs(i["invest_net_cny"] - 84603.68) < 0.5      # 净投入=84850-电费246.32
+        assert abs(i["net_cny"] - 6947.86) < 0.5              # 净投入口径(消耗从本金扣除)
+        assert abs(i["net_pct"] - 8.21) < 0.05
+        assert abs(i["gain_cny"] - 8117.33) < 0.5             # 增值CNY=两项分解之一
+        assert abs(i["identity_check_cny"] - i["net_cny"]) < 1.0  # 净=增值+汇损闭环±1
 
     def test_no_usdcnh_degrades(self):
         r = self._report(usdcnh=None)
@@ -267,6 +269,6 @@ class TestLedgerApi:
             data = r.json()
             assert data["ok"] is True
             assert abs(data["summary"]["total_cny_invested"] - 84850) < 0.01
-            assert abs(data["identity"]["net_cny"] - 6701.54) < 0.5
+            assert abs(data["identity"]["net_cny"] - 6947.86) < 0.5
         finally:
             client.cookies.clear()

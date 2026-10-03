@@ -42,7 +42,7 @@ button { font-family: inherit; }
 .card-note { font-size: 11px; color: var(--txt3); }
 
 /* 净盈亏主卡：大数字 + 三段分解 */
-.hero { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr; gap: 24px; padding: 24px; }
+.hero { display: grid; grid-template-columns: 1.4fr 1fr 1fr; gap: 24px; padding: 24px; }
 .hero-item + .hero-item { border-left: 1px solid var(--bg); padding-left: 24px; }
 .hero-label { font-size: 12px; color: var(--txt2); }
 .hero-display { font-size: 32px; font-weight: 600; line-height: 1.15; letter-spacing: .2px; margin-top: 6px; }
@@ -110,22 +110,17 @@ select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); outline: none; }
       <div class="hero-item">
         <div class="hero-label">净盈亏 (CNY) <span id="pendingTag" style="color:var(--accent)"></span></div>
         <div class="hero-display" id="netCny">--</div>
-        <div class="hero-sub" id="netSub">恒等式：净盈亏 = 总资产×USDCNH − 总投入</div>
+        <div class="hero-sub" id="netSub">净盈亏 = 增值 + 汇损</div>
       </div>
       <div class="hero-item">
-        <div class="hero-label">增值 (USD)</div>
-        <div class="hero-display num-up" id="gainUsd">--</div>
+        <div class="hero-label">增值 (CNY)</div>
+        <div class="hero-display num-up" id="gainCny">--</div>
         <div class="hero-sub" id="gainSub">--</div>
       </div>
       <div class="hero-item">
         <div class="hero-label">汇损 (CNY)</div>
         <div class="hero-display num-down" id="fxLossCny">--</div>
         <div class="hero-sub" id="fxSub">--</div>
-      </div>
-      <div class="hero-item">
-        <div class="hero-label">消耗 (CNY)</div>
-        <div class="hero-display" id="expenseCny">--</div>
-        <div class="hero-sub">生活缴费类支出</div>
       </div>
     </div>
   </section>
@@ -197,27 +192,29 @@ async function loadReport() {
       net.textContent = (i.net_cny >= 0 ? '+' : '') + fmt(i.net_cny, 0);
       net.className = 'hero-display ' + (i.net_cny >= 0 ? 'num-up' : 'num-down');
       document.getElementById('netSub').textContent =
-        `+${fmt(i.net_pct)}% · 投入 ¥${fmt(s.total_cny_invested, 0)} · 恒等式校验 ${Math.abs(i.identity_check_cny - i.net_cny) < 1 ? '通过 ✓' : '偏差 ' + fmt(i.identity_check_cny - i.net_cny)}`;
-      document.getElementById('gainUsd').textContent = '+' + fmt(i.gain_usd);
-      document.getElementById('gainSub').textContent = `+${fmt(i.gain_pct)}% vs 净投入本金`;
+        `+${fmt(i.net_pct)}% · 净投入 ¥${fmt(i.invest_net_cny, 0)}（¥${fmt(s.total_cny_invested, 0)} − 电费 ¥${fmt(i.expense_cny, 0)}） · 恒等式校验 ${Math.abs(i.identity_check_cny - i.net_cny) < 1 ? '通过 ✓' : '偏差 ' + fmt(i.identity_check_cny - i.net_cny)}`;
+      const g = document.getElementById('gainCny');
+      g.textContent = '+' + fmt(i.gain_cny, 0);
+      g.className = 'hero-display num-up';
+      document.getElementById('gainSub').textContent =
+        `+$${fmt(i.gain_usd)}（+${fmt(i.gain_pct)}%）· 含奖励 $${fmt(s.reward_usd)}、已实现 $${fmt(s.realized_usd)}、点差 −$${fmt(s.fx_loss_usd)}、费用 −$${fmt(s.fee_usd)}`;
       const fx = document.getElementById('fxLossCny');
       fx.textContent = fmt(i.fx_loss_cny, 0);
       fx.className = 'hero-display ' + cls(i.fx_loss_cny);
       document.getElementById('fxSub').textContent =
-        `USDCNH ${i.usdcnh} vs 均价 ${s.avg_cost}（全额本金口径）`;
-      document.getElementById('expenseCny').textContent = fmt(i.expense_cny, 0);
+        `USDCNH ${i.usdcnh} vs 加权成本 ${s.avg_cost} · 本金 $${fmt(s.usd_in)} 全额口径`;
     } else {
       document.getElementById('netSub').textContent = '行情缓存暂无 USDCNH，稍后自动恢复';
     }
     const kvs = [
       ['总投入 (CNY)', fmt(s.total_cny_invested, 0), '逐笔 inflow 合计'],
+      ['净投入 (CNY)', fmt(i.invest_net_cny, 0), `扣电费消耗 ¥${fmt(i.expense_cny, 0)}`],
       ['USD 化入账', fmt(s.usd_in), '实到手口径（含点差拖累）'],
       ['加权购汇成本', fmt(s.avg_cost, 4), 'CNY/USD'],
       ['点差损失', '−$' + fmt(s.fx_loss_usd), 'vs ECB 中间价'],
       ['显性费用', '−$' + fmt(s.fee_usd), '佣金/平台费/利息'],
       ['奖励/派息', '+$' + fmt(s.reward_usd), '回赠/分红/利息'],
       ['已实现盈亏', (s.realized_usd >= 0 ? '+' : '') + '$' + fmt(s.realized_usd), '卖出落袋'],
-      ['保活转出面值', '$' + fmt(s.external_transfer_usd), '回流外部不计损益'],
     ];
     document.getElementById('kvGrid').innerHTML = kvs.map(([l, v, n]) =>
       `<div class="kv"><div class="kv-label">${l}</div><div class="kv-value">${v}</div><div class="kv-note">${n}</div></div>`).join('');

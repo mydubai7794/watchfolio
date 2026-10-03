@@ -3,7 +3,7 @@
 口径对齐《账户成本盈亏盘点_20261003.md》(v3) 及 2026-10-03 勘误：
 - 总投入 = Σ inflow.cny_amount = 84,850（v3 原写 84,270 系电费双重扣减错误）；
 - HKD→USD 静态折算 7.846；点差由事件自带 mid_rate+双边金额实时推导；
-- 恒等式：net_cny = 总资产×USDCNH − 总投入；分解 = 增值 + 汇损 − 消耗（±1 CNY 舍入容差）；
+- 恒等式（净投入口径）：净投入 = 总投入 − 消耗折CNY；net_cny = 总资产×USDCNH − 净投入 = 增值 + 汇损（±1 舍入容差）；
 - 保活转出（transfer→external）面值单列，不进恒等式不产生损益。
 """
 import logging
@@ -88,23 +88,29 @@ def build_report(events: list[dict], *, total_assets_usd: float | None,
 
     identity: dict = {"usdcnh": usdcnh, "total_assets_usd": total_assets_usd,
                       "external_transfer_usd": round(ext_usd, 2),
-                      "gain_usd": None, "gain_pct": None, "fx_loss_cny": None,
-                      "expense_cny": None, "net_cny": None, "net_pct": None,
-                      "identity_check_cny": None}
+                      "gain_usd": None, "gain_pct": None, "gain_cny": None,
+                      "fx_loss_cny": None, "expense_cny": None, "invest_net_cny": None,
+                      "net_cny": None, "net_pct": None, "identity_check_cny": None}
     if usdcnh and total_assets_usd and avg_cost:
+        # 净投入口径（2026-10-03 用户定版）：生活消耗（电费）不属于投资本金，
+        # 按当前汇率折 CNY 从总投入中扣除 → 恒等式简化为两项：
+        # net = 增值 + 汇损（增值端含消耗回流，使分解与净投入基数匹配）
         invest_base = usd_in - expense_usd
-        gain_usd = total_assets_usd - invest_base
-        fx_loss_cny = usd_in * (usdcnh - avg_cost)
         expense_cny = expense_usd * usdcnh
-        net_cny = total_assets_usd * usdcnh - total_cny
+        invest_net_cny = total_cny - expense_cny
+        gain_usd = total_assets_usd + expense_usd - usd_in
+        fx_loss_cny = usd_in * (usdcnh - avg_cost)
+        net_cny = total_assets_usd * usdcnh - invest_net_cny
         identity.update({
             "gain_usd": round(gain_usd, 2),
             "gain_pct": round(gain_usd / invest_base * 100, 2) if invest_base else None,
+            "gain_cny": round(gain_usd * usdcnh, 2),
             "fx_loss_cny": round(fx_loss_cny, 2),
             "expense_cny": round(expense_cny, 2),
+            "invest_net_cny": round(invest_net_cny, 2),
             "net_cny": round(net_cny, 2),
-            "net_pct": round(net_cny / total_cny * 100, 2) if total_cny else None,
-            "identity_check_cny": round(gain_usd * usdcnh + fx_loss_cny - expense_cny, 2),
+            "net_pct": round(net_cny / invest_net_cny * 100, 2) if invest_net_cny else None,
+            "identity_check_cny": round(gain_usd * usdcnh + fx_loss_cny, 2),
         })
 
     # 对账位：每「账户×币种」取最新余额快照，按币种合计 vs cash_accounts 系统值
