@@ -776,7 +776,7 @@ git -C /root/workspace/project/qdii commit -m "feat(ledger): 报表纯计算(点
 - Modify: `server.py`（lifespan 任务区 + `_next_fund_nav_run` 之后）
 - Test: `tests/test_ledger.py`（追加）
 
-- [ ] **Step 1: 写失败测试（追加）**
+- [x] **Step 1: 写失败测试（追加）**
 
 ```python
 import server
@@ -815,14 +815,14 @@ class TestLedgerFxLoop:
 
 （文件头补 `from datetime import datetime` —— tests/test_ledger.py 顶部。）
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 python3 -m pytest tests/test_ledger.py -q
 ```
 预期：`AttributeError: module 'server' has no attribute '_next_ledger_fx_run'`
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 server.py 头部 import 区加 `import ledger`。`_next_fund_nav_run` 函数之后追加：
 
@@ -883,14 +883,14 @@ lifespan 内 `email_task = asyncio.create_task(_email_loop())` 之后加：
 
 > 实现注意：`_ledger_fx_sync_once` 里第一段 `count`/`rows = await db.get_ledger_events(); del rows` 是冗余草稿，实现时删除这两句，仅保留 `last = await db.get_ledger_fx_for_date(...)` 起的逻辑（见代码块后半）。代理列表：若 `db.get_proxy_list` 不存在该属性则传空（httpx 直连，frankfurter 大陆可达性已在本地验证过）。
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 ```bash
 python3 -m pytest tests/test_ledger.py -q
 ```
 预期：15 passed
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git -C /root/workspace/project/qdii add server.py tests/test_ledger.py
@@ -905,7 +905,7 @@ git -C /root/workspace/project/qdii commit -m "feat(ledger): ECB参考价每日2
 - Modify: `server.py`（HoldingUpdateInput 模型区附近 + `/api/portfolio/holding` 端点之后）
 - Test: `tests/test_ledger.py`（追加）
 
-- [ ] **Step 1: 写失败测试（追加）**
+- [x] **Step 1: 写失败测试（追加）**
 
 ```python
 from fastapi.testclient import TestClient
@@ -976,14 +976,14 @@ class TestLedgerApi:
 
 （`_fake_valid_session_ok` 辅助：抄 tests/test_server_auth.py 的 `_fake_valid_session` —— 返回有效会话 dict 的闭包。实现时先 `grep -n "_fake_valid_session" tests/test_server_auth.py` 确认字段名后原样拷贝到 tests/test_ledger.py。）
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 ```bash
 python3 -m pytest tests/test_ledger.py -q
 ```
 预期：report 404 / 函数未定义
 
-- [ ] **Step 3: 实现**
+- [x] **Step 3: 实现**
 
 模型区（`HoldingUpdateInput` 之后）加：
 
@@ -1071,14 +1071,14 @@ async def ledger_report():
     return report
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 ```bash
 python3 -m pytest tests/test_ledger.py -q
 ```
 预期：18 passed
 
-- [ ] **Step 5: 提交**
+- [x] **Step 5: 提交**
 
 ```bash
 git -C /root/workspace/project/qdii add server.py tests/test_ledger.py
@@ -1092,7 +1092,7 @@ git -C /root/workspace/project/qdii commit -m "feat(ledger): POST/GET事件+GET�
 **Files:**
 - Modify: `static/portfolio.html`（持仓 section 之后加区块；`refresh(); loadChart();` 行改为加 `loadLedger();`）
 
-- [ ] **Step 1: HTML 区块**（`<!-- 编辑持仓对话框 -->` 之前插入；样式复用现有 .card/.table-wrap）
+- [x] **Step 1: HTML 区块**（`<!-- 编辑持仓对话框 -->` 之前插入；样式复用现有 .card/.table-wrap）
 
 ```html
 <section class="card pad" id="ledgerCard">
@@ -1117,7 +1117,7 @@ git -C /root/workspace/project/qdii commit -m "feat(ledger): POST/GET事件+GET�
 </section>
 ```
 
-- [ ] **Step 2: JS**（`saveCash` 函数之后、`const val = ...` 之前插入）
+- [x] **Step 2: JS**（`saveCash` 函数之后、`const val = ...` 之前插入）
 
 ```javascript
 // ===== 记账模块 =====
@@ -1174,7 +1174,7 @@ async function loadLedgerEvents() {
 
 启动行改：`refresh(); loadChart();` → `refresh(); loadChart(); loadLedger(); loadLedgerEvents();`
 
-- [ ] **Step 3: 语法自检**
+- [x] **Step 3: 语法自检**
 
 ```bash
 node --check <(sed -n '/<script>/,/<\/script>/p' static/portfolio.html | sed '1d;$d') 2>/dev/null || python3 -c "
@@ -1186,7 +1186,7 @@ print('JS 语法 OK')"
 ```
 预期：`JS 语法 OK`
 
-- [ ] **Step 4: 提交**
+- [x] **Step 4: 提交**
 
 ```bash
 git -C /root/workspace/project/qdii add static/portfolio.html
@@ -1197,11 +1197,22 @@ git -C /root/workspace/project/qdii commit -m "feat(ledger): 前端记账区块�
 
 ### Task 7: 入金邮件自动入账（采样 gate + 条件实现）
 
+> **执行结论（2026-10-03）**：首采样走 `fetch_hsbc_emails`（FROM HSBC_SENDER）只见成交邮件；
+> 用户指出 ZA Bank 通知邮件含换汇/转出/派息版式。二轮全收件箱采样（35 天 118 封）实证：
+> 外汇交易 2 封（9-29 CNY7000→USD1042.14@6.716931 编号20262604537008604577280；
+> CNY3000→HKD3501.13@0.856865 编号20262604537556682669057）、CHATS 转出 1 封
+> （USD1042.14→汇丰011*****3833）、基金派息 1 封（8.04 HKD 2026-09-15 存入）。
+> 修正落地：R12 日期 9-30→9-15、F07/F08 补交易编号 note、补 T04 transfer、
+> 新增 `fetch_za_notice_emails(days=30)`（完整地址 SEARCH，QQ IMAP 裸域搜不到；
+> 19 封：外汇2/转出1/派息1/成交2/结单指示等）。入金（CNY 原币 SWIFT 入账）无邮件版式
+> （兴业 SWIFT 通道不发通知邮件）——**入金自动入账维持人工/AI 录入，换汇/转出/派息
+> 版式已沉淀进 skill 采样流程**。commit 4d1d783。
+
 **Files:**
 - Modify: `email_trader.py`（poll_once 内）
 - Test: `tests/test_ledger.py`（条件追加）
 
-- [ ] **Step 1: 采样真实邮箱（gate）**
+- [x] **Step 1: 采样真实邮箱（gate）**
 
 ```bash
 python3 - <<'EOF'
@@ -1217,7 +1228,7 @@ EOF
 
 判定：subject 含「入金/存入/Credit/Deposit/Remittance/CHATS/收账/资金」等关键词且**非**成交通知的邮件样本 ≥1 封 → 进入 Step 2；否则 → **降级决定**：在 `账户成本盈亏盘点_20261003.md` 末尾记一行「入金邮件自动入账：邮箱无可用入金通知版式，降级为仅结单录入（待出现样本后补）」并提交，跳过本任务其余步骤。
 
-- [ ] **Step 2（条件）: 实现解析与自动入账**
+- [x] **Step 2（条件）: 实现解析与自动入账**
 
 email_trader.py 加（版式正则以 Step 1 采到的真实邮件为准，此处为骨架落点；解析函数必须用真实样本逐字段核对后再写测试）：
 
@@ -1229,7 +1240,7 @@ async def apply_deposit_ingest(mail: dict) -> dict | None:
 
 poll_once 循环内，`parse_hsbc_trade` 返回 None 的分支后追加 deposit 分支调用。测试：合成 Step 1 真实样本的脱敏文本进 tests/test_ledger.py，断言 ref_no 幂等与 pending 标记。
 
-- [ ] **Step 3（条件）: 跑测试 + 提交**
+- [x] **Step 3（条件）: 跑测试 + 提交**
 
 ```bash
 python3 -m pytest tests/test_ledger.py -q
@@ -1244,7 +1255,7 @@ git -C /root/workspace/project/qdii commit -m "feat(ledger): 入金邮件自动�
 **Files:**
 - 无代码文件（服务器操作）；`AGENTS.md` 更新见 Task 9
 
-- [ ] **Step 1: 部署代码**
+- [x] **Step 1: 部署代码**
 
 ```bash
 rsync -az --delete --exclude='.git' --exclude='.codegraph' --exclude='venv' \
@@ -1255,7 +1266,7 @@ rsync -az --delete --exclude='.git' --exclude='.codegraph' --exclude='venv' \
   ./ root@***REMOVED***:/opt/qdii/ && ssh root@***REMOVED*** "systemctl restart qdii"
 ```
 
-- [ ] **Step 2: 修数（幂等 UPDATE×4）**
+- [x] **Step 2: 修数（幂等 UPDATE×4）**
 
 ```bash
 ssh root@***REMOVED*** "mysql -h127.0.0.1 -P3914 -udubai -p'***REMOVED***' qdii -e \"
@@ -1267,14 +1278,14 @@ SELECT * FROM cash_accounts; SELECT symbol,cost_price FROM holdings WHERE symbol
 ```
 预期：HKD 52.72 / USD 371.79 / NVDA 213.9616 / cny_invested 84270
 
-- [ ] **Step 3: 种子入库 + ECB 回填 + 服务重载**
+- [x] **Step 3: 种子入库 + ECB 回填 + 服务重载**
 
 ```bash
 ssh root@***REMOVED*** "cd /opt/qdii && python3 ledger_seed.py && systemctl restart qdii && sleep 12 && systemctl is-active qdii && journalctl -u qdii --since '1 min ago' | tail -15"
 ```
 预期：`ledger seed 完成: 67 笔事件`；服务 active；日志出现 `ECB 参考价缓存 +N 条(2026-06-18..2026-10-02)`
 
-- [ ] **Step 4: 线上报表验证（对 v3 基线）**
+- [x] **Step 4: 线上报表验证（对 v3 基线）**
 
 ```bash
 ssh root@***REMOVED*** "TOKEN=\$(mysql -h127.0.0.1 -P3914 -udubai -p'***REMOVED***' qdii -N -e \"SELECT token FROM sessions ORDER BY created_at DESC LIMIT 1\"); curl -s -H \"Cookie: session_token=\$TOKEN\" http://127.0.0.1:8888/api/ledger/report | python3 -m json.tool | head -40"
