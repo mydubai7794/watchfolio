@@ -16,8 +16,10 @@
 
 | 文件 | 职责 |
 |------|------|
-| server.py | FastAPI + 全部后台循环（portfolio/market/monitor/candidate/email/crypto-probe） |
+| server.py | FastAPI + 全部后台循环（portfolio/market/monitor/candidate/email/crypto-probe/ledger-fx） |
 | portfolio_fetcher.py | 持仓侧全部数据源抓取与解析（腾讯/新浪/Yahoo/FT/twelvedata/加密源） |
+| ledger.py | 记账报表纯计算（点差/通道/盈亏恒等式 build_report + ECB 解析） |
+| ledger_seed.py | v3 盘点 68 笔种子事件（幂等 upsert CLI，仅首次/修数跑） |
 | fetcher.py | A股 ETF 监控抓取（腾讯 ETF + 新浪/东财期指智能路由） |
 | tencent_bus.py | 腾讯行情攒批发送路由（微批合并：监控/候选/持仓/看板共用一个节奏） |
 | email_trader.py | HSBC 成交邮件解析 → trade_records 幂等入库（QQ IMAP，30min） |
@@ -34,7 +36,9 @@
 | FT GraphQL | 基金 NAV 主源 | 直连 | 60s |
 | twelvedata | 美股兜底 + 冷启动锚点恢复（open/close） | 直连 | 8 credits/min，60s 节流 |
 | 加密市场数据源 | 收盘→开盘全段美股活价 | **直连可用**（data-api.binance.vision 镜像） | 闭市 60s（bookTicker 批量 weight 1） |
+| 加密市场数据源·股票行情 | 无交易对标的（AMKR/PCG/F）夜盘活价 | 直连（***REMOVED*** 网关，X-Auth-Token+X-MBX-APIKEY 双鉴权同值） | 闭市 60s 逐只并发（weight 1/只） |
 | HSBC 邮件 | 成交记录 | IMAP 直连 | 30min |
+| ECB frankfurter.dev | 记账汇率日线（CNY/HKD/USD） | 直连 | 每日 22:35（库空回填一次区间） |
 
 ## 关键口径契约（改动前必读）
 
@@ -51,13 +55,19 @@
   加密源覆盖 10/14：MU/SKHY/DRAM/QQQ/QQM(推导)/BABA/LITE/AMD/SMH/NVDA 有；
   AMKR/PCG/F 无对应交易对（FUSDT 是 Findora 币，禁止误配；币安 TradFi 永续合约
   TRADIFI_PERPETUAL 共 213 只同样无此三只——AMKRUSDT/PCGUSDT 无效符号），
-  三只维持新浪盘后扩展价定格口径。
+  三只经股票行情端点（equity quote，单 symbol 逐只、双鉴权、取 bid/ask 中间价）
+  补齐 → 14/14 全覆盖；接口失败时自然缺省回退新浪扩展价定格口径。
 - **看板 spark**：market_ticks 统一 UTC；分时全由主价快照「价变即写」累积，
   不再单独请求分时接口（US30Y/US10Y/VIX 主价源 Yahoo，刷新沿用 backfill 节奏
   30min 断档/4h 冷却/5min 重试，当日 5m 分时顺带落库）；spark 取最近一个
   tick≥5 的「有效分时日」（杂点日自动回退上一完整时段）并以 [ts,price] 对
   下发（前端悬浮显示北京时间+价格）；组合 tick 写入条件
   `session != "closed" or overnight_used > 0`；写入口毛刺延迟确认（hold/discard/confirm）。
+- **记账口径（ledger）**：总投入 84,850 CNY（全额口径，v3 勘误版）；恒等式
+  `net_cny = 总资产×USDCNH − 总投入 = 增值 + 汇损 − 消耗`；fx 事件带双边金额 +
+  ECB mid_rate（点差实时推导不落库）；balance 快照按「账户×币种」取最新对账
+  cash_accounts；HKD→USD 静态 7.846。录入走 POST /api/ledger/events
+  （ref_no 幂等），流程沉淀在 ~/.claude/skills/qdii-ledger-ingest。
 - **代理分类**：proxy_pool.region（overseas/unknown），_crypto_probe_loop 30min；
   加密源请求序：直连（_crypto_direct_ok）→ 境外代理 → 通用池。
 
