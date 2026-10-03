@@ -1005,16 +1005,25 @@ async def get_portfolio_recent(hours: int) -> list[dict]:
 
 
 async def get_portfolio_daily(days: int) -> list[dict]:
-    """返回近 N 天的日线（每美东交易日取最后一条采样）。"""
+    """返回近 N 天的日线（北京自然日「当日定格」快照，ts 列为北京时间）。
+
+    每日取 21:30（美东开盘）前最后一条 tick：交易日点=前一美东场收盘定格
+    （day_pnl 即该场累计盈亏），周末点=加密跟价现值；今天自然出现当日点，
+    日期与用户直觉（北京日）一致。白天定格段若无新 tick（价变即写），
+    自动回退该日更早的最后采样（凌晨收盘前后），仍为定格语义。
+    """
     return await execute_dict(
         """
-        SELECT t.trade_date AS date, t.total_value_usd AS total_value,
+        SELECT DATE(t.ts) AS date, t.total_value_usd AS total_value,
                t.day_pnl_usd AS day_pnl, t.total_pnl_pct AS total_pnl_pct
         FROM portfolio_ticks t
-        JOIN (SELECT trade_date, MAX(ts) AS mx FROM portfolio_ticks GROUP BY trade_date) m
-          ON t.trade_date = m.trade_date AND t.ts = m.mx
-        WHERE t.trade_date >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
-        ORDER BY t.trade_date
+        JOIN (SELECT DATE(ts) AS d, MAX(ts) AS mx
+              FROM portfolio_ticks
+              WHERE ts < TIMESTAMP(CONCAT(DATE(ts), ' 21:30:00'))
+              GROUP BY DATE(ts)) m
+          ON t.ts = m.mx AND DATE(t.ts) = m.d
+        WHERE t.ts >= DATE_SUB(CURDATE(), INTERVAL %s DAY)
+        ORDER BY t.ts
         """,
         (days,),
     )
