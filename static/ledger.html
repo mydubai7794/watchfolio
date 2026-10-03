@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%232A6CF0'/%3E%3Cpath d='M28 66 V46' stroke='%23fff' stroke-width='5' stroke-linecap='round'/%3E%3Crect x='21' y='50' width='14' height='14' rx='3' fill='%23fff'/%3E%3Cpath d='M52 58 V34' stroke='%23fff' stroke-width='5' stroke-linecap='round'/%3E%3Crect x='45' y='40' width='14' height='14' rx='3' fill='%23fff'/%3E%3Cpath d='M76 46 V20' stroke='%23fff' stroke-width='5' stroke-linecap='round'/%3E%3Crect x='69' y='26' width='14' height='16' rx='3' fill='%23fff'/%3E%3C/svg%3E">
+<title>记账 · 投入与通道成本</title>
+<style>
+:root {
+  --bg: #F5F5F7;
+  --card: #FFFFFF;
+  --txt: #111114; --txt2: #8A8A8E; --txt3: #C7C7CC;
+  --up: #E5443B; --down: #00A870; --accent: #2A6CF0;
+  --shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { background: var(--bg); color: var(--txt); font-size: 15px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif;
+  min-height: 100vh; line-height: 1.5; font-variant-numeric: tabular-nums; }
+a { text-decoration: none; }
+button { font-family: inherit; }
+
+.header { position: sticky; top: 0; z-index: 20; background: var(--card);
+  box-shadow: 0 1px 0 rgba(0,0,0,0.04);
+  padding: 12px 24px; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.header-title { font-size: 17px; font-weight: 600; line-height: 1.2; }
+.nav-peer { font-size: 14px; font-weight: 500; color: var(--txt2); }
+.nav-peer:hover { color: var(--txt); }
+.nav-peer.cur { color: var(--accent); }
+.header-status { margin-left: auto; display: flex; align-items: center; gap: 12px;
+  font-size: 11px; color: var(--txt3); line-height: 1.2; }
+.link { color: var(--txt2); cursor: pointer; font-size: 13px; }
+.link:hover { color: var(--txt); }
+
+.content { padding: 16px 24px 40px; max-width: 1200px; margin: 0 auto;
+  display: flex; flex-direction: column; gap: 16px; }
+.card { background: var(--card); border-radius: 16px; box-shadow: var(--shadow); }
+.pad { padding: 24px; }
+.card-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.card-title { font-size: 17px; font-weight: 600; line-height: 1.2; }
+.card-note { font-size: 11px; color: var(--txt3); }
+
+/* 净盈亏主卡：大数字 + 三段分解 */
+.hero { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr; gap: 24px; padding: 24px; }
+.hero-item + .hero-item { border-left: 1px solid var(--bg); padding-left: 24px; }
+.hero-label { font-size: 12px; color: var(--txt2); }
+.hero-display { font-size: 32px; font-weight: 600; line-height: 1.15; letter-spacing: .2px; margin-top: 6px; }
+.hero-sub { font-size: 11px; color: var(--txt3); line-height: 1.4; margin-top: 6px; }
+
+/* 汇总网格 */
+.grid8 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; }
+.kv { background: var(--bg); border-radius: 12px; padding: 14px 16px; }
+.kv-label { font-size: 12px; color: var(--txt2); }
+.kv-value { font-size: 20px; font-weight: 600; margin-top: 4px; line-height: 1.2; }
+.kv-note { font-size: 11px; color: var(--txt3); margin-top: 2px; }
+
+/* 表格 */
+.table-wrap { overflow-x: auto; margin: 0 -24px -24px; padding: 0 24px 24px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 10px 12px; text-align: right; border-bottom: 1px solid var(--bg);
+  white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; padding-left: 4px; }
+td:last-child, th:last-child { padding-right: 4px; }
+th { color: var(--txt2); font-weight: 400; font-size: 12px; }
+td { font-size: 14px; line-height: 1.2; }
+td.wrap { white-space: normal; max-width: 320px; font-size: 12px; color: var(--txt2); }
+.num-up { color: var(--up); } .num-down { color: var(--down); }
+
+select { background: var(--bg); border: none; border-radius: 12px;
+  padding: 8px 12px; font-size: 13px; color: var(--txt); font-family: inherit; }
+select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); outline: none; }
+
+.toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.chk { font-size: 12px; color: var(--txt2); }
+.chk b.ok { color: var(--down); } .chk b.warn { color: var(--up); }
+
+.scroll-y { max-height: 420px; overflow: auto; }
+
+@media (max-width: 768px) {
+  .header { padding: 8px 12px; gap: 8px; }
+  .content { padding: 12px 12px 32px; gap: 12px; }
+  .pad { padding: 16px; }
+  .hero { grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px; }
+  .hero-item + .hero-item { border-left: none; padding-left: 0; }
+  .hero-item:nth-child(even) { border-left: 1px solid var(--bg); padding-left: 16px; }
+  .hero-item:first-child { grid-column: 1 / -1; border-left: none; padding-left: 0; }
+  .hero-display { font-size: 26px; }
+  .grid8 { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+  .table-wrap { margin: 0 -16px -16px; padding: 0 16px 16px; }
+}
+</style>
+</head>
+<body>
+
+<header class="header">
+  <a class="nav-peer" href="/static/index.html">监控</a>
+  <a class="nav-peer" href="/static/portfolio.html">持仓</a>
+  <div class="header-title">记账</div>
+  <div class="header-status">
+    <span id="fetchTime">--:--:--</span>
+    <a class="link" href="#" onclick="logout();return false;">登出</a>
+  </div>
+</header>
+
+<main class="content">
+
+  <section class="card hero-card">
+    <div class="hero">
+      <div class="hero-item">
+        <div class="hero-label">净盈亏 (CNY) <span id="pendingTag" style="color:var(--accent)"></span></div>
+        <div class="hero-display" id="netCny">--</div>
+        <div class="hero-sub" id="netSub">恒等式：净盈亏 = 总资产×USDCNH − 总投入</div>
+      </div>
+      <div class="hero-item">
+        <div class="hero-label">增值 (USD)</div>
+        <div class="hero-display num-up" id="gainUsd">--</div>
+        <div class="hero-sub" id="gainSub">--</div>
+      </div>
+      <div class="hero-item">
+        <div class="hero-label">汇损 (CNY)</div>
+        <div class="hero-display num-down" id="fxLossCny">--</div>
+        <div class="hero-sub" id="fxSub">--</div>
+      </div>
+      <div class="hero-item">
+        <div class="hero-label">消耗 (CNY)</div>
+        <div class="hero-display" id="expenseCny">--</div>
+        <div class="hero-sub">生活缴费类支出</div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card pad">
+    <div class="card-head"><div class="card-title">投入与成本汇总</div>
+      <div class="card-note">点差由 ECB 中间价实时推导；奖励含现金回赠/派息/利息</div></div>
+    <div class="grid8" id="kvGrid"></div>
+  </section>
+
+  <section class="card pad">
+    <div class="card-head"><div class="card-title">换汇通道成本</div>
+      <div class="card-note">加权点差 = 点差损失 ÷ 理论应得（收币 USD 化）</div></div>
+    <div class="table-wrap">
+      <table id="channelTable">
+        <thead><tr><th>通道</th><th>笔数</th><th>加权点差%</th><th>损失 USD</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card pad">
+    <div class="card-head"><div class="card-title">事件明细</div>
+      <div class="chk" id="balanceChk"></div></div>
+    <div class="toolbar">
+      <select id="typeFilter" onchange="loadEvents()">
+        <option value="">全部类型</option>
+        <option value="inflow">入金</option><option value="fx">换汇</option>
+        <option value="fee">费用</option><option value="reward">奖励</option>
+        <option value="expense">消耗</option><option value="transfer">转账</option>
+        <option value="realized">已实现</option><option value="balance">余额快照</option>
+      </select>
+      <select id="yearFilter" onchange="loadEvents()"><option value="">全部年份</option></select>
+    </div>
+    <div class="table-wrap scroll-y">
+      <table id="eventTable">
+        <thead><tr><th>日期</th><th>类型</th><th>账户</th><th>通道/标的</th>
+          <th>金额</th><th>USD 等值</th><th>备注</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<script>
+const TYPE_NAME = {inflow:'入金', fx:'换汇', fee:'费用', reward:'奖励', expense:'消耗',
+  transfer:'转账', realized:'已实现', balance:'余额快照'};
+const ACCT_NAME = {za_bank:'众安银行', za_sec:'众安证券', hsbc:'汇丰', zf:'致富',
+  ccb:'建行', cmb:'招行', cib:'兴业', external:'外部'};
+const fmt = (v, d=2) => v == null ? '—' : Number(v).toLocaleString('zh-CN',
+  {minimumFractionDigits: d, maximumFractionDigits: d});
+const cls = v => v > 0 ? 'num-up' : (v < 0 ? 'num-down' : '');
+
+async function logout() {
+  await fetch('/api/logout', {method:'POST'});
+  location.href = '/static/login.html';
+}
+
+async function loadReport() {
+  try {
+    const r = await fetch('/api/ledger/report'); const d = await r.json();
+    if (!r.ok || !d.ok) return;
+    const s = d.summary, i = d.identity;
+    document.getElementById('pendingTag').textContent =
+      s.pending_count > 0 ? `（${s.pending_count} 笔待补全）` : '';
+    if (i.net_cny != null) {
+      const net = document.getElementById('netCny');
+      net.textContent = (i.net_cny >= 0 ? '+' : '') + fmt(i.net_cny, 0);
+      net.className = 'hero-display ' + (i.net_cny >= 0 ? 'num-up' : 'num-down');
+      document.getElementById('netSub').textContent =
+        `+${fmt(i.net_pct)}% · 投入 ¥${fmt(s.total_cny_invested, 0)} · 恒等式校验 ${Math.abs(i.identity_check_cny - i.net_cny) < 1 ? '通过 ✓' : '偏差 ' + fmt(i.identity_check_cny - i.net_cny)}`;
+      document.getElementById('gainUsd').textContent = '+' + fmt(i.gain_usd);
+      document.getElementById('gainSub').textContent = `+${fmt(i.gain_pct)}% vs 净投入本金`;
+      const fx = document.getElementById('fxLossCny');
+      fx.textContent = fmt(i.fx_loss_cny, 0);
+      fx.className = 'hero-display ' + cls(i.fx_loss_cny);
+      document.getElementById('fxSub').textContent =
+        `USDCNH ${i.usdcnh} vs 均价 ${s.avg_cost}（全额本金口径）`;
+      document.getElementById('expenseCny').textContent = fmt(i.expense_cny, 0);
+    } else {
+      document.getElementById('netSub').textContent = '行情缓存暂无 USDCNH，稍后自动恢复';
+    }
+    const kvs = [
+      ['总投入 (CNY)', fmt(s.total_cny_invested, 0), '逐笔 inflow 合计'],
+      ['USD 化入账', fmt(s.usd_in), '实到手口径（含点差拖累）'],
+      ['加权购汇成本', fmt(s.avg_cost, 4), 'CNY/USD'],
+      ['点差损失', '−$' + fmt(s.fx_loss_usd), 'vs ECB 中间价'],
+      ['显性费用', '−$' + fmt(s.fee_usd), '佣金/平台费/利息'],
+      ['奖励/派息', '+$' + fmt(s.reward_usd), '回赠/分红/利息'],
+      ['已实现盈亏', (s.realized_usd >= 0 ? '+' : '') + '$' + fmt(s.realized_usd), '卖出落袋'],
+      ['保活转出面值', '$' + fmt(s.external_transfer_usd), '回流外部不计损益'],
+    ];
+    document.getElementById('kvGrid').innerHTML = kvs.map(([l, v, n]) =>
+      `<div class="kv"><div class="kv-label">${l}</div><div class="kv-value">${v}</div><div class="kv-note">${n}</div></div>`).join('');
+    document.querySelector('#channelTable tbody').innerHTML = d.channels.map(c =>
+      `<tr><td>${c.channel}</td><td>${c.n}</td><td>${fmt(c.wavg_spread_pct, 4)}%</td><td class="${cls(-c.loss_usd)}">${fmt(c.loss_usd)}</td></tr>`).join('');
+    const b = d.balances, chk = document.getElementById('balanceChk');
+    if (b && Object.keys(b.ledger).length) {
+      const parts = Object.keys(b.ledger).map(ccy => {
+        const df = b.diff[ccy];
+        const mark = df == null ? '' : (Math.abs(df) < 0.01 ? ' <b class="ok">✓</b>' : ` <b class="warn">⚠差 ${fmt(df)}</b>`);
+        return `${ccy} 结单 ${fmt(b.ledger[ccy])} vs 系统 ${b.system[ccy] != null ? fmt(b.system[ccy]) : '—'}${mark}`;
+      });
+      chk.innerHTML = '对账：' + parts.join('｜');
+    }
+  } catch (e) { console.error(e); }
+}
+
+async function loadEvents() {
+  try {
+    const t = document.getElementById('typeFilter').value;
+    const y = document.getElementById('yearFilter').value;
+    const q = new URLSearchParams();
+    if (t) q.set('type', t);
+    if (y) q.set('year', y);
+    const r = await fetch('/api/ledger/events' + (q.toString() ? '?' + q : ''));
+    const d = await r.json();
+    if (!r.ok || !d.ok) return;
+    const rows = d.events.map(e => {
+      let amt = `${e.direction}${fmt(e.amount)} ${e.amount_ccy}`;
+      if (e.recv_amount != null) amt += ` → ${fmt(e.recv_amount)} ${e.recv_ccy || ''}`;
+      const ue = e.usd_equivalent;
+      return `<tr><td>${e.event_date}</td><td>${TYPE_NAME[e.event_type] || e.event_type}</td>` +
+        `<td>${ACCT_NAME[e.account] || e.account}</td><td>${e.channel || '—'}</td><td>${amt}</td>` +
+        `<td class="${cls(ue)}">${ue != null ? fmt(ue) : '—'}</td><td class="wrap">${e.note || ''}</td></tr>`;
+    });
+    document.querySelector('#eventTable tbody').innerHTML =
+      rows.join('') || '<tr><td colspan="7" style="text-align:center;color:var(--txt3)">无记录</td></tr>';
+    const years = [...new Set(d.events.map(e => (e.event_date || '').slice(0, 4)).filter(Boolean))].sort().reverse();
+    const sel = document.getElementById('yearFilter');
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">全部年份</option>' +
+      years.map(y => `<option value="${y}">${y}</option>`).join('');
+    if (years.includes(cur)) sel.value = cur;
+  } catch (e) { console.error(e); }
+}
+
+function tick() {
+  const n = new Date();
+  document.getElementById('fetchTime').textContent =
+    `${String(n.getHours()).padStart(2,'0')}:${String(n.getMinutes()).padStart(2,'0')}:${String(n.getSeconds()).padStart(2,'0')}`;
+}
+
+loadReport(); loadEvents(); tick();
+setInterval(tick, 1000);
+setInterval(loadReport, 60000);
+</script>
+</body>
+</html>
