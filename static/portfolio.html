@@ -60,7 +60,7 @@ button { font-family: inherit; }
 .card-note { font-size: 11px; color: var(--txt3); }
 
 /* ---- 账户总览：桌面四段横排，移动 2×2 ---- */
-.overview-card { display: grid; grid-template-columns: 1.5fr 1fr 1fr 1fr; gap: 24px; padding: 24px; }
+.overview-card { display: grid; grid-template-columns: 1.5fr 1fr 1fr 1fr 1fr; gap: 24px; padding: 24px; }
 .ov-label { font-size: 12px; color: var(--txt2); }
 .ov-display { font-size: 30px; font-weight: 600; line-height: 1.2; letter-spacing: .2px; margin-top: 4px; }
 .ov-value { font-size: 17px; font-weight: 500; line-height: 1.2; margin-top: 6px; }
@@ -260,6 +260,11 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
       <div class="ov-value" id="cashVal">--</div>
       <div class="ov-micro" id="cashSub"></div>
     </div>
+    <div class="ov-item" id="cnyItem" title="">
+      <div class="ov-label">人民币累计 (CNY)</div>
+      <div class="ov-value" id="cnyPnl">--</div>
+      <div class="ov-micro" id="cnySub"></div>
+    </div>
   </section>
 
   <!-- 市场看板 -->
@@ -360,6 +365,33 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
         <div class="skel" style="height:56px;margin:10px 0"></div>
         <div class="skel" style="height:56px;margin:10px 0"></div>
       </div>
+    </div>
+  </section>
+
+  <section class="card pad" id="ledgerCard">
+    <div class="card-head">
+      <div class="card-title">记账 · 投入与通道成本 <span id="ledgerPending" style="color:var(--txt2);font-size:12px"></span></div>
+    </div>
+    <div id="ledgerSummary" class="skel" style="height:72px;margin-bottom:10px"></div>
+    <div class="table-wrap">
+      <table id="ledgerChannels"><thead>
+        <tr><th>通道</th><th>笔数</th><th>加权点差%</th><th>损失USD</th></tr>
+      </thead><tbody><tr><td colspan="4" class="skel" style="height:36px"></td></tr></tbody></table>
+    </div>
+    <div style="margin:10px 0 6px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <select id="ledgerFilter" onchange="loadLedgerEvents()">
+        <option value="">全部事件</option>
+        <option value="inflow">入金</option><option value="fx">换汇</option>
+        <option value="fee">费用</option><option value="reward">奖励</option>
+        <option value="expense">消耗</option><option value="transfer">转出</option>
+        <option value="realized">已实现</option><option value="balance">余额快照</option>
+      </select>
+      <span id="ledgerBalanceChk" style="font-size:12px;color:var(--txt2)"></span>
+    </div>
+    <div class="table-wrap" style="max-height:320px;overflow:auto">
+      <table id="ledgerEvents"><thead>
+        <tr><th>日期</th><th>类型</th><th>账户</th><th>通道/标的</th><th>金额</th><th>USD等值</th><th>备注</th></tr>
+      </thead><tbody></tbody></table>
     </div>
   </section>
 
@@ -737,6 +769,22 @@ function renderOverview(d) {
   document.getElementById('cashVal').textContent = usd(s.cash_usd);
   document.getElementById('cashSub').textContent =
     (s.cash_usd != null && d.fx_usdhkd) ? '≈ HK$' + fmt(s.cash_usd * d.fx_usdhkd, 0) : '';
+  // 人民币累计口径：总资产 × USDCNH 对比投入本金（本金/汇率未就绪时降级 --）
+  const cny = d.cny;
+  const cpEl = document.getElementById('cnyPnl');
+  if (cny) {
+    cpEl.textContent = (cny.pnl < 0 ? '-¥' : (cny.pnl > 0 ? '+¥' : '¥')) + fmt(Math.abs(cny.pnl));
+    cpEl.className = 'ov-value ' + cls(cny.pnl);
+    document.getElementById('cnySub').textContent =
+      sign(cny.pnl_pct) + fmt(cny.pnl_pct) + '% · 投入 ¥' + fmt(cny.invested, 0);
+    document.getElementById('cnyItem').title =
+      '折算总值 ¥' + fmt(cny.value) + ' · USDCNH ' + fmt(cny.rate, 4);
+  } else {
+    cpEl.textContent = '--';
+    cpEl.className = 'ov-value';
+    document.getElementById('cnySub').textContent = '';
+    document.getElementById('cnyItem').title = '';
+  }
   // session 徽章与提示：非 regular 时段加密市场数据源代理价补全（盘后/夜盘/
   // 盘前/假日），active 时徽章取后端 note；无活源时退回「数据定格」
   const badge = document.getElementById('sessionBadge');
@@ -1430,6 +1478,59 @@ async function saveCash() {
 }
 const val = id => document.getElementById(id).value.trim();
 
+// ===== 记账模块 =====
+const LEDGER_TYPE_NAME = {inflow:'入金', fx:'换汇', fee:'费用', reward:'奖励', expense:'消耗',
+  transfer:'转出', realized:'已实现', balance:'余额快照'};
+async function loadLedger() {
+  try {
+    const r = await fetch('/api/ledger/report'); const d = await r.json();
+    if (!r.ok || !d.ok) return;
+    const s = d.summary, i = d.identity;
+    document.getElementById('ledgerPending').textContent =
+      s.pending_count > 0 ? `（${s.pending_count} 笔待补全）` : '';
+    const rows = [
+      ['总投入(CNY)', s.total_cny_invested.toLocaleString()],
+      ['加权购汇成本', s.avg_cost], ['USD化入账', s.usd_in.toLocaleString()],
+      ['点差损失(USD)', s.fx_loss_usd], ['显性费用(USD)', s.fee_usd],
+      ['奖励/分红(USD)', s.reward_usd], ['已实现盈亏(USD)', s.realized_usd],
+      ['消耗(USD)', s.expense_usd]];
+    let html = '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px">';
+    for (const [k, v] of rows) html += `<div><div style="font-size:12px;color:var(--txt2)">${k}</div><b>${v}</b></div>`;
+    html += '</div>';
+    if (i && i.net_cny != null) html +=
+      `<div style="font-size:13px">净盈亏 <b style="color:${i.net_cny>=0?'#e0562c':'#0a8f4a'}">${i.net_cny.toLocaleString()} CNY (${i.net_pct}%)</b>` +
+      ` = 增值 ${i.gain_usd} USD(${i.gain_pct}%) − 汇损 ${i.fx_loss_cny} − 消耗 ${i.expense_cny}` +
+      `（USDCNH@${i.usdcnh}；保活转出 ${i.external_transfer_usd} USD 面值不计损益）</div>`;
+    document.getElementById('ledgerSummary').innerHTML = html;
+    document.querySelector('#ledgerChannels tbody').innerHTML = d.channels.map(c =>
+      `<tr><td>${c.channel}</td><td>${c.n}</td><td>${c.wavg_spread_pct}%</td><td>${c.loss_usd}</td></tr>`).join('');
+    const b = d.balances, chk = document.getElementById('ledgerBalanceChk');
+    if (b && b.ledger && Object.keys(b.ledger).length) {
+      const parts = Object.keys(b.ledger).map(ccy => {
+        const df = b.diff[ccy];
+        return `${ccy}: 结单${b.ledger[ccy]} vs 系统${b.system[ccy] ?? '—'}` +
+          (df == null ? '' : (Math.abs(df) < 0.01 ? ' ✓' : ` ⚠差${df}`));
+      });
+      chk.textContent = '对账: ' + parts.join('；');
+    }
+  } catch (e) { /* 静默：区块自愈 */ }
+}
+async function loadLedgerEvents() {
+  try {
+    const t = document.getElementById('ledgerFilter').value;
+    const r = await fetch('/api/ledger/events' + (t ? `?type=${t}` : ''));
+    const d = await r.json();
+    if (!r.ok || !d.ok) return;
+    document.querySelector('#ledgerEvents tbody').innerHTML = d.events.map(e => {
+      let amt = `${e.direction}${e.amount} ${e.amount_ccy}`;
+      if (e.recv_amount != null) amt += ` → ${e.recv_amount} ${e.recv_ccy}`;
+      return `<tr><td>${e.event_date}</td><td>${LEDGER_TYPE_NAME[e.event_type] || e.event_type}</td>` +
+        `<td>${e.account}</td><td>${e.channel || ''}</td><td>${amt}</td>` +
+        `<td>${e.usd_equivalent ?? ''}</td><td style="font-size:12px;color:var(--txt2)">${e.note || ''}</td></tr>`;
+    }).join('');
+  } catch (e) { /* 静默 */ }
+}
+
 // ===== 启动与全局事件 =====
 // resize 防抖重绘：走势图 + 分析图 + 市场 spark（全部依赖容器宽度）；
 // drawDonut/drawHBar 重建命中区域时已同步关闭交互 tooltip，无需在此重复隐藏
@@ -1442,7 +1543,7 @@ window.addEventListener('resize', () => {
     drawAnalysis(lastOverview);
   }, 120);
 });
-refresh(); loadChart();
+refresh(); loadChart(); loadLedger(); loadLedgerEvents();
 setInterval(refresh, 10000);
 // 分时（24h/当日）30s 轮询；日线区间不轮询
 setInterval(() => { if (isIntradayMode()) loadChart(); }, 30000);
