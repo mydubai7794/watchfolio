@@ -246,6 +246,58 @@ def fetch_hsbc_emails(days: int = 1) -> list[dict]:
             except Exception:
                 pass
 
+
+def fetch_za_notice_emails(days: int = 30) -> list[dict]:
+    """拉取最近 N 天 ZA Bank 通知邮件（换汇/转出/派息/入金版式）→ [{message_id, date, subject, text}]。
+
+    记账模块（ledger）录入辅助通道：仅供人工/AI 对账采样，不进生产轮询循环。
+    只读操作，拉取失败抛异常。
+    """
+    out: list[dict] = []
+    imap = None
+    try:
+        since = date.today() - timedelta(days=days)
+        since_str = f"{since.day:02d}-{_MONTHS_EN[since.month]}-{since.year}"
+        imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+        imap.login(IMAP_USER, IMAP_PASSWORD)
+        imap.select("INBOX")
+        status, data = imap.search(
+            None, f'(FROM "notification@service.bank.za.group" SINCE "{since_str}")')
+        if status != "OK" or not data or not data[0]:
+            return out
+        for num in data[0].split():
+            status, msg_data = imap.fetch(num, "(RFC822)")
+            if status != "OK" or not msg_data or msg_data[0] is None:
+                continue
+            msg = email.message_from_bytes(msg_data[0][1])
+            dt = _parse_email_date(msg.get("Date", ""))
+            if not _is_recent(dt, days):
+                continue
+            subject = msg.get("Subject") or ""
+            try:
+                parts = email.header.decode_header(subject)
+                subject = "".join(
+                    p[0].decode(p[1] or "utf-8", "replace") if isinstance(p[0], bytes) else p[0]
+                    for p in parts)
+            except Exception:
+                pass
+            out.append({
+                "message_id": (msg.get("Message-ID") or "").strip(),
+                "date": dt,
+                "subject": subject,
+                "text": _extract_text(msg),
+            })
+        return out
+    except Exception as e:
+        logger.error("拉取 ZA Bank 通知邮件失败: %s", e)
+        raise
+    finally:
+        if imap is not None:
+            try:
+                imap.logout()
+            except Exception:
+                pass
+
 # ---------------------------------------------------------------------------
 # 交易应用编排（幂等：先插 trade_records 再动 holdings/cash）
 # ---------------------------------------------------------------------------
@@ -310,25 +362,41 @@ async def apply_trade(trade: dict) -> dict:
                 logger.info("买入建仓: %s(%s) %s股 @%s%s 现金扣减%s",
                             trade.get("name"), symbol, qty, currency, price, amount)
             else:
-                # 已有票加仓：仅累加数量，名称/成本价/币种/启用/排序保留原值
+                # 已有票加仓：数量累加，成本价按加权平均摊薄（原成本缺失/为0时
+                # 以本次成交价充当）；名称/币种/启用/排序保留原值
+                old_qty = float(row["quantity"])
+                old_cost = float(row["cost_price"] or 0)
+                new_qty = old_qty + qty
+                avg_cost = round(price if old_cost <= 0 else
+                                 (old_qty * old_cost + qty * price) / new_qty, 4)
                 await db.update_holding(
                     row["id"], row["name"], row["market"],
-                    float(row["quantity"]) + qty, row["cost_price"],
+                    new_qty, avg_cost,
                     row["currency"], row["enabled"], row["sort_order"])
-                logger.info("买入加仓: %s 持仓 %s→%s 现金扣减%s",
-                            symbol, row["quantity"],
-                            float(row["quantity"]) + qty, amount)
+                logger.info("买入加仓: %s 持仓 %s→%s 成本摊薄 %s→%s 现金扣减%s",
+                            symbol, row["quantity"], new_qty,
+                            row["cost_price"], avg_cost, amount)
             balance = await db.deduct_cash(currency, amount)
         else:
-            # 减到 0 保留行（enabled 照旧）方便后续再用
+            # 减仓：成本价按摊薄口径重算（已实现盈亏摊入剩余持仓）：
+            # (原数量×原成本 − 卖出数量×卖价) / 剩余数量——亏损减仓拉高成本、
+            # 盈利减仓压低成本（大额盈利减仓后可为负，DECIMAL 有符号可存）；
+            # 减到 0 保留行（enabled 照旧）成本保持原值，原成本未知(0)不摊薄
+            old_qty = float(row["quantity"])
+            old_cost = float(row["cost_price"] or 0)
+            new_qty = old_qty - qty
+            if new_qty > 0 and old_cost != 0:
+                avg_cost = round((old_qty * old_cost - qty * price) / new_qty, 4)
+            else:
+                avg_cost = row["cost_price"]
             await db.update_holding(
                 row["id"], row["name"], row["market"],
-                float(row["quantity"]) - qty, row["cost_price"],
+                new_qty, avg_cost,
                 row["currency"], row["enabled"], row["sort_order"])
             balance = await db.deduct_cash(currency, -amount)
-            logger.info("卖出减仓: %s 持仓 %s→%s 现金入账%s",
-                        symbol, row["quantity"],
-                        float(row["quantity"]) - qty, amount)
+            logger.info("卖出减仓: %s 持仓 %s→%s 成本摊薄 %s→%s 现金入账%s",
+                        symbol, row["quantity"], new_qty,
+                        row["cost_price"], avg_cost, amount)
         return {"status": "applied", "side": side, "symbol": symbol,
                 "quantity": qty, "amount": amount, "currency": currency,
                 "balance": balance}
