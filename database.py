@@ -250,6 +250,7 @@ async def init_tables():
         ("scenario_a_overshot",    "1.0",   "剧本A错杀阈值:跳空需低于期指+此值(%)"),
         ("scenario_b_lag",         "0.3",   "剧本B落后阈值:跳空落后超此值(%)"),
         ("buysell_ratio_threshold","2.0",   "盘口否决:买卖比阈值"),
+        ("cny_invested",            "84560", "人民币累计投入本金(29000+30000+25000+850换汇-290电费)"),
     ]
     for key, value, remark in seed_configs:
         await execute(
@@ -309,6 +310,45 @@ async def init_tables():
             nav         DECIMAL(12,4) NOT NULL DEFAULT 0 COMMENT '净值(HKD)',
             nav_change_pct DECIMAL(10,4) NOT NULL DEFAULT 0 COMMENT '日涨跌%'
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='基金官方日频净值(FT)'
+        """,
+        _pool=pool,
+    )
+
+    # ---- ledger_events (记账事件流) ----
+    await execute(
+        """
+        CREATE TABLE IF NOT EXISTS ledger_events (
+            id             INT AUTO_INCREMENT PRIMARY KEY,
+            event_date     DATE NOT NULL COMMENT '事件日期',
+            event_type     VARCHAR(20) NOT NULL COMMENT 'inflow入金/fx换汇/fee费用/reward奖励/expense消耗/transfer转移/realized已实现/balance余额快照',
+            account        VARCHAR(20) NOT NULL COMMENT 'za_bank/za_sec/hsbc/zf/ccb/cmb/cib/external',
+            channel        VARCHAR(40) DEFAULT NULL COMMENT '通道: 建行购汇汇出/汇丰柜台/众安App换U/兴业SWIFT/招行原币/致富换汇/支付宝+Visa等',
+            direction      CHAR(1) NOT NULL COMMENT '+入账/-出账',
+            amount_ccy     VARCHAR(5) NOT NULL COMMENT '付出币种',
+            amount         DECIMAL(14,2) NOT NULL COMMENT '付出金额',
+            recv_ccy       VARCHAR(5) DEFAULT NULL COMMENT '换汇类: 收到币种',
+            recv_amount    DECIMAL(14,2) DEFAULT NULL COMMENT '换汇类: 实际得到金额',
+            usd_equivalent DECIMAL(14,2) DEFAULT NULL COMMENT 'USD等值(口径见盘点v3)',
+            cny_amount     DECIMAL(14,2) DEFAULT NULL COMMENT 'CNY口径(inflow必填,邮件自动入账可NULL待补)',
+            mid_rate       DECIMAL(12,6) DEFAULT NULL COMMENT '换汇类: ECB当日中间价(单位付币所得收币)',
+            note           VARCHAR(200) DEFAULT NULL,
+            ref_no         VARCHAR(40) NOT NULL UNIQUE COMMENT '幂等键',
+            created_at     DATETIME DEFAULT CURRENT_TIMESTAMP,
+            INDEX idx_type_date (event_type, event_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='记账事件流(AI经API录入)'
+        """,
+        _pool=pool,
+    )
+
+    # ---- ledger_fx_rates (ECB 日线缓存) ----
+    await execute(
+        """
+        CREATE TABLE IF NOT EXISTS ledger_fx_rates (
+            rate_date  DATE NOT NULL PRIMARY KEY COMMENT 'ECB参考价日期',
+            usd_cny    DECIMAL(12,6) NOT NULL COMMENT 'USD/CNY 参考价',
+            usd_hkd    DECIMAL(12,6) NOT NULL COMMENT 'USD/HKD 参考价',
+            fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='ECB每日参考价缓存(frankfurter.dev)'
         """,
         _pool=pool,
     )
@@ -1169,3 +1209,87 @@ async def get_recent_trades(limit: int = 20) -> list[dict]:
         r["quantity"] = float(r["quantity"])
         r["price"] = float(r["price"])
     return rows
+
+
+# ---------------------------------------------------------------------------
+# Ledger events (记账事件流)
+# ---------------------------------------------------------------------------
+
+_LEDGER_MUTABLE = ("event_date", "event_type", "account", "channel", "direction",
+                   "amount_ccy", "amount", "recv_ccy", "recv_amount",
+                   "usd_equivalent", "cny_amount", "mid_rate", "note")
+
+
+async def upsert_ledger_event(*, event_date, event_type, account, direction,
+                              amount_ccy, amount, ref_no, channel=None,
+                              recv_ccy=None, recv_amount=None, usd_equivalent=None,
+                              cny_amount=None, mid_rate=None, note=None) -> int:
+    """按 ref_no 幂等 upsert 一条记账事件（同 ref_no 重复提交=覆盖更新）。"""
+    cols = _LEDGER_MUTABLE + ("ref_no",)
+    vals = (event_date, event_type, account, channel, direction, amount_ccy,
+            _safe_decimal(amount, 2), recv_ccy, _safe_decimal(recv_amount, 2),
+            _safe_decimal(usd_equivalent, 2), _safe_decimal(cny_amount, 2),
+            _safe_decimal(mid_rate, 6), note, ref_no)
+    placeholders = ", ".join(["%s"] * len(cols))
+    updates = ", ".join(f"{c}=VALUES({c})" for c in _LEDGER_MUTABLE)
+    return await execute(
+        f"INSERT INTO ledger_events ({', '.join(cols)}) VALUES ({placeholders}) "
+        f"ON DUPLICATE KEY UPDATE {updates}", vals)
+
+
+async def ledger_event_exists(ref_no: str) -> bool:
+    rows = await execute_dict("SELECT id FROM ledger_events WHERE ref_no = %s", (ref_no,))
+    return bool(rows)
+
+
+async def get_ledger_events(event_type: str | None = None, year: int | None = None,
+                            account: str | None = None) -> list[dict]:
+    """事件明细查询（可选筛选），按日期升序。"""
+    conds, args = [], []
+    if event_type:
+        conds.append("event_type = %s"); args.append(event_type)
+    if year:
+        conds.append("YEAR(event_date) = %s"); args.append(year)
+    if account:
+        conds.append("account = %s"); args.append(account)
+    where = f"WHERE {' AND '.join(conds)}" if conds else ""
+    rows = await execute_dict(
+        f"SELECT * FROM ledger_events {where} ORDER BY event_date, id", args or None)
+    for r in rows:
+        for k in ("amount", "recv_amount", "usd_equivalent", "cny_amount", "mid_rate"):
+            if r.get(k) is not None:
+                r[k] = float(r[k])
+        r["event_date"] = str(r["event_date"])
+    return rows
+
+
+async def upsert_ledger_fx_rate(rate_date, usd_cny: float, usd_hkd: float) -> int:
+    return await execute(
+        "INSERT INTO ledger_fx_rates (rate_date, usd_cny, usd_hkd) VALUES (%s, %s, %s) "
+        "ON DUPLICATE KEY UPDATE usd_cny=VALUES(usd_cny), usd_hkd=VALUES(usd_hkd)",
+        (rate_date, _safe_decimal(usd_cny, 6), _safe_decimal(usd_hkd, 6)))
+
+
+async def get_ledger_fx_for_date(rate_date) -> dict | None:
+    """取 <= rate_date 的最近一条 ECB 参考价（周末/假日自动回退上一发布日）。"""
+    rows = await execute_dict(
+        "SELECT * FROM ledger_fx_rates WHERE rate_date <= %s "
+        "ORDER BY rate_date DESC LIMIT 1", (rate_date,))
+    if rows:
+        r = rows[0]
+        r["usd_cny"], r["usd_hkd"] = float(r["usd_cny"]), float(r["usd_hkd"])
+        r["rate_date"] = str(r["rate_date"])
+        return r
+    return None
+
+
+async def get_ledger_fx_count() -> int:
+    rows = await execute_dict("SELECT COUNT(*) AS n FROM ledger_fx_rates")
+    return int(rows[0]["n"]) if rows else 0
+
+
+async def get_latest_portfolio_value() -> float | None:
+    """最新组合总资产（portfolio_ticks 最后一条采样）。"""
+    rows = await execute_dict(
+        "SELECT total_value_usd FROM portfolio_ticks ORDER BY ts DESC LIMIT 1")
+    return float(rows[0]["total_value_usd"]) if rows else None
