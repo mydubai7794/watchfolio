@@ -1300,9 +1300,9 @@ ssh root@***REMOVED*** "TOKEN=\$(mysql -h127.0.0.1 -P3914 -udubai -p'***REMOVED*
 - Create: `~/.claude/skills/qdii-ledger-ingest/SKILL.md`（用 skill-creator 规范）
 - Modify: `AGENTS.md`
 
-- [ ] **Step 1: 加载 skill-creator 写 skill**——内容：触发词（处理月结单/录入结单/ledger ingest）；SOP：PDF→`python3 -c "import fitz;..."` pymupdf 提取 → 按 v3 版式规则表解析新事件（ZA/HSBC INVSTM0011/HSBC One IPSSTM0007/致富）→ `SELECT MAX(event_date)` 防重 → curl POST `/api/ledger/events`（token 取 sessions 表）→ GET report 回归核对（恒等式 ±1 / 对账位 diff）→ 输出差异清单待确认；附 ref_no 规则 `{YYYYMM}-{account}-{seq}` 与 pending 补全流程。
-- [ ] **Step 2: AGENTS.md 更新**——模块结构表加 `ledger.py / ledger_seed.py` 行；「关键口径契约」加 ledger 恒等式一行（口径=盘点 v3，HKD→USD 7.846 静态，cny_invested=84850 全额口径（勘误：84,270 系电费双重扣减））；测试基线数更新。
-- [ ] **Step 3: 提交**
+- [x] **Step 1: 加载 skill-creator 写 skill**——内容：触发词（处理月结单/录入结单/ledger ingest）；SOP：PDF→`python3 -c "import fitz;..."` pymupdf 提取 → 按 v3 版式规则表解析新事件（ZA/HSBC INVSTM0011/HSBC One IPSSTM0007/致富）→ `SELECT MAX(event_date)` 防重 → curl POST `/api/ledger/events`（token 取 sessions 表）→ GET report 回归核对（恒等式 ±1 / 对账位 diff）→ 输出差异清单待确认；附 ref_no 规则 `{YYYYMM}-{account}-{seq}` 与 pending 补全流程。
+- [x] **Step 2: AGENTS.md 更新**——模块结构表加 `ledger.py / ledger_seed.py` 行；「关键口径契约」加 ledger 恒等式一行（口径=盘点 v3，HKD→USD 7.846 静态，cny_invested=84850 全额口径（勘误：84,270 系电费双重扣减））；测试基线数更新。
+- [x] **Step 3: 提交**
 
 ```bash
 git -C /root/workspace/project/qdii add AGENTS.md
@@ -1313,19 +1313,19 @@ git -C /root/workspace/project/qdii commit -m "docs: AGENTS.md 补记账模块�
 
 ### Task 10: 全量回归 + 收尾
 
-- [ ] **Step 1: 全量测试**
+- [x] **Step 1: 全量测试**
 
 ```bash
 python3 -m pytest tests/test_portfolio.py tests/test_decision_model.py tests/test_server_auth.py tests/test_email_trader.py tests/test_ledger.py -q
 ```
 预期：全部 passed（基线 + 18 新增），0 failed
 
-- [ ] **Step 2: 线上冒烟**
+- [x] **Step 2: 线上冒烟**
 
 `systemctl is-active qdii` + `journalctl -u qdii --since '5 min ago'` 无异常堆栈 + 浏览器访问 portfolio.html 记账区块渲染正常。
 
-- [ ] **Step 3: 更新盘点文档遗留事项**——`账户成本盈亏盘点_20261003.md` §十二补记：勘误已全部落库（HKD 52.72/NVDA 213.9616/cny_invested 84270/USD 371.79）；ledger 模块上线。
-- [ ] **Step 4: 提交收尾**
+- [x] **Step 3: 更新盘点文档遗留事项**——`账户成本盈亏盘点_20261003.md` §十二补记：勘误已全部落库（HKD 52.72/NVDA 213.9616/cny_invested 84270/USD 371.79）；ledger 模块上线。
+- [x] **Step 4: 提交收尾**
 
 ```bash
 git -C /root/workspace/project/qdii add "账户成本盈亏盘点_20261003.md"
