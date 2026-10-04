@@ -399,19 +399,56 @@ class TestGetTextResilient:
 
 class TestFetchFxUsesProxies:
     def test_proxy_passthrough(self, monkeypatch):
-        """fetch_fx_usdhkd 代理清单透传到 _get_text_resilient。"""
+        """fetch_fx_usdhkd 新浪主源直连 403 时，代理清单透传 _get_text_resilient。"""
         captured = {}
 
         async def fake_resilient(url, headers=None, proxy_urls=None, timeout=10.0):
             captured["url"] = url
             captured["proxy_urls"] = proxy_urls
+            return None   # 新浪失败 → 回切 TD
+
+        async def td_ok(pair):
+            assert pair == "USD/HKD"
+            return 7.8470
+
+        monkeypatch.setattr(pf, "fetch_td_fx", td_ok)
+        monkeypatch.setattr(pf, "_get_text_resilient", fake_resilient)
+        rate, fallback = asyncio.run(pf.fetch_fx_usdhkd(proxy_urls=["p9"]))
+        assert rate == 7.8470 and fallback is True
+        assert captured["proxy_urls"] == ["p9"]
+        assert "susdhkd" in captured["url"]
+
+    def test_sina_primary_no_td(self, monkeypatch):
+        """fetch_fx_usdhkd 新浪主源成功：零 TD 请求（免费额度让位锚点恢复/USDCNH）。"""
+        called = {"td": 0}
+
+        async def td_spy(pair):
+            called["td"] += 1
+            return 7.8470
+
+        async def fake_resilient(url, headers=None, proxy_urls=None, timeout=10.0):
             return FX_OK_RAW
 
+        monkeypatch.setattr(pf, "fetch_td_fx", td_spy)
         monkeypatch.setattr(pf, "_get_text_resilient", fake_resilient)
         rate, fallback = asyncio.run(pf.fetch_fx_usdhkd(proxy_urls=["p9"]))
         assert rate == 7.8466 and fallback is False
-        assert captured["proxy_urls"] == ["p9"]
-        assert "susdhkd" in captured["url"]
+        assert called["td"] == 0
+
+    def test_all_fail_fallback(self, monkeypatch):
+        """新浪与 TD 均失败：置 7.80 静态兜底。"""
+        async def no_td(pair):
+            return 0.0
+
+        monkeypatch.setattr(pf, "fetch_td_fx", no_td)
+        monkeypatch.setattr(pf, "_get_text_resilient",
+                            lambda *a, **k: _async_none())
+        rate, fallback = asyncio.run(pf.fetch_fx_usdhkd())
+        assert rate == pf.FX_FALLBACK and fallback is True
+
+
+async def _async_none():
+    return None
 
 
 class TestDetectIsolatedSpike:
@@ -594,15 +631,15 @@ class TestUpdateSessionState:
 
 
 class TestNightOverrideAfterStateMachine:
-    """加密市场数据源夜盘代理价覆盖时序：状态机必须先于覆盖执行（吃原始腾讯价），
+    """24h数据源夜盘代理价覆盖时序：状态机必须先于覆盖执行（吃原始腾讯价），
     否则周末 closed+hour>=16 分支会把代理价写进 close_prices 定格，
     隔夜增量(代理价-被污染定格)语义错乱（edc2e67 评审修复的回归防线）。"""
 
     Q_RAW = {"AMD": {"price": 615.78, "pre_close": 611.65}}   # 腾讯原始（周六=f[3]保持周五收盘）
 
-    def test_weekend_evening_close_not_polluted_by_crypto(self):
+    def test_weekend_evening_close_not_polluted_by_h24(self):
         # 周六 18:00 closed（hour>=16 分支）：先状态机再覆盖 → 定格=615.78（周五收盘），
-        # 覆盖后的 q["price"]=加密市场数据源代理价 620.9 只进展示/tick，不回写定格
+        # 覆盖后的 q["price"]=24h数据源代理价 620.9 只进展示/tick，不回写定格
         state = {"base_closes": {"AMD": 611.65}, "close_prices": {}, "base_logged": True}
         quotes = {"AMD": dict(self.Q_RAW["AMD"])}
         pf.update_session_state(state, "closed",
@@ -747,10 +784,10 @@ class TestBuildPositionsSessionPnl:
 
 
 class TestFetchOvernightQuotes:
-    """夜盘代理价（加密市场数据源）：resolve_crypto_map 映射/缓存/失败容错、
-    fetch_crypto_prices 中间价口径、fetch_overnight_quotes 插槽串联与降级。"""
+    """夜盘代理价（24h数据源）：resolve_h24_map 映射/缓存/失败容错、
+    fetch_h24_prices 中间价口径、fetch_overnight_quotes 插槽串联与降级。"""
 
-    def test_resolve_crypto_map_filters_trading_pairs(self, monkeypatch):
+    def test_resolve_h24_map_filters_trading_pairs(self, monkeypatch):
         """exchangeInfo 过滤 status=TRADING 的 代码+B+USDT 精确匹配，无对应缺省。"""
         async def fake_client_get(self, url, **kw):
             class R:
@@ -759,17 +796,17 @@ class TestFetchOvernightQuotes:
                         {"symbol": "AMDBUSDT", "status": "TRADING"},
                         {"symbol": "NVDABUSDT", "status": "TRADING"},
                         {"symbol": "QQQBUSDT", "status": "BREAK"},        # 非交易状态剔除
-                        {"symbol": "BTCUSDT", "status": "TRADING"},      # 普通交易对后缀不匹配
+                        {"symbol": "XXYUSDT", "status": "TRADING"},      # 无关符号后缀不匹配
                     ]}
             return R()
 
         monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_client_get)
-        pf._crypto_map_cache.clear()
-        pf._crypto_map_ts = 0.0
-        m = asyncio.run(pf.resolve_crypto_map(["AMD", "NVDA", "QQQ", "MU"]))
+        pf._h24_map_cache.clear()
+        pf._h24_map_ts = 0.0
+        m = asyncio.run(pf.resolve_h24_map(["AMD", "NVDA", "QQQ", "MU"]))
         assert m == {"AMD": "AMDBUSDT", "NVDA": "NVDABUSDT"}
 
-    def test_resolve_crypto_map_uses_cache_within_ttl(self, monkeypatch):
+    def test_resolve_h24_map_uses_cache_within_ttl(self, monkeypatch):
         """24h TTL 内直接命中缓存不再请求 exchangeInfo。"""
         calls = []
 
@@ -777,14 +814,14 @@ class TestFetchOvernightQuotes:
             calls.append(url)
             raise AssertionError("缓存命中不应发起请求")
 
-        pf._crypto_map_cache.clear()
-        pf._crypto_map_cache.update({"AMD": "AMDBUSDT"})
-        pf._crypto_map_ts = time.monotonic()
+        pf._h24_map_cache.clear()
+        pf._h24_map_cache.update({"AMD": "AMDBUSDT"})
+        pf._h24_map_ts = time.monotonic()
         monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_client_get)
-        assert asyncio.run(pf.resolve_crypto_map(["AMD"])) == {"AMD": "AMDBUSDT"}
+        assert asyncio.run(pf.resolve_h24_map(["AMD"])) == {"AMD": "AMDBUSDT"}
         assert calls == []
 
-    def test_fetch_crypto_prices_batch_mid_price(self, monkeypatch):
+    def test_fetch_h24_prices_batch_mid_price(self, monkeypatch):
         """bookTicker 批量一次拿全部：symbols=JSON 数组单参数，取 (bid+ask)/2 中间价。"""
         calls = []
 
@@ -801,14 +838,14 @@ class TestFetchOvernightQuotes:
             return R()
 
         monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_client_get)
-        out = asyncio.run(pf.fetch_crypto_prices(
+        out = asyncio.run(pf.fetch_h24_prices(
             {"AMD": "AMDBUSDT", "MU": "MUBUSDT"}))
-        # 单次请求携带全部交易对（攒批原则：次数要少，同批全查）
+        # 单次请求携带全部交易符号（攒批原则：次数要少，同批全查）
         assert len(calls) == 1
         assert out == {"AMD": {"price": pytest.approx(620.06)},
                        "MU": {"price": pytest.approx(1090.01)}}
 
-    def test_fetch_crypto_prices_bad_resp_falls_back(self, monkeypatch):
+    def test_fetch_h24_prices_bad_resp_falls_back(self, monkeypatch):
         """批量响应非 list（错误对象）→ 换代理候选重试，全失败返回 {}。"""
         attempts = []
 
@@ -821,21 +858,21 @@ class TestFetchOvernightQuotes:
             return R()
 
         monkeypatch.setattr(pf.httpx.AsyncClient, "get", fake_client_get)
-        out = asyncio.run(pf.fetch_crypto_prices(
+        out = asyncio.run(pf.fetch_h24_prices(
             {"AMD": "AMDBUSDT"}, proxy_urls=["http://p1:9", "http://p2:9"]))
         assert out == {}
         # 直连 + 2 个代理候选逐个尝试后放弃
         assert len(attempts) == 3
 
     def test_fetch_overnight_quotes_degrades_to_empty(self, monkeypatch):
-        """映射为空（全部无对应交易对/接口失败）→ 恒 {}，自然降级定格口径。"""
+        """映射为空（全部无对应交易/接口失败）→ 恒 {}，自然降级定格口径。"""
         async def fake_resolve(us_symbols, proxy_urls=None):
             return {}
-        monkeypatch.setattr(pf, "resolve_crypto_map", fake_resolve)
+        monkeypatch.setattr(pf, "resolve_h24_map", fake_resolve)
         assert asyncio.run(pf.fetch_overnight_quotes(["QQQM"])) == {}
 
-    def test_fetch_overnight_quotes_wires_crypto(self, monkeypatch):
-        """插槽串联：映射非空 → fetch_crypto_prices 结果直出；境外代理透传。"""
+    def test_fetch_overnight_quotes_wires_h24(self, monkeypatch):
+        """插槽串联：映射非空 → fetch_h24_prices 结果直出；境外代理透传。"""
         async def fake_resolve(us_symbols, proxy_urls=None):
             assert proxy_urls == ["http://ov1:9"]   # 境外代理经 fetch_overnight_quotes 透传
             return {"AMD": "AMDBUSDT"}
@@ -844,14 +881,14 @@ class TestFetchOvernightQuotes:
             assert bmap == {"AMD": "AMDBUSDT"}
             return {"AMD": {"price": 620.06}}
 
-        monkeypatch.setattr(pf, "resolve_crypto_map", fake_resolve)
-        monkeypatch.setattr(pf, "fetch_crypto_prices", fake_prices)
+        monkeypatch.setattr(pf, "resolve_h24_map", fake_resolve)
+        monkeypatch.setattr(pf, "fetch_h24_prices", fake_prices)
         assert asyncio.run(pf.fetch_overnight_quotes(["AMD"], proxy_urls=["http://ov1:9"])) \
             == {"AMD": {"price": 620.06}}
 
 
 class TestFetchEquityOvernightQuotes:
-    """股票行情端点补齐：无交易对标的（AMKR/PCG/F）夜盘价，中间价口径与容错。"""
+    """股票行情端点补齐：无交易标的（AMKR/PCG/F）夜盘价，中间价口径与容错。"""
 
     def test_equity_mid_price_per_symbol(self, monkeypatch):
         """逐只单 symbol 请求，取 (bid+ask)/2 中间价（与 bookTicker 同口径）。"""
@@ -1038,7 +1075,7 @@ class TestMarketPanelYahooSpark:
         """MARKET_PANEL spark_source 口径：第 5 位仅作历史主源标记（现行分时统一
         读库组装，不再单独请求分时接口）；USDCNH 已作为第 11 项加入看板。"""
         src = {key: s for key, _, _, _, s in pf.MARKET_PANEL}
-        assert len(pf.MARKET_PANEL) == 11 and "USDCNH" in src
+        assert len(pf.MARKET_PANEL) == 14 and "USDCNH" in src
         assert src["HSI"] == "tencent"
         assert src["QQQ"] == src["SPY"] == src["SOXX"] == "yahoo_day"
         assert src["BZ"] == src["GC"] == src["DXY"] == "yahoo_day"
@@ -1136,9 +1173,11 @@ class TestMarketPanelYahooSpark:
         assert got["GC"]["price"] == 3860.5
         assert got["DXY"]["price"] == 102.1406
         assert got["USDCNH"]["price"] == 6.7068
-        # US30Y 已有 yahoo_day 数据（零补拉）；US10Y/VIX 缺失 → 内部补拉当日分时接口
-        assert yahoo_calls == ["^TNX", "^VIX"]
+        # US30Y 已有 yahoo_day 数据（零补拉）；US10Y/VIX/DJI/NDX/SPX 缺失
+        # → 内部补拉当日分时接口（按 MARKET_PANEL 顺序）
+        assert yahoo_calls == ["^TNX", "^VIX", "^DJI", "^NDX", "^GSPC"]
         assert got["US30Y"]["price"] == 5.603 and got["US10Y"]["price"] == 5.6
+        assert got["DJI"]["price"] == 5.6 and got["SPX"]["price"] == 5.6
         # 腾讯分时死请求已消除：主价轮不再打 minute 接口
         assert minute_urls == []
 
@@ -1194,11 +1233,11 @@ class TestMarketPanelYahooSpark:
         assert asyncio.run(pf.fetch_fx_spark()) == []
 
 
-class TestCryptoAliasDerive:
-    """同标的替代推导（QQQM→QQQ）：加密价百分点映射到自身收盘基准。"""
+class TestH24AliasDerive:
+    """同标的替代推导（QQQM→QQQ）：24h价百分点映射到自身收盘基准。"""
 
     def test_derive_alias_qqqm_from_qqq(self):
-        # QQQ 加密价 745 / QQQ 收盘 740 = +0.6757% → QQQM = 304.64 × 比率
+        # QQQ 24h价 745 / QQQ 收盘 740 = +0.6757% → QQQM = 304.64 × 比率
         overnight = {"QQQ": {"price": 745.0}}
         close_map = {"QQQM": 304.64, "QQQ": 740.0}
         out = pf.derive_alias_prices(overnight, close_map, ["QQQM", "QQQ"])
@@ -1206,7 +1245,7 @@ class TestCryptoAliasDerive:
         assert out["QQQM"]["price"] == pytest.approx(304.64 * 745.0 / 740.0)
 
     def test_derive_alias_skips_when_self_covered(self):
-        # 自身已有加密价（理论不该发生）→ 不推导不覆盖
+        # 自身已有 24h价（理论不该发生）→ 不推导不覆盖
         overnight = {"QQQ": {"price": 745.0}, "QQQM": {"price": 306.0}}
         out = pf.derive_alias_prices(overnight, {"QQQM": 304.64, "QQQ": 740.0},
                                      ["QQQM", "QQQ"])

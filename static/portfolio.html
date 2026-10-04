@@ -50,6 +50,11 @@ button { font-family: inherit; }
 .header-status { margin-left: auto; display: flex; align-items: center; gap: 12px;
   font-size: 11px; color: var(--txt3); line-height: 1.2; }
 
+/* ---- 数据源提醒条（长桥 token 失效/临期、已切冷备）---- */
+.ds-alert { display: flex; align-items: center; padding: 8px 24px;
+  background: #3a2b12; color: #f5c66b; border-bottom: 1px solid #5a4318;
+  font-size: 12.5px; line-height: 1.5; }
+
 /* ---- 布局 ---- */
 .content { padding: 16px 24px 40px; max-width: 1200px; margin: 0 auto;
   display: flex; flex-direction: column; gap: 16px; }
@@ -235,6 +240,9 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
     <a class="link" href="#" onclick="logout();return false;">登出</a>
   </div>
 </header>
+
+<!-- 数据源提醒条：长桥 token 失效/临期、或主源异常已切新浪冷备时显示 -->
+<div class="ds-alert" id="dsAlert" style="display:none"></div>
 
 <main class="content">
 
@@ -618,7 +626,7 @@ function nightBadge(p, session, night) {
 }
 
 // night_session 归一：兼容旧布尔与新结构 {active,window,source,note}
-// active=加密市场数据源代理价生效（夜盘活价），window=处于夜盘/周末窗口（可能定格）
+// active=24h数据源代理价生效（夜盘活价），window=处于夜盘/周末窗口（可能定格）
 function nightOf(d) {
   const n = d && d.night_session;
   if (n && typeof n === 'object') {
@@ -761,17 +769,17 @@ function renderOverview(d) {
     document.getElementById('cnySub').textContent = '';
     document.getElementById('cnyItem').title = '';
   }
-  // session 徽章与提示：非 regular 时段加密市场数据源代理价补全（盘后/夜盘/
+  // session 徽章与提示：非 regular 时段 24h数据源代理价补全（盘后/夜盘/
   // 盘前/假日），active 时徽章取后端 note；无活源时退回「数据定格」
   const badge = document.getElementById('sessionBadge');
   const ng = nightOf(d);
-  badge.textContent = ng.active ? (ng.note || '加密市场数据源')
+  badge.textContent = ng.active ? (ng.note || '24h数据源')
     : (ng.window ? (SESSION_BADGE[d.session] || d.session || '--') + ' · 数据定格'
                  : (SESSION_BADGE[d.session] || d.session || '--'));
   const hintEl = document.getElementById('nightHint');
   hintEl.style.display = ng.window ? '' : 'none';
   hintEl.textContent = ng.active
-    ? '收盘至开盘时段：加密市场数据源代理价近似活价（允许微小偏差，盘前盘后优先真实扩展价）'
+    ? '收盘至开盘时段：24h数据源代理价近似活价（允许微小偏差，盘前盘后优先真实扩展价）'
     : '收盘时段行情暂不可用，价格定格于最近收盘';
   document.getElementById('fetchTime').textContent = d.fetch_time || '--:--:--';
   document.getElementById('fxInfo').textContent = 'USD/HKD ' + fmt(d.fx_usdhkd, 4) + (d.fx_fallback ? '(默认)' : '');
@@ -1467,6 +1475,31 @@ window.addEventListener('resize', () => {
   }, 120);
 });
 refresh(); loadChart();
+
+// ===== 数据源健康提醒（长桥主源状态，60s 轮询；异常时页首橙色横幅）=====
+async function checkDatasource() {
+  try {
+    const r = await fetch('/api/datasource/status');
+    if (!r.ok) return;
+    const d = await r.json();
+    const lp = d.longport || {};
+    const bar = document.getElementById('dsAlert');
+    let msg = '';
+    if (lp.token_status === 'invalid' || lp.token_status === 'expired') {
+      msg = '长桥行情 token 已失效：请到长桥后台「开放平台 → 访问令牌」重新生成（选正式账户身份），' +
+            '再 UPDATE sys_config 的 LONGPORT_ACCESS_TOKEN，60 秒内自动生效（无需重启）';
+    } else if (lp.token_status === 'expiring') {
+      msg = '长桥行情 token 将于 ' + (lp.days_left != null ? lp.days_left + ' 天后(' + lp.token_expires_at + ' 到期)' : '近期到期') +
+            '：请提前到长桥后台重新生成并更新 sys_config（美股 LV1 套餐永久免费，仅需换 token）';
+    } else if (lp.fallback_active) {
+      msg = '长桥行情源连续异常(' + (lp.last_error_code || '网络') + ')，已自动切换新浪冷备，' +
+            '扩展价/夜盘价暂时降级，长桥恢复后将自动切回';
+    }
+    if (msg) { bar.textContent = msg; bar.style.display = 'flex'; }
+    else { bar.style.display = 'none'; }
+  } catch (e) { /* 拉取失败静默，下轮再查 */ }
+}
+setInterval(checkDatasource, 60000); checkDatasource();
 setInterval(refresh, 10000);
 // 分时（24h/当日）30s 轮询；日线区间不轮询
 setInterval(() => { if (isIntradayMode()) loadChart(); }, 30000);

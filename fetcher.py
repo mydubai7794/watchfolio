@@ -71,8 +71,10 @@ _source_last_used: dict[tuple[str, str], float] = {}
 # 直连也按 source 独立限速
 _direct_last_used: dict[str, float] = {}
 
-# 期指数据源轮询状态
-_futures_source_roundrobin: list[str] = ["sina", "eastmoney"]  # 轮询顺序
+# 期指数据源选择状态（2026-10-03 数据源架构升级：主备反转——东财恒为主源，
+# 新浪降为冷备，仅东财失败/健康冷却窗口时使用；新浪 IP 风控 403 频发，
+# 低频冷备可接受）。保留 roundrobin 结构仅为兼容既有状态机语义。
+_futures_source_roundrobin: list[str] = ["eastmoney", "sina"]  # 主→备优先序
 _futures_source_index: int = 0
 # 上一轮实际成功使用的期指数据源（主源失败降级备源时如实记录，供 fetch_round 下发）
 _futures_last_used_source: str | None = None
@@ -98,9 +100,10 @@ def set_proxies(proxies: list[str]) -> None:
 
 
 def _get_next_futures_source() -> str:
-    """获取下一个期指数据源（轮询）。
+    """获取期指数据源（东财恒为主源，新浪冷备）。
 
-    不健康的数据源在冷却 60 秒后自动恢复，避免一次失败就永久跳过。
+    东财健康时恒选东财（不再 50/50 轮询，新浪请求量降为冷备量级）；
+    不健康的源在冷却 60 秒后自动恢复。东财不可用时选新浪。
     """
     global _futures_source_index, _futures_source_health
 
@@ -111,10 +114,8 @@ def _get_next_futures_source() -> str:
             del _futures_source_recover[source]
             logger.info("期指数据源 %s 冷却恢复，重新参与轮询", source)
 
-    # 找一个健康的数据源
-    for _ in range(len(_futures_source_roundrobin)):
-        source = _futures_source_roundrobin[_futures_source_index % len(_futures_source_roundrobin)]
-        _futures_source_index += 1
+    # 找一个健康的数据源（主→备优先序扫描：东财健康即恒选，新浪仅冷备）
+    for source in _futures_source_roundrobin:
         if _futures_source_health.get(source, True):
             return source
 
@@ -867,32 +868,52 @@ OVERNIGHT_INDICES = {
 
 
 async def fetch_overnight() -> dict:
-    """获取隔夜美股收盘数据，启动时调用一次。
+    """获取隔夜美股收盘数据，每天 09:15 调用一次。
 
-    Returns:
-        {"道琼斯": {"close": 48578.72, "change_pct": 0.24}, ...}
+    主源长桥新平台（.DJI/.NDX/.SPX.US 三项一次批量，含涨跌幅自算；
+    指数必须带 .US 后缀——旧平台 .INX 静默空的结论仅适用旧平台，新平台
+    标普符号为 .SPX.US）；长桥整体失败时新浪 gb_ 全量三项兜底。
+    返回 {"道琼斯": {"close": 48578.72, "change_pct": 0.24}, ...}。
     """
-    symbols = ",".join(OVERNIGHT_INDICES.keys())
-    url = SINA_FUTURES_URL.format(symbols=symbols)
-    raw = await _http_get(url, source="sina", headers=SINA_HEADERS)
-
     result: dict[str, dict] = {}
-    if not raw:
-        return result
+    # 1. 长桥主源：道指/纳指/标普一次批量（quote 直连 .cn，免代理）
+    try:
+        import longport_fetcher as lp
+        quotes = await lp.fetch_quote_map([".DJI.US", ".NDX.US", ".SPX.US"])
+        name_map = {".DJI.US": "道琼斯", ".NDX.US": "纳斯达克",
+                    ".SPX.US": "标普500"}
+        for sym, name in name_map.items():
+            q = quotes.get(sym)
+            if q and q.get("price"):
+                result[name] = {"close": q["price"],
+                                "change_pct": round(q.get("change_pct") or 0.0, 2),
+                                "time": "长桥"}
+                logger.info("隔夜 %s: 收盘=%.2f, 涨跌幅=%.2f%% (长桥)", name,
+                            q["price"], q.get("change_pct") or 0.0)
+    except Exception as e:
+        logger.warning("长桥隔夜指数获取异常: %s", e)
 
-    for symbol, name in OVERNIGHT_INDICES.items():
-        match = re.search(rf'var hq_str_{re.escape(symbol)}="([^"]*)"', raw)
-        if not match or not match.group(1):
-            continue
-        fields = match.group(1).split(",")
-        # 格式: 名称,收盘价,涨跌幅%,日期时间,...
-        result[name] = {
-            "close": _safe_float(fields[1]) if len(fields) > 1 else 0,
-            "change_pct": _safe_float(fields[2]) if len(fields) > 2 else 0,
-            "time": fields[3] if len(fields) > 3 else "",
-        }
-        logger.info("隔夜 %s: 收盘=%.2f, 涨跌幅=%.2f%%", name,
-                     result[name]["close"], result[name]["change_pct"])
+    # 2. 新浪：长桥缺的项补齐（常态仅标普500 一项；长桥全挂时全量三项兜底）
+    sina_syms = [s for s, n in OVERNIGHT_INDICES.items() if n not in result]
+    if sina_syms:
+        url = SINA_FUTURES_URL.format(symbols=",".join(sina_syms))
+        raw = await _http_get(url, source="sina", headers=SINA_HEADERS)
+        if raw:
+            for symbol, name in OVERNIGHT_INDICES.items():
+                if symbol not in sina_syms:
+                    continue
+                match = re.search(rf'var hq_str_{re.escape(symbol)}="([^"]*)"', raw)
+                if not match or not match.group(1):
+                    continue
+                fields = match.group(1).split(",")
+                # 格式: 名称,收盘价,涨跌幅%,日期时间,...
+                result[name] = {
+                    "close": _safe_float(fields[1]) if len(fields) > 1 else 0,
+                    "change_pct": _safe_float(fields[2]) if len(fields) > 2 else 0,
+                    "time": fields[3] if len(fields) > 3 else "",
+                }
+                logger.info("隔夜 %s: 收盘=%.2f, 涨跌幅=%.2f%%", name,
+                             result[name]["close"], result[name]["change_pct"])
     return result
 
 

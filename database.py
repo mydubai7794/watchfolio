@@ -154,7 +154,7 @@ async def init_tables():
             url         VARCHAR(100) NOT NULL UNIQUE COMMENT '代理地址',
             latency_ms  INT          DEFAULT 0 COMMENT '延迟(毫秒)',
             alive       TINYINT(1)   DEFAULT 1 COMMENT '1=可用 0=不可用',
-            region      VARCHAR(16)  DEFAULT 'unknown' COMMENT '代理分类: overseas=境外(加密市场数据源可用) unknown=未分类',
+            region      VARCHAR(16)  DEFAULT 'unknown' COMMENT '代理分类: overseas=境外(24h数据源可用) unknown=未分类',
             last_check  DATETIME     NULL COMMENT '最后检测时间',
             created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='代理IP池'
@@ -171,7 +171,7 @@ async def init_tables():
     if not cols or not cols[0].get("n"):
         await execute(
             "ALTER TABLE proxy_pool ADD COLUMN region VARCHAR(16) "
-            "DEFAULT 'unknown' COMMENT '代理分类: overseas=境外(加密市场数据源可用) unknown=未分类'",
+            "DEFAULT 'unknown' COMMENT '代理分类: overseas=境外(24h数据源可用) unknown=未分类'",
             _pool=pool,
         )
 
@@ -180,10 +180,40 @@ async def init_tables():
         """
         CREATE TABLE IF NOT EXISTS sys_config (
             `key`   VARCHAR(50)  PRIMARY KEY COMMENT '配置键',
-            value   VARCHAR(200) NOT NULL COMMENT '配置值',
+            value   VARCHAR(2000) NOT NULL COMMENT '配置值',
             remark  VARCHAR(100) DEFAULT '' COMMENT '备注'
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='系统配置'
         """,
+        _pool=pool,
+    )
+    # value 列加宽迁移（存量库 VARCHAR(200) 装不下长桥 access_token ~1300 字符；
+    # 仿 region 列迁移先查再改，幂等）
+    vcols = await execute_dict(
+        "SELECT CHARACTER_MAXIMUM_LENGTH AS len FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sys_config' "
+        "AND COLUMN_NAME = 'value'",
+        _pool=pool,
+    )
+    if vcols and int(vcols[0].get("len") or 0) < 2000:
+        await execute(
+            "ALTER TABLE sys_config MODIFY COLUMN value VARCHAR(2000) NOT NULL "
+            "COMMENT '配置值'",
+            _pool=pool,
+        )
+    # ---- 长桥 OpenAPI 凭证 seed（幂等，INSERT IGNORE 不覆盖已更新的值）----
+    # 换 token 流程（约 90 天一次）：长桥后台「开放平台 → 访问令牌」重新生成
+    # （务必选正式账户身份，模拟盘 token 会被行情网关 401004 拒绝）后执行
+    #   UPDATE sys_config SET value='<新token>' WHERE `key`='LONGPORT_ACCESS_TOKEN';
+    # 服务 60s 内热加载生效，无需重启。行情套餐：美股 LV1（QBBO 含夜盘）永久
+    # 免费，换 token 不影响套餐；港股 LV2 / A股 LV1 为体验套餐有独立到期时间。
+    import longport_fetcher as _lp
+    await execute(
+        "INSERT IGNORE INTO sys_config (`key`, value, remark) VALUES "
+        "(%s, %s, %s), (%s, %s, %s), (%s, %s, %s)",
+        args=(_lp.CFG_KEY_APP_KEY, _lp.DEFAULT_APP_KEY, "长桥开放平台 App Key",
+              _lp.CFG_KEY_APP_SECRET, _lp.DEFAULT_APP_SECRET, "长桥开放平台 App Secret",
+              _lp.CFG_KEY_ACCESS_TOKEN, _lp.DEFAULT_ACCESS_TOKEN,
+              "长桥访问令牌(约90天到期,后台重新生成后UPDATE本行,60s热加载)"),
         _pool=pool,
     )
 
@@ -538,9 +568,9 @@ async def get_alive_proxies() -> list[dict]:
 
 
 async def get_overseas_proxies() -> list[dict]:
-    """返回境外分类的可用代理（加密市场数据源专用）。
+    """返回境外分类的可用代理（24h数据源专用）。
 
-    region='overseas' 由境外可达性探测循环维护（CRYPTO_PING 探测成功标记）。
+    region='overseas' 由境外可达性探测循环维护（H24_PING 探测成功标记）。
     """
     return await execute_dict(
         "SELECT * FROM proxy_pool WHERE alive = 1 AND region = 'overseas' "
@@ -1008,7 +1038,7 @@ async def get_portfolio_daily(days: int) -> list[dict]:
     """返回近 N 天的日线（北京自然日「当日定格」快照，ts 列为北京时间）。
 
     每日取 21:30（美东开盘）前最后一条 tick：交易日点=前一美东场收盘定格
-    （day_pnl 即该场累计盈亏），周末点=加密跟价现值；今天自然出现当日点，
+    （day_pnl 即该场累计盈亏），周末点=24h跟价现值；今天自然出现当日点，
     日期与用户直觉（北京日）一致。白天定格段若无新 tick（价变即写），
     自动回退该日更早的最后采样（凌晨收盘前后），仍为定格语义。
     """

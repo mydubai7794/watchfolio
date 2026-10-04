@@ -42,24 +42,24 @@ SINA_US_URL = "https://hq.sinajs.cn/list={symbols}"
 SINA_HEADERS = {"Referer": "https://finance.sina.com.cn"}
 SINA_FX_URL = "https://hq.sinajs.cn/list=fx_susdhkd"
 SINA_PANEL_URL = "https://hq.sinajs.cn/list=DINIW,hf_OIL,hf_GC,fx_susdcnh"
-# 加密市场数据源（境外现货交易所公共行情端点）：免 key 7×24 有价，美股闭市时段
+# 24h数据源（境外现货交易所公共行情端点）：免 key 7×24 有价，美股闭市时段
 # （夜盘/周末）代理价补全组合走势，中间价口径与底层夜盘价偏差实测 0.02%-0.1%
-# （详见《美股夜盘数据源研报.md》）；境内 IP 直连不可用，须经境外代理访问
-CRYPTO_EXCHANGE_INFO_URL = "https://data-api.binance.vision/api/v3/exchangeInfo"
-CRYPTO_TICKER_URL = "https://data-api.binance.vision/api/v3/ticker/24hr?symbol={symbol}"
-CRYPTO_BOOK_TICKER_URL = "https://data-api.binance.vision/api/v3/ticker/bookTicker"
-CRYPTO_PING_URL = "https://data-api.binance.vision/api/v3/ping"   # 代理境外可达性探测（weight 0）
-# 注：data-api.binance.vision 是该交易所官方公开行情镜像域名，主站 api.binance.com
-# 对机房 IP 段有 TLS 层封禁（实测 *REMOVED* 等境外出口 CONNECT 成功但握手被
-# reset），vision 域名不封且行情数据与主站完全一致；实测境内直连可达（200）
+# （详见《美股夜盘数据源研报.md》）；同套端点亦提供 24h 盘口探测（weight 0）
+H24_EXCHANGE_INFO_URL = "https://data-api.binance.vision/api/v3/exchangeInfo"
+H24_TICKER_URL = "https://data-api.binance.vision/api/v3/ticker/24hr?symbol={symbol}"
+H24_BOOK_TICKER_URL = "https://data-api.binance.vision/api/v3/ticker/bookTicker"
+H24_PING_URL = "https://data-api.binance.vision/api/v3/ping"   # 代理境外可达性探测（weight 0）
+# 注：端点域名为该数据源官方公开行情镜像域名（描述性文本一律使用「24h数据源」，
+# 不指名具体交易所）；镜像域名境内直连可达，实测 200
 # 同标的替代映射（自身无对应交易对、但可借替代标的涨跌幅推导夜盘价）：
 # QQQM 与 QQQ 为同一基金的两份额类，净值比率恒定 → QQQM 夜盘价 =
-# QQQM 收盘定格 × (QQQ 加密中间价 / QQQ 收盘定格)
-CRYPTO_ALIAS = {"QQQM": "QQQ"}
-# 加密市场数据源·股票行情端点（equity quote，另一套接口）：bookTicker 无对应
-# 交易对的美股标的（如 AMKR/PCG/F，FUSDT 是 Findora 币禁误配）夜盘活价补齐；
+# QQQM 收盘定格 × (QQQ 24h中间价 / QQQ 收盘定格)
+H24_ALIAS = {"QQQM": "QQQ"}
+# 24h数据源·股票行情端点（equity quote，另一套接口）：bookTicker 无对应
+# 交易的美股标的（如 AMKR/PCG/F，F 为既有射频识别业务代号、严禁误配到其它
+# 同名符号）夜盘活价补齐；
 # 仅支持单 symbol 逐只请求（weight=1/只），网关域名境内直连可达（免代理），
-# 双层鉴权：X-Auth-Token（网关）+ X-MBX-APIKEY（业务），两值相同
+# 双层鉴权：X-Auth-Token（网关）+ X-H24-APIKEY（业务），两值相同
 EQUITY_QUOTE_URL = "***REMOVED***"
 # key 支持环境变量注入（默认保留现值，部署无需改动）
 EQUITY_API_KEY = os.getenv("EQUITY_API_KEY", "***REMOVED***")
@@ -82,12 +82,14 @@ YAHOO_HEADERS = {
 }
 # Yahoo v8 chart 日线映射（仅剩 USDHKD：server 循环经 fetch_fx_spark 低频拉取 fx_spark）
 YAHOO_PANEL_SYMBOLS = {"USDHKD": "HKD=X"}
-# 看板标的 Yahoo 代码映射（美股 ETF/期货/美元指数/收益率/VIX/离岸人民币）；
-# 实际仅 US30Y/US10Y/VIX 三项由 server 沿用 backfill 节奏刷新主价（响应内
-# 当日 5m 分时顺带落库），其余映射仅作标的全集 DAY_MINUTE_KEYS 的构成
+# 看板标的 Yahoo 代码映射（美股 ETF/期货/美元指数/收益率/VIX/指数/离岸人民币）；
+# 实际仅 US30Y/US10Y 与指数四项（VIX/DJI/NDX/SPX）由 server 沿用 backfill 节奏
+# 刷新主价（长桥不可用时兜底；响应内当日 5m 分时顺带落库），其余映射仅作
+# 标的全集 DAY_MINUTE_KEYS 的构成
 YAHOO_DAY_SYMBOLS = {"QQQ": "QQQ", "SPY": "SPY", "SOXX": "SOXX",
                      "BZ": "BZ=F", "GC": "GC=F", "DXY": "DX-Y.NYB",
                      "US30Y": "^TYX", "US10Y": "^TNX", "VIX": "^VIX",
+                     "DJI": "^DJI", "NDX": "^NDX", "SPX": "^GSPC",
                      "USDCNH": "CNH=X"}
 # 看板主价快照存库/读 spark 的标的全集：分时全部由主价快照价变即写累积
 # （US30Y/US10Y/VIX 由 Yahoo 主价刷新顺带落库），不请求单独的分时接口
@@ -115,10 +117,10 @@ _td_fail_streak = 0
 _last_td_used = 0.0
 _td_cursor = 0   # 兜底批量轮换指针（全部 symbol 列表中的起始下标）
 
-# 加密市场数据源映射缓存：{美股代码: 交易对}，exchangeInfo 低频刷新（24h TTL）
-_CRYPTO_MAP_TTL_SEC = 86400.0
-_crypto_map_cache: dict[str, str] = {}
-_crypto_map_ts = 0.0
+# 24h数据源映射缓存：{美股代码: 交易符号}，exchangeInfo 低频刷新（24h TTL）
+_H24_MAP_TTL_SEC = 86400.0
+_h24_map_cache: dict[str, str] = {}
+_h24_map_ts = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -771,15 +773,29 @@ async def fetch_quotes(us_symbols: list[str], hk_symbols: list[str],
     else:
         _td_fail_streak += 1
 
-    # 扩展时段合并新浪盘前盘后价（仅美股；港股无扩展时段概念）。
-    # closed 的晚间/凌晨窗口也拉取：新浪夜间返回当日最后盘后价，避免夜盘价格"倒退"
+    # 扩展时段合并美股盘前盘后/夜盘扩展价（仅美股；港股无扩展时段概念）。
+    # 主源长桥（批量含官方夜盘价）；长桥连续失败>=3轮/退避/token失效时自动
+    # 回切新浪 gb_ 冷备（403 概率性，低频冷备可接受），恢复后切回长桥。
+    # closed 的晚间/凌晨窗口也拉取：夜间返回当日最后盘后/夜盘价，避免夜盘
+    # 价格"倒退"
     if should_fetch_ext(session, datetime.now(ET_TZ)) and quotes and us_symbols:
-        raw2 = await _get_text_resilient(
-            SINA_US_URL.format(symbols=",".join("gb_" + s.lower() for s in us_symbols)),
-            headers=SINA_HEADERS, proxy_urls=proxy_urls,
-        )
-        if raw2:
-            ext = parse_sina_us(raw2, us_symbols)
+        ext: dict[str, dict] | None = None
+        try:
+            import longport_fetcher as lp
+            if lp.is_available():
+                ext = await lp.fetch_us_ext(us_symbols, session)
+        except Exception as e:
+            logger.warning("长桥扩展价获取异常: %s", e)
+            ext = None
+        if not ext:
+            # 新浪冷备：长桥不可用/本轮失败（403 时代理池容错照旧）
+            raw2 = await _get_text_resilient(
+                SINA_US_URL.format(symbols=",".join("gb_" + s.lower() for s in us_symbols)),
+                headers=SINA_HEADERS, proxy_urls=proxy_urls,
+            )
+            if raw2:
+                ext = parse_sina_us(raw2, us_symbols)
+        if ext:
             for sym, q in quotes.items():
                 e = ext.get(sym)
                 if e and e.get("ext_price", 0) > 0:
@@ -831,15 +847,15 @@ async def fetch_us_quotes(symbols: list[str], session: str | None = None) -> dic
 
 def derive_alias_prices(overnight: dict[str, dict], close_map: dict[str, float],
                         us_symbols: list[str]) -> dict[str, dict]:
-    """同标的替代推导（纯函数）：借替代标的加密价涨跌幅还原无交易对标的的夜盘价。
+    """同标的替代推导（纯函数）：借替代标的 24h价涨跌幅还原无交易标的的夜盘价。
 
-    映射表 CRYPTO_ALIAS（如 QQQM→QQQ，同一基金两份额类、净值比率恒定）：
-    sym 夜盘价 = sym 收盘定格 × (alias 加密价 / alias 收盘定格)——把替代标的的
-    百分比变动映射到自身基准得到最新净值。前提：sym 自身无加密价、alias 有、
+    映射表 H24_ALIAS（如 QQQM→QQQ，同一基金两份额类、净值比率恒定）：
+    sym 夜盘价 = sym 收盘定格 × (alias 24h价 / alias 收盘定格)——把替代标的的
+    百分比变动映射到自身基准得到最新净值。前提：sym 自身无 24h价、alias 有、
     两者收盘定格齐备（腾讯常规收盘）。返回补充进 overnight 的新增项。
     """
     added: dict[str, dict] = {}
-    for sym, alias in CRYPTO_ALIAS.items():
+    for sym, alias in H24_ALIAS.items():
         if sym not in us_symbols or sym in overnight or alias not in overnight:
             continue
         c_self = close_map.get(sym)
@@ -923,45 +939,45 @@ async def fetch_td_session_anchors(us_symbols: list[str]) -> dict[str, dict]:
     return out
 
 
-async def resolve_crypto_map(us_symbols: list[str],
-                             proxy_urls: list[str] | None = None) -> dict[str, str]:
-    """解析美股代码 → 加密市场数据源交易对映射（如 AMD→AMDBUSDT）。
+async def resolve_h24_map(us_symbols: list[str],
+                          proxy_urls: list[str] | None = None) -> dict[str, str]:
+    """解析美股代码 → 24h数据源交易符号映射（如 AMD→AMDBUSDT）。
 
-    exchangeInfo 全量拉取（weight 10）后过滤 status=TRADING 的 USDT 对，
-    规则：代码+"B"+"USDT" 精确匹配；结果缓存 24h（映射关系极少变化）。
-    请求经境外代理（proxy_urls 前 2 个）后直连兜底（境内 IP 直连不可用）；
-    失败返回上次缓存或空 dict（不写缓存，下轮重试）；无对应交易对的
+    exchangeInfo 全量拉取（weight 10）后过滤 status=TRADING 的可交易符号，
+    规则：代码+"B"+计价后缀 精确匹配；结果缓存 24h（映射关系极少变化）。
+    请求直连优先、失败经境外代理（proxy_urls 前 2 个）兜底；
+    失败返回上次缓存或空 dict（不写缓存，下轮重试）；无对应交易的
     持仓（如 QQQM/PCG/AMKR/F）自然缺省，夜盘维持定格口径。
     """
-    global _crypto_map_cache, _crypto_map_ts
+    global _h24_map_cache, _h24_map_ts
     now_mono = time.monotonic()
-    if _crypto_map_cache and now_mono - _crypto_map_ts < _CRYPTO_MAP_TTL_SEC:
-        return {s: p for s, p in _crypto_map_cache.items() if s in set(us_symbols)}
+    if _h24_map_cache and now_mono - _h24_map_ts < _H24_MAP_TTL_SEC:
+        return {s: p for s, p in _h24_map_cache.items() if s in set(us_symbols)}
     candidates = list(proxy_urls or [])[:2] + [None]
     last_err = ""
     for proxy in candidates:
         try:
             async with httpx.AsyncClient(timeout=15, proxy=proxy) as client:
-                resp = await client.get(CRYPTO_EXCHANGE_INFO_URL)
+                resp = await client.get(H24_EXCHANGE_INFO_URL)
                 data = resp.json()
             pairs = {s["symbol"] for s in data.get("symbols", [])
                      if s.get("status") == "TRADING" and s.get("symbol", "").endswith("USDT")}
             mapping = {s: s + "BUSDT" for s in us_symbols if s + "BUSDT" in pairs}
             if mapping:
-                _crypto_map_cache, _crypto_map_ts = mapping, now_mono
+                _h24_map_cache, _h24_map_ts = mapping, now_mono
             return mapping
         except Exception as e:
             last_err = str(e)
-    logger.warning("加密市场数据源 exchangeInfo 获取失败(用上次缓存): %s", last_err)
-    return {s: p for s, p in _crypto_map_cache.items() if s in set(us_symbols)}
+    logger.warning("24h数据源 exchangeInfo 获取失败(用上次缓存): %s", last_err)
+    return {s: p for s, p in _h24_map_cache.items() if s in set(us_symbols)}
 
 
-async def fetch_crypto_prices(bmap: dict[str, str],
-                              proxy_urls: list[str] | None = None) -> dict[str, dict]:
-    """批量拉加密市场数据源 bookTicker，取买卖一中间价 (bid+ask)/2（研报 4.3 稳健口径）。
+async def fetch_h24_prices(bmap: dict[str, str],
+                           proxy_urls: list[str] | None = None) -> dict[str, dict]:
+    """批量拉 24h数据源 bookTicker，取买卖一中间价 (bid+ask)/2（研报 4.3 稳健口径）。
 
-    攒批原则（用户：次数要少，尽量同批全查）：symbols 参数一次携带全部交易对
-    （≤20 只 weight 仅 1，URL 编码 JSON 数组），替代逐只请求（原 15 只=30
+    攒批原则（用户：次数要少，尽量同批全查）：symbols 参数一次携带全部交易
+    符号（≤20 只 weight 仅 1，URL 编码 JSON 数组），替代逐只请求（原 15 只=30
     weight/轮）；请求直连优先（实测境内可达），失败按 proxy_urls 顺序逐个
     代理重试；全部失败返回 {}（下轮再试）。
     返回 {美股代码: {"price": 中间价}}。
@@ -976,7 +992,7 @@ async def fetch_crypto_prices(bmap: dict[str, str],
         try:
             async with httpx.AsyncClient(timeout=10, proxy=proxy) as client:
                 resp = await client.get(
-                    CRYPTO_BOOK_TICKER_URL + "?symbols=" + symbols_param)
+                    H24_BOOK_TICKER_URL + "?symbols=" + symbols_param)
                 rows = resp.json()
             if not isinstance(rows, list):
                 continue   # 换下一个候选重试
@@ -994,23 +1010,23 @@ async def fetch_crypto_prices(bmap: dict[str, str],
 
 async def fetch_overnight_quotes(us_symbols: list[str],
                                  proxy_urls: list[str] | None = None) -> dict[str, dict]:
-    """夜盘/周末美股代理价抓取（加密市场数据源，7×24 有价）。
+    """夜盘/周末美股代理价抓取（24h数据源，7×24 有价）。
 
-    美东闭市时段（夜盘 20:00-04:00 + 周末）以加密市场数据源中间价近似
+    美东闭市时段（夜盘 20:00-04:00 + 周末）以 24h数据源中间价近似
     夜盘价（实测偏差 0.02%-0.1%，用户允许误差），_portfolio_loop 合并后
-    组合总值 24h 曲线连续；无对应交易对/拉取失败的标的自然缺省，维持
-    19:59 盘后价定格口径。proxy_urls 为境外代理列表（境内 IP 直连不可用）。
+    组合总值 24h 曲线连续；无对应交易/拉取失败的标的自然缺省，维持
+    19:59 盘后价定格口径。proxy_urls 为境外代理列表（直连失败时兜底）。
     """
-    bmap = await resolve_crypto_map(us_symbols, proxy_urls)
+    bmap = await resolve_h24_map(us_symbols, proxy_urls)
     if not bmap:
         return {}
-    return await fetch_crypto_prices(bmap, proxy_urls)
+    return await fetch_h24_prices(bmap, proxy_urls)
 
 
 async def fetch_equity_overnight_quotes(symbols: list[str]) -> dict[str, dict]:
-    """股票行情端点补齐：bookTicker 无交易对美股标的的夜盘活价（逐只并发）。
+    """股票行情端点补齐：bookTicker 无交易美股标的的夜盘活价（逐只并发）。
 
-    加密市场数据源 bookTicker 覆盖不到、亦无同标的替代的标的（如 AMKR/PCG/F）
+    24h数据源 bookTicker 覆盖不到、亦无同标的替代的标的（如 AMKR/PCG/F）
     经 equity quote 端点逐只补齐（接口仅支持单 symbol，weight=1/只，gather
     并发一轮一次往返），取买卖一中间价 (bid+ask)/2 与 bookTicker 同口径；
     网关域名境内直连可达（免代理）。失败/零价/symbol 不符的标的自然缺省，
@@ -1018,7 +1034,7 @@ async def fetch_equity_overnight_quotes(symbols: list[str]) -> dict[str, dict]:
     """
     if not symbols:
         return {}
-    headers = {"X-Auth-Token": EQUITY_API_KEY, "X-MBX-APIKEY": EQUITY_API_KEY}
+    headers = {"X-Auth-Token": EQUITY_API_KEY, "X-H24-APIKEY": EQUITY_API_KEY}
 
     async def _one(client: httpx.AsyncClient, sym: str) -> tuple[str, dict | None]:
         try:
@@ -1037,15 +1053,41 @@ async def fetch_equity_overnight_quotes(symbols: list[str]) -> dict[str, dict]:
     return {s: q for s, q in pairs if q}
 
 
+async def fetch_td_fx(pair: str) -> float:
+    """twelvedata 外汇行情（USD/CNH、USD/HKD 等），失败/越界返回 0.0。
+
+    免费 8 credits/min 共享限额：USD/CNH 由 _market_loop 60s 节流调用
+    （1 credit/min），USD/HKD 每天 2 次（可忽略）；无独立节流，频次由调用方控制。
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(TWELVEDATA_QUOTE_URL, params={
+                "symbol": pair, "apikey": TWELVEDATA_API_KEY})
+            data = resp.json()
+            if isinstance(data, dict):
+                v = _f(str(data.get("close") or data.get("price") or 0))
+                if v > 0:
+                    return v
+            logger.warning("twelvedata %s 无有效价: %s", pair,
+                           str(data)[:120] if isinstance(data, dict) else type(data))
+    except Exception as e:
+        logger.warning("twelvedata %s 获取失败: %s", pair, e)
+    return 0.0
+
+
 async def fetch_fx_usdhkd(proxy_urls: list[str] | None = None) -> tuple[float, bool]:
     """获取 USD/HKD 汇率。返回 (汇率, 是否兜底)。
 
-    直连 403/失败时按 proxy_urls 前 2 个代理重试（云服务器 IP 常被新浪拉黑）。
+    主源新浪 fx_susdhkd（直连 403 时代理重试），失败回切 twelvedata 冷备
+    （TD 免费额度让位锚点恢复与 USDCNH 主价），再失败置 7.80 静态兜底。
     """
     raw = await _get_text_resilient(SINA_FX_URL, headers=SINA_HEADERS, proxy_urls=proxy_urls)
     v = parse_fx_usdhkd(raw or "")
     if v > 0:
         return v, False
+    v = await fetch_td_fx("USD/HKD")
+    if 7.5 <= v <= 8.5:
+        return v, True
     return FX_FALLBACK, True
 
 
@@ -1072,15 +1114,18 @@ async def fetch_fund_nav(proxy_urls: list[str] | None = None) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# 市场参考看板（QQQ/SPY/SOXX/HSI/BZ/GC/DXY/US30Y/US10Y/VIX/USDCNH + 当日分时 spark）
+# 市场参考看板（QQQ/SPY/SOXX/HSI/BZ/GC/DXY/US30Y/US10Y/VIX/DJI/NDX/SPX/USDCNH + 当日分时 spark）
 # ---------------------------------------------------------------------------
 
 MARKET_PANEL = [  # (key, 腾讯代码(空=新浪DINIW/fx_susdcnh 或 Yahoo 主价), 展示名, 币种, 分时口径标记)
     # 第 5 位 spark_src 仅作历史主源标记：现行分时统一读 market_ticks 组装——
     # 主价快照价变即写累积（US30Y/US10Y/VIX 由 Yahoo 主价刷新顺带落库 5m 分时），
     # 不再单独请求分时接口
-    ("QQQ", "usQQQ", "纳指100", "USD", "yahoo_day"),  # 主价腾讯混排
-    ("SPY", "usSPY", "标普500", "USD", "yahoo_day"),  # 主价腾讯混排
+    ("DJI", "", "道琼斯指数", "", "yahoo_day"),           # 主价长桥 .DJI.US 实时（Yahoo ^DJI 兜底）
+    ("NDX", "", "纳指100指数", "", "yahoo_day"),          # 主价长桥 .NDX.US 实时（Yahoo ^NDX 兜底）
+    ("SPX", "", "标普500指数", "", "yahoo_day"),          # 主价长桥 .SPX.US 实时（Yahoo ^GSPC 兜底）
+    ("QQQ", "usQQQ", "QQQ", "USD", "yahoo_day"),          # ETF 主价腾讯混排（真指数见上方三项）
+    ("SPY", "usSPY", "SPY", "USD", "yahoo_day"),          # ETF 主价腾讯混排
     ("SOXX", "usSOXX", "费城半导体", "USD", "yahoo_day"),  # 主价腾讯混排
     ("HSI", "hkHSI", "恒生指数", "HKD", "tencent"),   # 主价腾讯混排
     ("BZ", "hf_OIL", "布伦特原油", "USD", "yahoo_day"),   # 主价腾讯 hf_ 混排(新浪兜底)
@@ -1088,7 +1133,7 @@ MARKET_PANEL = [  # (key, 腾讯代码(空=新浪DINIW/fx_susdcnh 或 Yahoo 主�
     ("DXY", "", "美元指数", "", "yahoo_day"),             # 主价新浪 DINIW
     ("US30Y", "", "美债30Y", "%", "yahoo_day"),           # 主价 Yahoo ^TYX（刷新顺带 5m 分时落库），单位百分点
     ("US10Y", "", "美债10Y", "%", "yahoo_day"),           # 主价 Yahoo ^TNX（同上）
-    ("VIX", "", "恐慌指数", "", "yahoo_day"),             # 主价 Yahoo ^VIX（同上）
+    ("VIX", "", "恐慌指数", "", "yahoo_day"),             # 主价长桥 .VIX.US 实时（Yahoo ^VIX 兜底）
     ("USDCNH", "", "美元人民币", "", "yahoo_day"),        # 主价新浪 fx_susdcnh
 ]
 
@@ -1153,21 +1198,44 @@ async def fetch_yahoo_day_minutes(symbol: str, proxy_urls: list[str] | None = No
     return {}
 
 
+async def fetch_sina_panel(proxy_urls: list[str] | None = None) -> dict:
+    """抓新浪看板批（DXY 主价 + USDCNH 冷备价 + hf_OIL/hf_GC 兜底，一次合并请求）。
+
+    数据源架构升级（2026-10-03）：本批由 server _market_loop 以 5min 节流
+    低频调用（成功固定间隔、失败指数退避），产物缓存透传 fetch_market_panel；
+    USDCNH 主价已切 twelvedata、VIX 已切长桥，新浪仅剩 DXY 主价职责（免费源
+    中无平替）与 BZ/GC 的低频兜底。返回 {dxy: dict, cnh: float, hf: {key: dict}}。
+    """
+    raw = await _get_text_resilient(SINA_PANEL_URL, headers=SINA_HEADERS,
+                                    proxy_urls=proxy_urls)
+    if not raw:
+        return {}
+    cnh = parse_fx_usdcnh(raw)
+    return {"dxy": parse_sina_diniw(raw), "cnh": cnh,
+            "hf": {"BZ": _parse_sina_hf(raw, "OIL"), "GC": _parse_sina_hf(raw, "GC")}}
+
+
 async def fetch_market_panel(proxy_urls: list[str] | None = None,
                              yahoo_day: dict[str, dict] | None = None,
                              spark_map: dict[str, list] | None = None,
-                             fetch_missing: bool = True) -> list[dict]:
-    """抓市场看板 11 项主价并组装 spark：腾讯混排批量 + 新浪(DINIW/fx_susdcnh 主用/
-    hf 兜底) + Yahoo(US30Y/US10Y/VIX 主价，代理池) + spark 经 spark_map 注入。
+                             fetch_missing: bool = True,
+                             sina_panel: dict | None = None,
+                             td_usdcnh: float | None = None) -> list[dict]:
+    """抓市场看板 14 项主价并组装 spark：腾讯混排批量 + 新浪低频批(DXY 主用/
+    USDCNH、hf 兜底，server 5min 节流传入) + twelvedata USDCNH 主价 +
+    Yahoo(US30Y/US10Y 主价，代理池；VIX/DJI/NDX/SPX 四项指数由长桥实时价
+    经 yahoo_day 注入，Yahoo 仅兜底) + spark 经 spark_map 注入。
 
     数据分工：
-    - 主价：QQQ/SPY/SOXX/HSI/BZ/GC 腾讯混排（BZ/GC 新浪 hf 兜底）；DXY 新浪 DINIW；
-      USDCNH 新浪 fx_susdcnh（与 DINIW 同一次批量请求）；US30Y/US10Y/VIX 取
-      yahoo_day（server 主价刷新轮传入，缺失项内部并发补拉保独立可用）；
+    - 主价：QQQ/SPY/SOXX/HSI/BZ/GC 腾讯混排（BZ/GC 新浪 hf 低频兜底）；DXY
+      新浪 DINIW（5min 鲜度）；USDCNH twelvedata 主价（60s）缺失回落新浪批
+      冷备价；US30Y/US10Y 取 yahoo_day（server 主价刷新轮传入）；
+      VIX/DJI/NDX/SPX 取 yahoo_day（server 长桥 .VIX/.DJI/.NDX/.SPX 实时价
+      填充，长桥不可用时 Yahoo ^VIX/^DJI/^NDX/^GSPC 兜底）；
     - spark：全部由 server 读库（market_ticks 主价快照累积）后经 spark_map 传入
       [ts,price] 对（前端悬浮显示时间+价格），本函数不请求分时接口；缺项置 []。
     fetch_missing=False 时跳过内部 Yahoo 补拉（server 调用方传入：节流单点化到
-    server 侧 due 判定，避免缓存为空期间每轮 3 请求的放大；默认 True 保独立可用）。
+    server 侧 due 判定，避免缓存为空期间每轮请求的放大；默认 True 保独立可用）。
     单项失败不致命：price/change_pct 置 None（前端隐藏涨跌）、spark 置空数组。
     返回 [{key,name,price,change_pct,currency,spark:[[ts,price],...]}]，name 用 MARKET_PANEL 中文展示名。
     """
@@ -1181,23 +1249,18 @@ async def fetch_market_panel(proxy_urls: list[str] | None = None,
     if raw:
         quotes = parse_tencent_quotes(raw, list(code_sym.values()), sym_prefix)
 
-    # 2. 新浪一次：DINIW 主用（美元指数）+ fx_susdcnh 主用（美元人民币）+ hf_OIL/hf_GC 兜底腾讯失败项
-    sina_dxy: dict = {}
-    sina_cnh: dict = {}
-    sina_hf: dict[str, dict] = {}
-    raw_sina = await _get_text_resilient(SINA_PANEL_URL, headers=SINA_HEADERS,
-                                         proxy_urls=proxy_urls)
-    if raw_sina:
-        sina_dxy = parse_sina_diniw(raw_sina)
-        sina_cnh = parse_fx_usdcnh(raw_sina)
-        sina_hf["BZ"] = _parse_sina_hf(raw_sina, "OIL")
-        sina_hf["GC"] = _parse_sina_hf(raw_sina, "GC")
+    # 2. 新浪低频批（server 5min 节流传入）：DXY 主用（美元指数）+ USDCNH
+    #    冷备价 + hf_OIL/hf_GC 兜底腾讯失败项；未传入时现场拉一次保独立可用
+    sina = sina_panel if sina_panel is not None else await fetch_sina_panel(proxy_urls)
+    sina_dxy: dict = sina.get("dxy") or {}
+    sina_cnh: dict = sina.get("cnh") or {}
+    sina_hf: dict[str, dict] = sina.get("hf") or {}
 
     # 3. Yahoo 主价兜底：US30Y/US10Y/VIX 主价缓存缺失时并发补拉（一次请求
     #    主价+分时两用）；正常轮 server 刷新轮已传 yahoo_day，此处零请求。
     #    fetch_missing=False 直接跳过（server 侧节流单点化，缓存为空也不放大请求）
     yahoo_day = dict(yahoo_day or {})
-    need_keys = [k for k in ("US30Y", "US10Y", "VIX")
+    need_keys = [k for k in ("US30Y", "US10Y", "VIX", "DJI", "NDX", "SPX")
                  if not (yahoo_day.get(k) or {}).get("price")] if fetch_missing else []
 
     async def _yahoo(key: str) -> tuple[str, dict]:
@@ -1216,18 +1279,20 @@ async def fetch_market_panel(proxy_urls: list[str] | None = None,
     for key, code, name, cur, spark_src in MARKET_PANEL:
         price = change = None
         if key == "DXY":
-            # 主价新浪 DINIW
+            # 主价新浪 DINIW（5min 鲜度，免费源无平替）
             q = sina_dxy
         elif key == "USDCNH":
-            # 主价新浪 fx_susdcnh
-            q = sina_cnh
+            # 主价 twelvedata（60s），缺失回落新浪批冷备价（5min 鲜度）
+            q = {"price": td_usdcnh} if td_usdcnh else sina_cnh
         elif key in ("BZ", "GC"):
             # 腾讯 hf 行优先，失败用新浪 hf 兜底
             q = quotes.get(code_sym.get(code, "")) or {}
             if not q.get("price"):
                 q = sina_hf.get(key) or {}
-        elif key in ("US30Y", "US10Y", "VIX"):
-            # 主价+分时同源 Yahoo 当日分时；收益率类 price 保留 3 位小数（前端再 fmt）
+        elif key in ("US30Y", "US10Y", "VIX", "DJI", "NDX", "SPX"):
+            # 主价+分时同源 Yahoo 当日分时缓存；VIX/DJI/NDX/SPX 常态由长桥
+            # 实时价填充 yahoo_day（server 注入），Yahoo 仅长桥不可用时兜底；
+            # 收益率类 price 保留 3 位小数（前端再 fmt）
             q = yahoo_day.get(key) or {}
             if q.get("price") and key in ("US30Y", "US10Y"):
                 q = {**q, "price": round(q["price"], 3)}

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 分时图改为昨收基线口径、持仓列表可排序、整体 UI 对标 moomoo/众安风格、盘前盘后参考盈亏标注、移动端适配、会话 token 落库支持长效测试 token。
+**Goal:** 分时图改为昨收基线口径、持仓列表可排序、整体 UI 对标主流券商风格、盘前盘后参考盈亏标注、移动端适配、会话 token 落库支持长效测试 token。
 
 **Architecture:** 会话从内存字典迁移到 MySQL `sessions` 表（保留过期校验）；前端 portfolio.html 整体重做（深色券商风、分时基线=昨收、表头排序、盘前后标签细化、响应式卡片列表）；后端 intraday/overview 接口已具备所需字段（`points[].p`、`summary.base_value`），无需改动。
 
@@ -304,7 +304,7 @@ git commit -m "feat(market): 市场参考指标看板(QQQ/SPY/SOXX/GLD/布油/TL
 **Files:**
 - Rewrite: `static/portfolio.html`（单文件重写，保留既有 API 协议与 esc/patchFetch/编辑器逻辑骨架）
 
-**设计规范（对标 moomoo/众安，红涨绿跌保持）：**
+**设计规范（对标主流券商，红涨绿跌保持）：**
 
 - [ ] **Step 1: 新主题 CSS 变量与布局**
 
@@ -329,7 +329,7 @@ body { background: var(--bg); color: var(--txt); font-size: 14px;
 ```
 header（导航：返回监控 | 我的持仓 | session徽章 | 编辑 | 时间/汇率/登出）
 账户总览大卡：总资产(大) 昨收(小) | 今日盈亏(参考*) | 持仓盈亏 | 现金
-市场看板网格：8 个小方块（QQQ/SPY/SOXX/GLD/布油/TLT/恒指/USDHKD），moomoo 行情卡样式
+市场看板网格：8 个小方块（QQQ/SPY/SOXX/GLD/布油/TLT/恒指/USDHKD），券商行情卡样式
   每块：名称+现价+涨跌幅(红绿) + 底部 60x22 sparkline canvas（无 spark 数据则隐藏）
   桌面 grid 4 列、平板 3 列、移动 2 列（或横向滑动）
 图表卡：tab(当日分时/1月/3月/全部) + canvas + 图表信息条(昨收→现价)

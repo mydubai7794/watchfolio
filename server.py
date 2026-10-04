@@ -126,6 +126,27 @@ async def lifespan(app: FastAPI):
     await db.init_tables()
     logger.info("Database tables initialized")
 
+    # SIGUSR1 任务栈转储（生产诊断）：后台协程静默挂起时 py-spy 不可见
+    # asyncio 栈——kill -USR1 <pid> 后全部活动 task 的 await 位置落日志
+    import signal as _signal
+
+    def _dump_tasks(signum, _frame):
+        try:
+            loop = asyncio.get_event_loop()
+            tasks = [t for t in asyncio.all_tasks(loop) if not t.done()]
+            logger.warning("=== task dump (%d live) ===", len(tasks))
+            for t in tasks:
+                frames = t.get_stack(limit=10) or []
+                where = frames[-1] if frames else None
+                logger.warning("TASK %s%s", t.get_name(),
+                               "" if where is None else " → %s:%s in %s" % (
+                                   where.f_code.co_filename,
+                                   where.f_lineno, where.f_code.co_name))
+        except Exception as e:
+            logger.warning("task dump failed: %s", e)
+
+    _signal.signal(_signal.SIGUSR1, _dump_tasks)
+
     # 启动时立即执行一次静态数据初始化
     await _daily_init()
 
@@ -144,8 +165,8 @@ async def lifespan(app: FastAPI):
     fund_nav_task = asyncio.create_task(_fund_nav_loop())
     portfolio_task = asyncio.create_task(_portfolio_loop())
     market_task = asyncio.create_task(_market_loop())
-    global crypto_probe_task
-    crypto_probe_task = asyncio.create_task(_crypto_probe_loop())
+    global h24_probe_task
+    h24_probe_task = asyncio.create_task(_h24_probe_loop())
 
     # HSBC 成交邮件轮询（延迟 60s 首跑，之后每 30 分钟）
     global email_task
@@ -166,8 +187,8 @@ async def lifespan(app: FastAPI):
         fund_nav_task.cancel()
     if market_task:
         market_task.cancel()
-    if crypto_probe_task:
-        crypto_probe_task.cancel()
+    if h24_probe_task:
+        h24_probe_task.cancel()
     if email_task:
         email_task.cancel()
     if ledger_fx_task:
@@ -239,7 +260,7 @@ portfolio_cache: dict = {"ok": False, "positions": [], "summary": {}, "errors": 
 fund_nav_cache: dict | None = None   # {"nav","prev_nav","nav_date","nav_change_pct"}
 fx_state: dict = {"rate": 7.80, "fallback": True, "time": ""}
 fx_spark: list[float] = []           # USD/HKD 近5日走势（Yahoo HKD=X，随汇率刷新一并拉取）
-market_cache: list[dict] = []        # 市场参考看板缓存（QQQ/SPY/SOXX/HSI/BZ/GC/DXY/US30Y/US10Y/VIX/USDCNH，
+market_cache: list[dict] = []        # 市场参考看板缓存（QQQ/SPY/SOXX/HSI/BZ/GC/DXY/US30Y/US10Y/VIX/DJI/NDX/SPX/USDCNH，
                                      # spark 为 market_ticks 当日分时累积，闭市回退上一时段全程）
 
 # 一场口径状态机（模块级，进程生命周期内持久；重启后冷启动自愈，09:30 开盘刷新基准）。
@@ -539,6 +560,21 @@ async def monitor_status():
         "overnight": overnight_data,
         "in_trading_hours": _is_trading_hours(),
     }
+
+
+@app.get("/api/datasource/status")
+async def datasource_status():
+    """数据源健康状态（前端横幅依据）。
+
+    - longport：美股扩展价/VIX/隔夜指数主源。token_status ∈ ok/expiring
+      （<=7天）/expired/invalid/missing；available=False 且 fallback_active
+      =True 表示已自动回切新浪冷备，扩展价/夜盘价不受影响但精度降级；
+      token 失效/临期请到长桥后台重新生成（正式账户身份）并 UPDATE
+      sys_config 的 LONGPORT_ACCESS_TOKEN（60s 热加载，无需重启）。
+    - sina_panel：新浪看板批（DXY 主价）低频节流状态。
+    """
+    import longport_fetcher as lp
+    return {"longport": lp.status()}
 
 
 # ---------------------------------------------------------------------------
@@ -1209,16 +1245,53 @@ async def _monitor_loop():
 # 持仓模块：行情采集循环 + 基金净值/汇率循环
 # ---------------------------------------------------------------------------
 
+_anchor_task: asyncio.Task | None = None   # 长桥锚点后台恢复任务（进程内单发）
+_cny_cfg = {"invested": 0.0, "expense": 0.0}  # 人民币累计本金配置缓存（低频读库）
+
+
+async def _anchor_restore_task(symbols: list[str], state: dict) -> None:
+    """长桥锚点后台恢复：逐只日K、每只间隔 4s（13 只 ≈60s 内摊完）。
+
+    长桥限制：1s≤10 次调用、并发请求≤5，SDK 内部超限自动延迟请求（调用线程
+    挂起排队，曾挂死双循环）——candlesticks 无批量接口，故请求分散摊薄且
+    后台化（不阻塞持仓主循环）。单只失败自然缺省，下一轮 portfolio 循环
+    missing 重触发补漏。结果直写 portfolio_session_state（asyncio 单线程
+    无竞态）。
+    """
+    import longport_fetcher as lp
+    base_map = state.setdefault("base_closes", {})
+    close_map = state.setdefault("close_prices", {})
+    restored = state.setdefault("base_restored", set())
+    done = 0
+    for i, s in enumerate(symbols):
+        try:
+            anchors = await lp.fetch_anchor_quotes([s])
+        except Exception:
+            anchors = {}
+        if anchors.get(s):
+            a = anchors[s]
+            # base=昨日收盘（=场基准，与 f[4]/TD previous_close 同口径），缺失退化 open；
+            # close=当日常规收盘定格
+            base_map[s] = a.get("prev") or a["open"]
+            close_map[s] = a["close"]
+            restored.add(s)
+            done += 1
+        if i < len(symbols) - 1:
+            await asyncio.sleep(4.0)
+    if done:
+        logger.info("锚点后台恢复完成 %d/%d 只", done, len(symbols))
+
+
 async def _portfolio_loop():
-    """持仓行情采集：盘中10s/扩展时段30s/休市按加密活价60s或定格600s，成功才写 tick。"""
-    global portfolio_cache, _crypto_direct_ok
+    """持仓行情采集：盘中10s/扩展时段30s/休市按24h活价60s或定格600s，成功才写 tick。"""
+    global portfolio_cache, _h24_direct_ok
     # tick 毛刺延迟确认状态（进程内存，重启即失效重建）：
     # last_tick_state：上一条已写入 tick 的 {p: day_pnl, v: total_value} 基准；
     # pending_tick：偏差超阈值被暂存待确认的 tick 行（下一轮恢复→丢弃，仍异常→补写确认）
     last_tick_state: dict = {"p": None, "v": None}
     pending_tick: tuple | None = None
     anchor_fail_streak = 0   # 锚点恢复连续失败计数（>=3 放弃，退化兜底）
-    overnight_used = 0       # 上一轮加密活价生效标的数（closed 段降频判定用，跨轮保留）
+    overnight_used = 0       # 上一轮 24h活价生效标的数（closed 段降频判定用，跨轮保留）
     logger.info("持仓行情采集循环启动")
     while True:
         interval = 600.0
@@ -1227,10 +1300,10 @@ async def _portfolio_loop():
             # 消除对 us_market_session 展示串的 strptime 反解析）
             et_dt = datetime.now(pf.ET_TZ)
             session, _et_date, et_now = pf.us_market_session(et_dt)
-            # 加密窗口：收盘→开盘全段（盘后+夜盘+盘前+周末/假日），非 regular 即有活源
-            crypto_window = session != "regular"
-            # closed 段加密窗口恒真（600s 兜底分支曾不可达），按上一轮加密活价
-            # 是否生效降频：生效→60s 跟价（24h 曲线连续），失效/无交易对→600s 定格慢轮
+            # 24h窗口：收盘→开盘全段（盘后+夜盘+盘前+周末/假日），非 regular 即有活源
+            h24_window = session != "regular"
+            # closed 段 24h窗口恒真（600s 兜底分支曾不可达），按上一轮 24h活价
+            # 是否生效降频：生效→60s 跟价（24h 曲线连续），失效/无交易→600s 定格慢轮
             interval = {"regular": 10.0, "pre": 30.0, "post": 30.0}.get(
                 session, 60.0 if overnight_used > 0 else 600.0)
             holdings = await db.get_holdings(enabled_only=True)
@@ -1255,38 +1328,61 @@ async def _portfolio_loop():
                 except Exception:
                     pass
             # ---- 一场口径锚点恢复（冷启动，先于状态机）----
-            # 重启落在非 regular 时段：用 twelvedata previous_close/close 补齐锚点
-            # （base=昨日收盘与 regular f[4] 同口径、close=当日常规收盘），保证
-            # day_pnl=close+overnight 恒等式跨重启一致（8 只/批渐进，见 fetcher
-            # 限额）；以 base_restored 标记区分真锚点与状态机退化值（退化值每轮
-            # 都可被恢复覆盖），连续失败>=3 次放弃（腾讯兜底：实证凌晨/盘前
-            # f[4]=场基准、f[3]=定格，语义恰好正确，09:30 自然对齐）
+            # 重启落在非 regular 时段：补齐锚点（base=昨日收盘与 regular f[4]
+            # 同口径、close=当日常规收盘），保证 day_pnl=close+overnight 恒等式
+            # 跨重启一致；主源长桥日K（一次逐只并发、无 twelvedata 免费限额
+            # 冲突——TD 8 credits/min 还要供 USDCNH 主价），长桥不可用/失败
+            # 回切 TD 批量（8 只/批渐进）；以 base_restored 标记区分真锚点与
+            # 状态机退化值（退化值每轮都可被恢复覆盖），连续失败>=3 次放弃
+            # （腾讯兜底：实证凌晨/盘前 f[4]=场基准、f[3]=定格，语义恰好正确，
+            # 09:30 自然对齐）
             if session != "regular" and us_symbols and anchor_fail_streak < 3:
                 restored = portfolio_session_state.setdefault("base_restored", set())
                 missing = [s for s in us_symbols
                            if s not in restored
-                           or s not in portfolio_session_state.get("base_closes", {})]
+                           or s not in portfolio_session_state.get("base_closes", {})
+                           or s not in portfolio_session_state.get("close_prices", {})]
                 if missing:
-                    anchors = await pf.fetch_td_session_anchors(missing)
-                    base_map = portfolio_session_state.setdefault("base_closes", {})
-                    close_map = portfolio_session_state.setdefault("close_prices", {})
-                    for s, a in anchors.items():
-                        # base=previous_close（昨日收盘，与 regular 时段 f[4] 场基准
-                        # 同口径，day_pnl=close+overnight 恒等式跨重启一致），缺失退化 open
-                        base_map[s] = a.get("prev") or a["open"]
-                        close_map[s] = a["close"]
-                        restored.add(s)
-                    if anchors:
-                        anchor_fail_streak = 0
+                    # 主源长桥日K：后台任务逐只分散（4s/只，官方频控 1s≤10 次、
+                    # 并发≤5，SDK 内部超限延迟排队曾挂死双循环）——不阻塞主循环；
+                    # 长桥不可用/已退避 → twelvedata 批量兜底（8 只/批渐进，
+                    # 内部自带节流）；两者连续失败>=3 次放弃（腾讯兜底：实证
+                    # 凌晨/盘前 f[4]=场基准、f[3]=定格，语义恰好正确，09:30
+                    # 自然对齐）
+                    lp_ok = False
+                    try:
+                        import longport_fetcher as lp
+                        lp_ok = lp.is_available()
+                    except Exception:
+                        lp_ok = False
+                    if lp_ok:
+                        global _anchor_task
+                        if _anchor_task is None or _anchor_task.done():
+                            _anchor_task = asyncio.create_task(
+                                _anchor_restore_task(missing, portfolio_session_state))
+                            logger.info("锚点后台恢复启动(%d 只待补, 4s/只): %s",
+                                        len(missing), missing)
                     else:
-                        anchor_fail_streak += 1
-                    still = [s for s in missing if s not in anchors]
-                    if still:
-                        logger.info("锚点恢复待续(%d 只已补, %d 只待下批): %s",
-                                    len(anchors), len(still), still)
+                        anchors = await pf.fetch_td_session_anchors(missing)
+                        base_map = portfolio_session_state.setdefault("base_closes", {})
+                        close_map = portfolio_session_state.setdefault("close_prices", {})
+                        for s, a in anchors.items():
+                            # base=previous_close（昨日收盘，与 regular 时段 f[4] 场基准
+                            # 同口径，day_pnl=close+overnight 恒等式跨重启一致），缺失退化 open
+                            base_map[s] = a.get("prev") or a["open"]
+                            close_map[s] = a["close"]
+                            restored.add(s)
+                        if anchors:
+                            anchor_fail_streak = 0
+                        else:
+                            anchor_fail_streak += 1
+                        still = [s for s in missing if s not in anchors]
+                        if still:
+                            logger.info("锚点恢复待续(%d 只已补, %d 只待下批): %s",
+                                        len(anchors), len(still), still)
             # ---- 一场口径状态机维护（base=场基准 / close=常规收盘定格）----
-            # 必须先于加密覆盖：状态机吃原始腾讯价（f[3]/f[4] 口径），确保
-            # close_prices 定格不被加密市场数据源代理价污染（尤其周末
+            # 必须先于 24h覆盖：状态机吃原始腾讯价（f[3]/f[4] 口径），确保
+            # close_prices 定格不被 24h数据源代理价污染（尤其周末
             # closed+hour>=16 分支会用 q["price"] 写定格——若先覆盖，隔夜
             # 增量语义错乱）
             pf.update_session_state(portfolio_session_state, session, et_dt, quotes)
@@ -1294,29 +1390,29 @@ async def _portfolio_loop():
             if fallback_syms:
                 logger.info("一场口径基准冷启动退化: 非 regular 时段用腾讯昨收充当场基准 "
                             "(存在隔夜偏差, 09:30 开盘自愈): %s", fallback_syms)
-            # ---- 加密市场数据源覆盖（状态机维护之后，仅影响展示与 tick）----
+            # ---- 24h数据源覆盖（状态机维护之后，仅影响展示与 tick）----
             # 窗口=收盘→开盘全段（盘后+夜盘+盘前+周末/假日）：7×24 有价（偏差
             # 0.02%-0.1%）覆盖美股现价 → 组合总值 24h 曲线连续；盘前盘后真实
-            # 扩展价（腾讯/新浪 ext）优先，加密价兜底 ext 缺失标的；请求直连
-            # 优先（探测循环确认），不可用时境外分类代理→通用池；无对应交易对/
+            # 扩展价（腾讯/新浪 ext）优先，24h价兜底 ext 缺失标的；请求直连
+            # 优先（探测循环确认），不可用时境外分类代理→通用池；无对应交易/
             # 失败的标的自然缺省，维持盘后价定格口径
             overnight_used = 0
-            if crypto_window and us_symbols:
-                # 直连优先（vision 行情镜像境内可达，实测 200）：加密市场数据源
+            if h24_window and us_symbols:
+                # 直连优先（行情镜像境内可达，实测 200）：24h数据源
                 # 探测循环确认直连可用时传空候选（免代理开销）；直连不可用时
                 # 境外分类代理优先，再回退通用池（fetcher 内逐候选尝试）
-                probe_ok = _crypto_direct_ok
+                probe_ok = _h24_direct_ok
                 ov_urls: list[str] = []
                 if not probe_ok:
                     ov_rows = await db.get_overseas_proxies()
                     ov_urls = [r["url"] for r in ov_rows] or proxies   # 境外优先，空回退通用池
                 overnight = await pf.fetch_overnight_quotes(us_symbols, proxy_urls=ov_urls)
-                # 同标的替代推导（QQQM 无交易对）：夜盘价 = 自身收盘定格 ×
-                # 替代标的(QQQ)涨跌幅——把加密价的百分点映射过来得最新净值
+                # 同标的替代推导（QQQM 无交易）：夜盘价 = 自身收盘定格 ×
+                # 替代标的(QQQ)涨跌幅——把 24h价的百分点映射过来得最新净值
                 overnight.update(pf.derive_alias_prices(
                     overnight, portfolio_session_state.get("close_prices", {}), us_symbols))
-                # bookTicker 无交易对且别名推导仍缺的标的（如 AMKR/PCG/F），
-                # 经加密市场数据源股票行情端点逐只补齐（单 symbol weight=1，
+                # bookTicker 无交易且别名推导仍缺的标的（如 AMKR/PCG/F），
+                # 经 24h数据源股票行情端点逐只补齐（单 symbol weight=1，
                 # 网关境内直连免代理）；失败标的自然缺省，维持定格口径
                 equity_gap = [s for s in us_symbols if s not in overnight]
                 if equity_gap:
@@ -1325,13 +1421,13 @@ async def _portfolio_loop():
                     q = quotes.get(sym)
                     if q and oq.get("price"):
                         # pre/post 段真实扩展价优先（腾讯/新浪盘前盘后成交价
-                        # 更真实，加密价只兜底无盘口标的）；closed 段的
-                        # ext_price 是夜间残留定格盘后价，直接用加密活价覆盖
+                        # 更真实，24h价只兜底无盘口标的）；closed 段的
+                        # ext_price 是夜间残留定格盘后价，直接用 24h活价覆盖
                         real_ext = q.get("ext_price") and session in ("pre", "post")
                         if not real_ext:
                             q["price"] = oq["price"]
                             q["ext_price"] = 0.0
-                            q["ext_time"] = "加密源"
+                            q["ext_time"] = "24h源"
                             overnight_used += 1
             base_overrides = {s: b for s, b in portfolio_session_state["base_closes"].items() if b}
             close_overrides = {s: c for s, c in portfolio_session_state["close_prices"].items() if c}
@@ -1353,13 +1449,16 @@ async def _portfolio_loop():
                 summary["day_pnl_pct"] = summary["day_pnl"] / denom * 100
             # 人民币累计口径看板：总资产 × USDCNH（看板缓存复用，零新增请求）
             # 对比净投入本金 = cny_invested − expense_cny（个人消费折 CNY，
-            # 与记账页 invest_net_cny 同口径）；未配置/汇率未就绪 → None
+            # 与记账页 invest_net_cny 同口径）；未配置/汇率未就绪 → None。
+            # 本金配置低频缓存到 _cny_cfg（端点实时重算 cny 用，见 portfolio_overview）
             try:
                 cny_invested = float(await db.get_config("cny_invested") or 0)
+                _cny_cfg["invested"] = cny_invested
             except (TypeError, ValueError):
                 cny_invested = 0.0
             try:
                 expense_cny = float(await db.get_config("expense_cny") or 0)
+                _cny_cfg["expense"] = expense_cny
             except (TypeError, ValueError):
                 expense_cny = 0.0
             usdcnh = next((m.get("price") for m in market_cache
@@ -1374,17 +1473,17 @@ async def _portfolio_loop():
                 "session": session,
                 "et_now": et_now,
                 "trade_date": str(session_key),
-                # 加密窗口标记（结构化）：active=加密市场数据源代理价生效中，
-                # 前端据此展示提示；全部标的无对应交易对或直连/代理不可用时
+                # 24h窗口标记（结构化）：active=24h数据源代理价生效中，
+                # 前端据此展示提示；全部标的无对应交易或直连/代理不可用时
                 # active=False 退回定格提示。note 按时段：盘后/夜盘/盘前/假日
                 "night_session": {"active": overnight_used > 0,
-                                  "window": crypto_window,
-                                  "source": "crypto_market",
+                                  "window": h24_window,
+                                  "source": "h24_market",
                                   "note": {
-                                      "post": "盘后·加密市场数据源(允许微小偏差)",
-                                      "pre": "盘前·加密市场数据源(允许微小偏差)",
+                                      "post": "盘后·24h数据源(允许微小偏差)",
+                                      "pre": "盘前·24h数据源(允许微小偏差)",
                                   }.get(session,
-                                        "闭市·加密市场数据源(允许微小偏差)"
+                                        "闭市·24h数据源(允许微小偏差)"
                                         if session == "closed" else "")},
                 "fx_usdhkd": fx_state["rate"],
                 "fx_fallback": fx_state["fallback"],
@@ -1395,7 +1494,7 @@ async def _portfolio_loop():
                 "cash": cash_rows,
                 "errors": [] if quotes else ["行情源暂不可用"],
             }
-            # 常规时段写 tick；夜盘/周末（closed）在加密市场数据源代理价生效时
+            # 常规时段写 tick；夜盘/周末（closed）在 24h数据源代理价生效时
             # 同样写 tick，24h 曲线跨夜盘/周末连续累积（日线聚合取每场最后一条不受影响）
             if quotes and (session != "closed" or overnight_used > 0):
                 # tick 口径：总资产(含现金折算)，现金变动当日需保持曲线连续；
@@ -1626,43 +1725,42 @@ def hsi_session_open(now_utc: datetime) -> bool:
     return 90 <= mins <= 480
 
 
-_CRYPTO_PROBE_INTERVAL_SEC = 1800.0   # 境外代理分类探测周期（30min，低频省资源）
-_CRYPTO_PROBE_FIRST_DELAY_SEC = 90.0  # 首跑延迟（等代理池首轮抓取完成）
-_crypto_direct_ok = False             # 加密市场数据源直连可用性（探测循环维护）
+_H24_PROBE_INTERVAL_SEC = 1800.0   # 境外代理分类探测周期（30min，低频省资源）
+_H24_PROBE_FIRST_DELAY_SEC = 90.0  # 首跑延迟（等代理池首轮抓取完成）
+_h24_direct_ok = False             # 24h数据源直连可用性（探测循环维护）
 
 
-async def _crypto_probe_loop():
+async def _h24_probe_loop():
     """境外代理分类探测循环：给代理池打 region 标签。
 
-    加密市场数据源端点为交易所官方公开行情镜像域名（data-api.binance.vision），
-    实测境内服务器直连可达（主站 api.binance.com 才有境内墙+机房 IP 封禁）。
+    24h数据源端点为公开行情镜像域名（境内直连可达）。
     探测分两层：①服务器直连成功 → 数据源整体可用，代理无需境外分类（全部保持
-    unknown，夜盘走直连）；②直连失败时才逐个探测代理，GET CRYPTO_PING_URL
+    unknown，夜盘走直连）；②直连失败时才逐个探测代理，GET H24_PING_URL
     （weight 0，免 key）成功标记 region='overseas'（失败保持 unknown，下轮再测，
     不做永久否定标记）。已分类 overseas 的不重复探测。
     """
-    logger.info("境外代理分类探测循环启动 (间隔 %ss)", _CRYPTO_PROBE_INTERVAL_SEC)
-    await asyncio.sleep(_CRYPTO_PROBE_FIRST_DELAY_SEC)
+    logger.info("境外代理分类探测循环启动 (间隔 %ss)", _H24_PROBE_INTERVAL_SEC)
+    await asyncio.sleep(_H24_PROBE_FIRST_DELAY_SEC)
     while True:
         try:
             direct_ok = False
             try:
                 async with httpx.AsyncClient(timeout=8) as client:
-                    resp = await client.get(pf.CRYPTO_PING_URL)
+                    resp = await client.get(pf.H24_PING_URL)
                 direct_ok = resp.status_code == 200
             except Exception:
                 direct_ok = False
-            global _crypto_direct_ok
-            _crypto_direct_ok = direct_ok
+            global _h24_direct_ok
+            _h24_direct_ok = direct_ok
             if direct_ok:
-                logger.info("加密市场数据源直连可用，代理无需境外分类")
+                logger.info("24h数据源直连可用，代理无需境外分类")
             else:
                 rows = await db.get_alive_proxies()
                 unknown = [r for r in rows if r.get("region", "unknown") != "overseas"]
                 for r in unknown:
                     try:
                         async with httpx.AsyncClient(timeout=8, proxy=r["url"]) as client:
-                            resp = await client.get(pf.CRYPTO_PING_URL)
+                            resp = await client.get(pf.H24_PING_URL)
                         if resp.status_code == 200:
                             await db.mark_proxy_region(r["id"], "overseas")
                             logger.info("代理境外可达已标记 overseas: %s", r["url"])
@@ -1673,34 +1771,105 @@ async def _crypto_probe_loop():
             break
         except Exception as e:
             logger.exception("境外代理分类探测错误: %s", e)
-        await asyncio.sleep(_CRYPTO_PROBE_INTERVAL_SEC)
+        await asyncio.sleep(_H24_PROBE_INTERVAL_SEC)
 
 
 async def _market_loop():
     """市场参考看板采集（主价快照存库模式）：
 
-    - 主价 60s 快轮（腾讯/新浪混排）→ **价变即写 market_ticks**，分时由主价
+    - 主价 60s 快轮（腾讯混排）→ **价变即写 market_ticks**，分时由主价
       快照自然累积（不再单独请求分时接口，「少请求、多数据、回显全用库」；
       闭市价不变不堆重复点）；
-    - US30Y/US10Y/VIX 主价源为 Yahoo：缺价即拉（缓存无主价触发，仅受 5min
+    - US30Y/US10Y 主价源为 Yahoo：缺价即拉（缓存无主价触发，仅受 5min
       失败节流）+ 例行 backfill（库内最新 tick 距今 >30min 且 4h 冷却到期），
       一次请求两用——meta 现价刷新主价缓存、当日 5m 分时顺带落库（零额外
       请求）；面板组装传 fetch_missing=False，Yahoo 节流单点化到本循环；
+    - VIX/DJI/NDX/SPX 四项指数主价源为长桥新平台（.VIX/.DJI/.NDX/.SPX.US
+      一次批量 60s 实时直连，免代理），价经 yahoo_day 注入面板与价变即写
+      链路；长桥不可用时 pop 缓存交还 Yahoo 兜底（代理池 backfill，恢复后
+      自动切回长桥）；长桥 token 到期自动续期也挂本循环（轮首检查，最后
+      7 天触发、6h 节流，成功写回 sys_config 热加载）；
+    - USDCNH 主价源为 twelvedata（60s 节流 1 credit/min），失败回落新浪批
+      冷备价；新浪批（DXY 主价/BZ/GC 兜底）降频 5min 节流（成功固定 300s、
+      失败指数退避 600s→1800s 封顶），产物缓存透传面板组装；
     - spark 统一读库并按 [ts,price] 对下发（前端悬浮展示时间+价格，闭市回退
       上一交易时段）；异常钳制 120s。
     """
     global market_cache
     logger.info("市场看板采集循环启动")
-    yahoo_day: dict[str, dict] = {}     # US30Y/US10Y/VIX 主价缓存（backfill 轮顺带刷新）
+    yahoo_day: dict[str, dict] = {}     # US30Y/US10Y(/VIX 兜底) 主价缓存（backfill 轮顺带刷新）
     backfill_at: dict[str, float] = {}  # key → 上次 backfill 成功的 monotonic 时刻（4h 冷却）
     backfill_fail: dict[str, float] = {}  # key → 上次 backfill 失败时刻（5min 重试节流）
+    # 新浪看板批低频节流状态（数据源架构升级：新浪降为低频互备/冷备）
+    sina_panel_cache: dict = {}          # fetch_sina_panel 产物缓存
+    sina_panel_at = 0.0                  # 上次成功拉取时刻（monotonic）
+    sina_panel_fail = 0                  # 连续失败轮数（指数退避）
+    sina_panel_interval = 300.0          # 成功固定 5min；失败 min(600*2^n, 1800)
+    # twelvedata USDCNH 主价状态（60s 节流；连续无价回落新浪冷备）
+    td_usdcnh: float | None = None
+    td_fx_at = 0.0        # 上次尝试时刻（60s 节流）
+    td_fx_ok_at = 0.0     # 上次成功时刻（>10min 无有效价回落新浪）
+    lp_idx_ok = False                    # 长桥指数可用性（VIX/DJI/NDX/SPX，失败交还 Yahoo 兜底）
     while True:
         interval = 60.0
         try:
+            # 长桥 token 到期自动续期（最后 7 天触发、6h 节流；内部全捕获）
+            import longport_fetcher as lp
+            await lp.maybe_refresh_token()
+
             # Yahoo 链路国内直连不稳：仿 _fund_nav_loop 从代理池取存活代理透传
             proxies = [r["url"] for r in await db.get_alive_proxies()]
             now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
             now_mono = time.monotonic()
+
+            # ---- 新浪看板批（DXY 主价 + USDCNH/BZ/GC 冷备兜底）：5min 节流 ----
+            if now_mono - sina_panel_at >= sina_panel_interval:
+                fetched = await pf.fetch_sina_panel(proxy_urls=proxies)
+                if fetched:
+                    sina_panel_cache, sina_panel_at = fetched, now_mono
+                    if sina_panel_fail:
+                        logger.info("新浪看板批恢复（此前连续失败 %d 轮）", sina_panel_fail)
+                    sina_panel_fail, sina_panel_interval = 0, 300.0
+                else:
+                    sina_panel_fail += 1
+                    sina_panel_interval = min(600.0 * (2 ** (sina_panel_fail - 1)), 1800.0)
+                    logger.warning("新浪看板批失败(退避至 %ds): DXY 维持上次价",
+                                   int(sina_panel_interval))
+
+            # ---- twelvedata USDCNH 主价（60s 节流，失败沿用上次值，>10min 无
+            #      有效价置 None 回落新浪批冷备价）----
+            if now_mono - td_fx_at >= 60.0:
+                td_fx_at = now_mono
+                v = await pf.fetch_td_fx("USD/CNH")
+                if 6.0 < v < 8.5:
+                    td_usdcnh, td_fx_ok_at = v, now_mono
+                elif td_usdcnh is not None and now_mono - td_fx_ok_at < 600.0:
+                    pass   # 瞬时失败沿用上次值（汇率低频波动）
+                else:
+                    td_usdcnh = None
+
+            # ---- 长桥指数主价（VIX/DJI/NDX/SPX 一次批量 60s 实时；不可用时
+            #      pop 缓存交还 Yahoo 兜底）----
+            try:
+                idx = await lp.fetch_index_quotes()
+                ok_keys = [k for k in ("VIX", "DJI", "NDX", "SPX")
+                           if (idx.get(k) or {}).get("price")]
+                for k in ("VIX", "DJI", "NDX", "SPX"):
+                    if k in ok_keys:
+                        yahoo_day[k] = {"price": idx[k]["price"],
+                                        "change_pct": idx[k].get("change_pct")}
+                    else:
+                        yahoo_day.pop(k, None)
+                if ok_keys and not lp_idx_ok:
+                    logger.info("长桥指数主价生效（%s，实时直连）", "/".join(ok_keys))
+                elif not ok_keys and lp_idx_ok:
+                    logger.warning("长桥指数不可用，交还 Yahoo 兜底")
+                lp_idx_ok = bool(ok_keys)
+            except Exception as e:
+                lp_idx_ok = False
+                for k in ("VIX", "DJI", "NDX", "SPX"):
+                    yahoo_day.pop(k, None)
+                logger.warning("长桥指数获取异常: %s", e)
 
             # ---- 主价快照写入去重用的库内最新 tick ----
             last_map: dict[str, tuple | None] = {}
@@ -1710,12 +1879,14 @@ async def _market_loop():
                 except Exception:
                     last_map[key] = None
 
-            # ---- US30Y/US10Y/VIX 主价刷新（缺价即拉 + 例行 backfill 双轨节流）：
-            #      这三项无腾讯/新浪主价源，Yahoo 一次请求两用——meta 现价刷新主价
+            # ---- US30Y/US10Y(/VIX 兜底) 主价刷新（缺价即拉 + 例行 backfill 双轨节流）：
+            #      这三项无腾讯/长桥主价源时由 Yahoo 一次请求两用——meta 现价刷新主价
             #      缓存、当日 5m 分时顺带落库；其余 8 项分时纯由主价快照累积。
             #      判定/节流抽 yahoo_refresh_plan 纯函数（见其 docstring）----
+            yahoo_keys = ("US30Y", "US10Y") + (
+                () if lp_idx_ok else ("VIX", "DJI", "NDX", "SPX"))
             due = yahoo_refresh_plan(yahoo_day, last_map, now_utc, now_mono,
-                                     backfill_at, backfill_fail)
+                                     backfill_at, backfill_fail, yahoo_keys)
 
             async def _refresh_yahoo(key: str) -> bool:
                 q = await pf.fetch_yahoo_day_minutes(pf.YAHOO_DAY_SYMBOLS[key], proxies)
@@ -1750,7 +1921,8 @@ async def _market_loop():
                     spark_map[key] = []
             market_cache = await pf.fetch_market_panel(
                 proxy_urls=proxies, yahoo_day=yahoo_day, spark_map=spark_map,
-                fetch_missing=False)   # Yahoo 补拉已由上方 due 判定单点节流
+                fetch_missing=False,   # Yahoo 补拉已由上方 due 判定单点节流
+                sina_panel=sina_panel_cache, td_usdcnh=td_usdcnh)
 
             # ---- 主价快照存库：价与库内最新 tick 不同才写（UTC，价变即积累分时）----
             for item in market_cache:
@@ -1762,9 +1934,10 @@ async def _market_loop():
                 if key == "HSI" and not hsi_session_open(now_utc):
                     continue
                 try:
-                    # Yahoo 三项本轮分时刚落库，last_map 是落库前快照，保留重查；
+                    # Yahoo 主价刷新项本轮分时刚落库，last_map 是落库前快照，
+                    # 保留重查（长桥常态零落库、Yahoo 兜底期才需要）；
                     # 其余项复用轮首 last_map，省一轮 DB 往返
-                    if key in ("US30Y", "US10Y", "VIX"):
+                    if key in ("US30Y", "US10Y", "VIX", "DJI", "NDX", "SPX"):
                         last = await db.get_market_last_tick(key)
                     else:
                         last = last_map.get(key)
@@ -1817,6 +1990,17 @@ async def portfolio_overview():
     data["fund"] = fund_nav_cache
     data["market"] = market_cache
     data["fx_spark"] = fx_spark
+    # 人民币累计实时化：cny 依赖的 USDCNH 在 market_cache（60s 级），若随
+    # portfolio_cache 快照下发，closed 段 24h活价失效切 600s 慢轮时 cny 会被拖住
+    # 10 分钟不动——端点每次用最新看板价与缓存本金重算覆盖
+    if portfolio_cache.get("summary"):
+        usdcnh = next((m.get("price") for m in (market_cache or [])
+                       if m.get("key") == "USDCNH" and m.get("price")), None)
+        cny = pf.build_cny_summary(portfolio_cache["summary"]["total_value"],
+                                   usdcnh, _cny_cfg["invested"],
+                                   _cny_cfg["expense"])
+        if cny:
+            data["cny"] = cny
     # 最近 HSBC 成交记录（轻量，前端暂不展示只备数据）
     try:
         data["recent_trades"] = await db.get_recent_trades(10)
