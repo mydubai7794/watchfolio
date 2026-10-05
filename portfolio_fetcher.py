@@ -398,8 +398,8 @@ def parse_yahoo_day_chart(raw: str) -> dict:
 def parse_fx_usdcnh(raw: str) -> dict:
     """解析新浪 fx_susdcnh（美元/离岸人民币）：f[1]现价 f[3]昨收，涨跌幅自算。
 
-    布局与 fx_susdhkd 一致（实测昨收 f[3] 与涨跌额 f[11] 吻合：6.7068-6.7132=-0.0064）；
-    价格合理区间 5.0~8.0，字段不足/越界返回 {}。
+    新浪 fx_* 行标准布局（实测昨收 f[3] 与涨跌额 f[11] 吻合：
+    6.7068-6.7132=-0.0064）；价格合理区间 5.0~8.0，字段不足/越界返回 {}。
     """
     m = re.search(r'var hq_str_fx_susdcnh="([^"]*)"', raw or "")
     if not m:

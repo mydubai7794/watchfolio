@@ -648,8 +648,7 @@ async def datasource_status():
       （<=7天）/expired/invalid/missing；available=False 且 fallback_active
       =True 表示已自动回切新浪冷备，扩展价/夜盘价不受影响但精度降级；
       token 失效/临期请到长桥后台重新生成（正式账户身份）并 UPDATE
-      sys_config 的 LONGPORT_ACCESS_TOKEN（60s 热加载，无需重启）。
-    - sina_panel：新浪看板批（DXY 主价）低频节流状态。
+       sys_config 的 LONGPORT_ACCESS_TOKEN（60s 热加载，无需重启）。
     """
     import longport_fetcher as lp
     return {"longport": lp.status()}
@@ -1719,7 +1718,8 @@ async def _fund_nav_loop():
     while True:
         ok = False
         try:
-            # 新浪汇率直连 403（云服务器 IP 被拉黑）时代理池重试；取法仿 _market_loop
+            # 主源腾讯 whUSDHKD 总线攒批（不走代理），失败回切 twelvedata 冷备；
+            # proxy_urls 仅签名兼容保留；取代理仿 _market_loop 供基金 NAV 使用
             proxies = [r["url"] for r in await db.get_alive_proxies()]
             rate, fallback = await pf.fetch_fx_usdhkd(proxy_urls=proxies)
             fx_state = {"rate": rate, "fallback": fallback,
@@ -1900,7 +1900,7 @@ async def _market_loop():
     """
     global market_cache
     logger.info("市场看板采集循环启动")
-    yahoo_day: dict[str, dict] = {}     # US30Y/US10Y(/VIX 兜底) 主价缓存（backfill 轮顺带刷新）
+    yahoo_day: dict[str, dict] = {}     # US30Y/US10Y/DXY(/VIX 兜底) 主价缓存（backfill 轮顺带刷新）
     backfill_at: dict[str, float] = {}  # key → 上次 backfill 成功的 monotonic 时刻（4h 冷却）
     backfill_fail: dict[str, float] = {}  # key → 上次 backfill 失败时刻（5min 重试节流）
     # 新浪看板批低频节流状态（数据源架构升级：新浪降为低频互备/冷备）
@@ -1983,7 +1983,7 @@ async def _market_loop():
                 except Exception:
                     last_map[key] = None
 
-            # ---- US30Y/US10Y(/VIX 兜底) 主价刷新（缺价即拉 + 例行 backfill 双轨节流）：
+            # ---- US30Y/US10Y/DXY(/VIX 兜底) 主价刷新（缺价即拉 + 例行 backfill 双轨节流）：
             #      这三项无腾讯/长桥主价源时由 Yahoo 一次请求两用——meta 现价刷新主价
             #      缓存、当日 5m 分时顺带落库；其余 8 项分时纯由主价快照累积。
             #      判定/节流抽 yahoo_refresh_plan 纯函数（见其 docstring）----
@@ -2041,7 +2041,7 @@ async def _market_loop():
                     # Yahoo 主价刷新项本轮分时刚落库，last_map 是落库前快照，
                     # 保留重查（长桥常态零落库、Yahoo 兜底期才需要）；
                     # 其余项复用轮首 last_map，省一轮 DB 往返
-                    if key in ("US30Y", "US10Y", "VIX", "DJI", "NDX", "SPX"):
+                    if key in ("US30Y", "US10Y", "DXY", "VIX", "DJI", "NDX", "SPX"):
                         last = await db.get_market_last_tick(key)
                     else:
                         last = last_map.get(key)
