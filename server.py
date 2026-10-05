@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import hmac
 import io
 import json
 import logging
@@ -124,6 +125,7 @@ def _is_auth_path(path: str) -> bool:
         or path == "/static/login.html"
         or path.startswith("/api/quote")
         or path.startswith("/api/captcha")
+        or path.startswith("/api/agent/")     # 外部 agent 接口：端点内 API Key 自鉴权
     )
 
 @asynccontextmanager
@@ -2397,6 +2399,52 @@ async def portfolio_daily(days_range: str = Query(default="30", alias="range")):
     return {"ok": True, "days": [
         {"date": str(r["date"]), "v": float(r["total_value"]),
          "p": float(r["day_pnl"]), "pct": float(r["total_pnl_pct"])} for r in rows]}
+
+
+@app.get("/api/agent/portfolio")
+async def agent_portfolio(request: Request):
+    """外部 agent 持仓快照（X-API-Key 鉴权，读缓存零额外行情请求）。
+
+    供外部 agent 做持仓鉴定/再平衡分析；sys_config.AGENT_API_KEY 未配置
+    → 404（视为禁用，不暴露端点存在性）；key 不匹配 → 401（常量时间比较）。
+    cny 与 overview 同逻辑：用最新看板 USDCNH + 本金配置实时重算，
+    不受 600s 慢轮快照拖累。@author yys
+    """
+    try:
+        api_key = await db.get_config("AGENT_API_KEY") or ""
+    except Exception:
+        api_key = ""
+    if not api_key:
+        return JSONResponse(status_code=404, content={"ok": False, "message": "Not Found"})
+    provided = request.headers.get("X-API-Key", "")
+    if not hmac.compare_digest(provided.encode(), api_key.encode()):
+        return JSONResponse(status_code=401, content={"ok": False, "message": "无效的 API Key"})
+    data = dict(portfolio_cache)
+    usdcnh = next((m.get("price") for m in (market_cache or [])
+                   if m.get("key") == "USDCNH" and m.get("price")), None)
+    cny = pf.build_cny_summary((data.get("summary") or {}).get("total_value"),
+                               usdcnh, _cny_cfg["invested"], _cny_cfg["expense"])
+    return {
+        "ok": True,
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "session": data.get("session"),
+        "trade_date": data.get("trade_date"),
+        "summary": data.get("summary") or {},
+        "holdings": [
+            {"symbol": p.get("symbol"), "name": p.get("name", ""),
+             "market": p.get("market"), "currency": p.get("currency"),
+             "quantity": p.get("quantity"), "cost_price": p.get("cost_price"),
+             "price": p.get("price"), "value": p.get("value"),
+             "today_pnl": p.get("today_pnl"),
+             "position_pnl": p.get("position_pnl"),
+             "position_pnl_pct": p.get("position_pnl_pct"),
+             "cost_usd": p.get("cost_usd"), "stale": p.get("stale", False),
+             "ext": p.get("ext")}
+            for p in (data.get("positions") or [])],
+        "cash": data.get("cash") or [],
+        "fx": {"usdhkd": data.get("fx_usdhkd"), "usdcnh": usdcnh},
+        "cny": cny,
+    }
 
 
 @app.get("/api/portfolio/holding")

@@ -495,3 +495,93 @@ class TestRootRedirect:
             assert "portfolio" in r.text
         finally:
             client.cookies.clear()
+
+
+class TestAgentPortfolioApi:
+    """GET /api/agent/portfolio：API Key 鉴权三态与响应结构。
+
+    middleware 放行 /api/agent/ 前缀（无需浏览器 session），
+    端点内自鉴权（X-API-Key 头）。
+    """
+
+    _base_cache = {
+        "ok": True, "session": "regular", "trade_date": "2026-10-02",
+        "fx_usdhkd": 7.8,
+        "summary": {"total_value": 1234.5, "holdings_value": 1000.0,
+                    "cash_usd": 234.5, "cost_basis": 900.0,
+                    "day_pnl": 10.0, "day_pnl_pct": 0.8, "close_pnl": 8.0,
+                    "overnight_pnl": 2.0, "total_pnl": 100.0,
+                    "total_pnl_pct": 10.0},
+        "positions": [{"symbol": "NVDA", "name": "测试", "market": "US",
+                       "currency": "USD", "quantity": 2.0,
+                       "cost_price": 100.0, "price": 110.0, "value": 220.0,
+                       "today_pnl": 5.0, "position_pnl": 20.0,
+                       "position_pnl_pct": 10.0, "cost_usd": 200.0,
+                       "stale": False, "ext": "regular"}],
+        "cash": [{"currency": "USD", "amount": 234.5}],
+        "errors": [],
+    }
+
+    def _patch_key(self, monkeypatch, key):
+        async def fake_config(k):
+            return key if k == "AGENT_API_KEY" else None
+        monkeypatch.setattr(server.db, "get_config", fake_config)
+
+    def teardown_method(self):
+        server.portfolio_cache = {"ok": False, "positions": [], "summary": {}, "errors": []}
+        server.market_cache = []
+
+    def test_404_when_key_unconfigured(self, monkeypatch):
+        """AGENT_API_KEY 未配置 → 404（视为禁用，不暴露端点存在性）。"""
+        self._patch_key(monkeypatch, None)
+        r = client.get("/api/agent/portfolio", headers={"X-API-Key": "x"})
+        assert r.status_code == 404
+
+    def test_401_wrong_key(self, monkeypatch):
+        """key 不匹配 → 401。"""
+        self._patch_key(monkeypatch, "right-key")
+        r = client.get("/api/agent/portfolio", headers={"X-API-Key": "wrong-key"})
+        assert r.status_code == 401
+
+    def test_200_valid_key_and_structure(self, monkeypatch):
+        """key 匹配 → 200，结构完整（summary/holdings/cash/fx/cny 键齐全）。"""
+        self._patch_key(monkeypatch, "right-key")
+        server.portfolio_cache = dict(self._base_cache)
+        server.market_cache = [{"key": "USDCNH", "price": 7.12}]
+        r = client.get("/api/agent/portfolio", headers={"X-API-Key": "right-key"})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is True
+        assert data["session"] == "regular"
+        assert data["trade_date"] == "2026-10-02"
+        assert data["generated_at"]
+        for k in ("total_value", "holdings_value", "cash_usd", "cost_basis",
+                  "day_pnl", "close_pnl", "overnight_pnl",
+                  "total_pnl", "total_pnl_pct"):
+            assert k in data["summary"]
+        h = data["holdings"][0]
+        for k in ("symbol", "name", "market", "currency", "quantity",
+                  "cost_price", "price", "value", "today_pnl",
+                  "position_pnl", "position_pnl_pct", "cost_usd",
+                  "stale", "ext"):
+            assert k in h
+        assert data["cash"] == [{"currency": "USD", "amount": 234.5}]
+        assert data["fx"]["usdhkd"] == 7.8
+        assert data["fx"]["usdcnh"] == 7.12
+
+    def test_cny_recalculated_with_live_usdcnh(self, monkeypatch):
+        """cny 与 overview 同逻辑：用最新看板 USDCNH 实时重算（不随快照拖旧）。"""
+        self._patch_key(monkeypatch, "right-key")
+        server.portfolio_cache = dict(self._base_cache)
+        server.market_cache = [{"key": "USDCNH", "price": 7.1}]
+        server._cny_cfg["invested"] = 84850.0
+        server._cny_cfg["expense"] = 0.0
+        try:
+            r = client.get("/api/agent/portfolio", headers={"X-API-Key": "right-key"})
+            cny = r.json()["cny"]
+            assert cny is not None
+            assert cny["rate"] == 7.1
+            assert cny["value"] == round(1234.5 * 7.1, 2)
+        finally:
+            server._cny_cfg["invested"] = 0.0
+            server._cny_cfg["expense"] = 0.0
