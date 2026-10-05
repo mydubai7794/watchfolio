@@ -26,8 +26,8 @@ DEFAULT_PARAMS = {
     "deep_dip": {"enabled": True, "dip_pct": 15.0},
 }
 
-_costs: dict[str, float] = {}
-_costs_at = 0.0
+_positions: dict[str, dict] = {}   # symbol → {"cost": 成本价, "qty": 数量}
+_positions_at = 0.0
 
 # 全局锁串行化求值：读-改-写含 await 点，轮询/push 多入口并发会丢更新
 _EVAL_LOCK = asyncio.Lock()
@@ -47,15 +47,16 @@ def _merged_params(rule: dict | None) -> dict:
     return params
 
 
-async def _load_costs() -> dict[str, float]:
-    """持仓成本缓存（60s 刷新）。"""
-    global _costs, _costs_at
-    if time.monotonic() - _costs_at > 60 or not _costs:
+async def _load_positions() -> dict[str, dict]:
+    """持仓成本+数量缓存（60s 刷新，供市值阈值过滤与成本锚定）。@author yys"""
+    global _positions, _positions_at
+    if time.monotonic() - _positions_at > 60 or not _positions:
         holdings = await db.get_holdings(enabled_only=True)
-        _costs = {h["symbol"]: float(h["cost_price"] or 0)
-                  for h in holdings if h["market"] == "US"}
-        _costs_at = time.monotonic()
-    return _costs
+        _positions = {h["symbol"]: {"cost": float(h["cost_price"] or 0),
+                                    "qty": float(h["quantity"] or 0)}
+                      for h in holdings if h["market"] == "US"}
+        _positions_at = time.monotonic()
+    return _positions
 
 
 def _cooldown_ok(state: dict, rule: str, now: float) -> bool:
@@ -79,7 +80,7 @@ def eval_price_plan(symbol: str, price: float, params: dict, state: dict,
     cfg = params.get("price_plan", {})
     if not cfg.get("enabled", True):
         return []
-    cost = _costs.get(symbol)
+    cost = _positions.get(symbol, {}).get("cost")
     if not cost:
         return []
     now = time.time()
@@ -179,7 +180,7 @@ def eval_vix_take_profit(symbol: str, price: float, params: dict, state: dict,
     cfg = params.get("vix_take_profit", {})
     if not cfg.get("enabled", True):
         return []
-    cost = _costs.get(symbol)
+    cost = _positions.get(symbol, {}).get("cost")
     if not cost:
         return []
     vix_pctl = daily_bars.get_vix_percentile(ind.get("asof"))
@@ -284,17 +285,27 @@ async def evaluate(symbol: str, price: float) -> list[dict]:
 
 
 async def evaluate_round(prices: dict[str, float]) -> list[dict]:
-    """一轮全量求值（轮询循环/push 回调统一入口）。"""
+    """一轮全量求值（轮询循环/push 回调统一入口）。
+
+    市值阈值过滤：持仓市值（现价×数量）低于 ALERT_MIN_MARKET_VALUE
+    （sys_config，USD，默认 500）的标的跳过求值——不评估、不提醒、不落库；
+    设 0 或负值关闭过滤。@author yys"""
     global COOLDOWN_SECONDS
+    threshold = 500.0
     try:
         hours = float(await db.get_config("ALERT_COOLDOWN_HOURS") or 4)
         COOLDOWN_SECONDS = hours * 3600.0
+        threshold = float(await db.get_config("ALERT_MIN_MARKET_VALUE") or 500)
     except Exception:
-        logger.warning("冷却配置加载失败，沿用当前 %sh", COOLDOWN_SECONDS / 3600)
-    await _load_costs()
+        logger.warning("冷却/阈值配置加载失败，沿用当前 %sh / %.0f USD",
+                       COOLDOWN_SECONDS / 3600, threshold)
+    await _load_positions()
     events = []
     for sym, price in prices.items():
-        if price is None or sym not in _costs:
+        pos = _positions.get(sym)
+        if price is None or pos is None:
+            continue
+        if threshold > 0 and float(price) * pos["qty"] < threshold:
             continue
         try:
             events += await evaluate(sym, float(price))

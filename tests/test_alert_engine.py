@@ -24,7 +24,8 @@ def engine_env(monkeypatch):
     monkeypatch.setattr(ae.db, "save_alert", fake_save)
 
     async def fake_holdings(enabled_only=True):
-        return [{"symbol": "NVDA", "market": "US", "cost_price": 200.0}]
+        return [{"symbol": "NVDA", "market": "US", "cost_price": 200.0,
+                 "quantity": 100.0}]
     monkeypatch.setattr(ae.db, "get_holdings", fake_holdings)
 
     # evaluate_round 每轮从 sys_config 重载冷却时长，测试环境禁止连库 → 打桩返回 "0"
@@ -33,9 +34,9 @@ def engine_env(monkeypatch):
     monkeypatch.setattr(ae.db, "get_config", fake_config)
 
     monkeypatch.setattr(ae, "COOLDOWN_SECONDS", 0.0)     # 测试即时过期
-    # 同步直调 eval_* 时模块级成本缓存为空 → 直接预写缓存绕过异步加载
-    monkeypatch.setattr(ae, "_costs", {"NVDA": 200.0})
-    monkeypatch.setattr(ae, "_costs_at", time.monotonic())
+    # 同步直调 eval_* 时模块级持仓缓存为空 → 直接预写缓存绕过异步加载
+    monkeypatch.setattr(ae, "_positions", {"NVDA": {"cost": 200.0, "qty": 100.0}})
+    monkeypatch.setattr(ae, "_positions_at", time.monotonic())
     return saved
 
 
@@ -205,15 +206,15 @@ def test_extreme_guard_reset_persists(engine_env, monkeypatch):
 
 # ---------------- V2 双规则（仅 QQQ）：止盈 + 深跌回投 ----------------
 
-def _qqq_cost(monkeypatch, cost=100.0):
-    """预写 QQQ 持仓成本缓存（覆盖 engine_env 的 NVDA 成本，QQQ 专用用例用）。"""
-    monkeypatch.setattr(ae, "_costs", {"QQQ": cost})
-    monkeypatch.setattr(ae, "_costs_at", time.monotonic())
+def _qqq_positions(monkeypatch, cost=100.0, qty=100.0):
+    """预写 QQQ 持仓缓存（覆盖 engine_env 的 NVDA 缓存，QQQ 专用用例用）。"""
+    monkeypatch.setattr(ae, "_positions", {"QQQ": {"cost": cost, "qty": qty}})
+    monkeypatch.setattr(ae, "_positions_at", time.monotonic())
 
 
 def test_vix_take_profit_triggers(engine_env, monkeypatch):
     monkeypatch.setattr(ae.daily_bars, "get_vix_percentile", lambda a=None: 15.0)
-    _qqq_cost(monkeypatch)
+    _qqq_positions(monkeypatch)
     state = {}
     evs = ae.eval_vix_take_profit("QQQ", 125.0, ae.DEFAULT_PARAMS, state,
                                   dict(_ind(), asof="2026-10-02"))
@@ -227,7 +228,7 @@ def test_vix_take_profit_needs_both_conditions(engine_env, monkeypatch):
     state = {}
     # 浮盈达标但 VIX 分位高（市场未自满）→ 不触发
     monkeypatch.setattr(ae.daily_bars, "get_vix_percentile", lambda a=None: 35.0)
-    _qqq_cost(monkeypatch)
+    _qqq_positions(monkeypatch)
     assert ae.eval_vix_take_profit("QQQ", 125.0, ae.DEFAULT_PARAMS, state, _ind()) == []
     # VIX 分位低但浮盈不足 → 不触发
     monkeypatch.setattr(ae.daily_bars, "get_vix_percentile", lambda a=None: 15.0)
@@ -237,19 +238,19 @@ def test_vix_take_profit_needs_both_conditions(engine_env, monkeypatch):
 def test_vix_take_profit_missing_vix_and_gate(engine_env, monkeypatch):
     # VIX 分位缺失（拉取失败退化）→ 不触发
     monkeypatch.setattr(ae.daily_bars, "get_vix_percentile", lambda a=None: None)
-    _qqq_cost(monkeypatch)
+    _qqq_positions(monkeypatch)
     assert ae.eval_vix_take_profit("QQQ", 125.0, ae.DEFAULT_PARAMS, {}, _ind()) == []
     # 非 QQQ 门禁（报告结论不外推）
     monkeypatch.setattr(ae.daily_bars, "get_vix_percentile", lambda a=None: 15.0)
     assert ae.eval_vix_take_profit("NVDA", 250.0, ae.DEFAULT_PARAMS, {}, _ind()) == []
     # 无成本 → 不触发
-    monkeypatch.setattr(ae, "_costs", {})
+    monkeypatch.setattr(ae, "_positions", {})
     assert ae.eval_vix_take_profit("QQQ", 125.0, ae.DEFAULT_PARAMS, {}, _ind()) == []
 
 
 def test_vix_take_profit_resets_out_of_band(engine_env, monkeypatch):
     monkeypatch.setattr(ae.daily_bars, "get_vix_percentile", lambda a=None: 15.0)
-    _qqq_cost(monkeypatch)
+    _qqq_positions(monkeypatch)
     state = {}
     ae.eval_vix_take_profit("QQQ", 125.0, ae.DEFAULT_PARAMS, state, _ind())
     assert "main" in state["vix_take_profit"]
@@ -288,7 +289,7 @@ def test_evaluate_dispatches_v2_rules(engine_env, monkeypatch):
     ind = dict(_ind(), week52_high=100.0, asof="2026-10-02")
     monkeypatch.setattr(ae.daily_bars, "get_indicators", lambda s: ind)
     monkeypatch.setattr(ae.daily_bars, "get_vix_percentile", lambda a=None: 15.0)
-    _qqq_cost(monkeypatch)
+    _qqq_positions(monkeypatch)
     evs = asyncio.run(ae.evaluate("QQQ", 60.0))
     rules = {e["rule"] for e in evs}
     assert "deep_dip" in rules            # 距 52 周高回撤 -40% 达标
@@ -303,7 +304,7 @@ def test_deep_dip_reset_persists(engine_env, monkeypatch):
     monkeypatch.setattr(ae, "COOLDOWN_SECONDS", 3600.0)   # 冷却不过期，才能测出重置是否生效
     ind = dict(_ind(rsi=50.0, ma50=170.0, ma200=165.0), week52_high=200.0)
     monkeypatch.setattr(ae.daily_bars, "get_indicators", lambda s: ind)
-    _qqq_cost(monkeypatch)
+    _qqq_positions(monkeypatch)
     store = _rule_store(monkeypatch)
     evs1 = asyncio.run(ae.evaluate("QQQ", 160.0))   # T1：距 52 周高 -20% → 触发
     assert any(e["rule"] == "deep_dip" for e in evs1)
@@ -312,3 +313,55 @@ def test_deep_dip_reset_persists(engine_env, monkeypatch):
     assert "main" not in store["QQQ"]["fired_state"]["deep_dip"]   # 重置已落库
     evs3 = asyncio.run(ae.evaluate("QQQ", 160.0))   # T3：再深跌 → 应再次触发
     assert any(e["rule"] == "deep_dip" for e in evs3)
+
+
+# ---------------- 市值阈值过滤（evaluate_round 收口） ----------------
+
+def _positions_env(monkeypatch, positions, config_value="500"):
+    """预写持仓缓存与 sys_config 桩（config_value 传 None 模拟配置缺失）。"""
+    monkeypatch.setattr(ae, "_positions", positions)
+    monkeypatch.setattr(ae, "_positions_at", time.monotonic())
+
+    async def fake_config(key):
+        return config_value
+    monkeypatch.setattr(ae.db, "get_config", fake_config)
+
+
+def test_round_filters_small_position(engine_env, monkeypatch):
+    """市值 < 阈值 → 不评估不落库：2 股 × 149 = 298 < 500，跌破止损也无事件。"""
+    _positions_env(monkeypatch, {"NVDA": {"cost": 200.0, "qty": 2.0}}, "500")
+    monkeypatch.setattr(ae.daily_bars, "get_indicators", lambda s: _ind(stop=150.0))
+    evs = asyncio.run(ae.evaluate_round({"NVDA": 149.0}))
+    assert evs == []
+
+
+def test_round_keeps_large_position(engine_env, monkeypatch):
+    """市值 ≥ 阈值 → 正常评估：10 股 × 149 = 1490 ≥ 500，atr_stop 触发。"""
+    _positions_env(monkeypatch, {"NVDA": {"cost": 200.0, "qty": 10.0}}, "500")
+    monkeypatch.setattr(ae.daily_bars, "get_indicators", lambda s: _ind(stop=150.0))
+    evs = asyncio.run(ae.evaluate_round({"NVDA": 149.0}))
+    assert any(e["rule"] == "atr_stop" for e in evs)
+
+
+def test_round_threshold_boundary_equal(engine_env, monkeypatch):
+    """恰好等于阈值 → 保留（≥ 判定）：1 股 × 500 = 500。"""
+    _positions_env(monkeypatch, {"NVDA": {"cost": 200.0, "qty": 1.0}}, "500")
+    monkeypatch.setattr(ae.daily_bars, "get_indicators", lambda s: _ind(stop=150.0))
+    evs = asyncio.run(ae.evaluate_round({"NVDA": 500.0}))
+    assert evs != []
+
+
+def test_round_zero_threshold_disables_filter(engine_env, monkeypatch):
+    """阈值 0 → 不过滤：2 股 × 149 = 298 仍评估。"""
+    _positions_env(monkeypatch, {"NVDA": {"cost": 200.0, "qty": 2.0}}, "0")
+    monkeypatch.setattr(ae.daily_bars, "get_indicators", lambda s: _ind(stop=150.0))
+    evs = asyncio.run(ae.evaluate_round({"NVDA": 149.0}))
+    assert any(e["rule"] == "atr_stop" for e in evs)
+
+
+def test_round_missing_config_defaults_500(engine_env, monkeypatch):
+    """配置缺失 → 默认 500：3 股 × 149 = 447 < 500 被过滤。"""
+    _positions_env(monkeypatch, {"NVDA": {"cost": 200.0, "qty": 3.0}}, None)
+    monkeypatch.setattr(ae.daily_bars, "get_indicators", lambda s: _ind(stop=150.0))
+    evs = asyncio.run(ae.evaluate_round({"NVDA": 149.0}))
+    assert evs == []
