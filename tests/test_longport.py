@@ -509,6 +509,18 @@ class TestPanelUsdcnhInjection:
         assert by_key["USDCNH"]["price"] == 7.1079
         assert by_key["DXY"]["price"] == 104.3
 
+    def test_dxy_yahoo_primary(self, monkeypatch):
+        """DXY 主价迁 Yahoo：yahoo_day 注入优先于新浪批冷备价。"""
+        async def fake_sina(proxy_urls=None):
+            return {"dxy": {"price": 104.3}, "cnh": {"price": 7.1079}, "hf": {}}
+        monkeypatch.setattr(pf, "fetch_sina_panel", fake_sina)
+        panel = asyncio.run(pf.fetch_market_panel(
+            proxy_urls=[], yahoo_day={"DXY": {"price": 105.1, "change_pct": 0.5}},
+            spark_map={}, fetch_missing=False,
+            sina_panel={"dxy": {"price": 104.3}}, td_usdcnh=None))
+        by_key = {p["key"]: p for p in panel}
+        assert by_key["DXY"]["price"] == 105.1   # Yahoo 主价优先于新浪批
+
 
 # ---------------------------------------------------------------------------
 # fetcher：期指主备反转与隔夜指数

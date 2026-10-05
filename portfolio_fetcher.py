@@ -5,8 +5,8 @@
 - 新浪 gb_ 前缀批量：字段[21]-[24] 为美股盘前/盘后实时价
 - 东财 ulist 批量：兜底（仅常规价，105=NASDAQ/106=NYSE/107=AMEX/116=港股，易封 IP，≤1次/分钟）
 - FT 官网 GraphQL：基金官方日频净值（fundid=31402/shclcode=2B）
-- 新浪 fx_susdhkd：USD/HKD 汇率（失败兜底 7.80）
-- 新浪 fx_susdcnh：USD/CNH 离岸人民币汇率（看板第 11 项主价）
+- 腾讯 whUSDHKD（总线攒批）：USD/HKD 汇率（失败兜底 7.80；新浪已退役）
+- 新浪 fx_susdcnh：USD/CNH 离岸人民币汇率冷备（主价 twelvedata 30min 节流，缺失回落本批）
 - Yahoo v8 chart 当日分时（5m 含盘前盘后）：US30Y/US10Y/VIX 主价源（server 沿用
   backfill 节奏刷新，当日 5m 分时顺带落库）；其余看板标的分时由主价快照
   「价变即写」落库累积，不请求单独的分时接口
@@ -40,7 +40,6 @@ ET_TZ = ZoneInfo("America/New_York")
 TENCENT_US_URL = "http://qt.gtimg.cn/q={symbols}"
 SINA_US_URL = "https://hq.sinajs.cn/list={symbols}"
 SINA_HEADERS = {"Referer": "https://finance.sina.com.cn"}
-SINA_FX_URL = "https://hq.sinajs.cn/list=fx_susdhkd"
 SINA_PANEL_URL = "https://hq.sinajs.cn/list=DINIW,hf_OIL,hf_GC,fx_susdcnh"
 # 24h数据源（境外现货交易所公共行情端点）：免 key 7×24 有价，美股闭市时段
 # （夜盘/周末）代理价补全组合走势，中间价口径与底层夜盘价偏差实测 0.02%-0.1%
@@ -288,15 +287,17 @@ def parse_sina_us(raw: str, symbols: list[str]) -> dict[str, dict]:
     return result
 
 
-def parse_fx_usdhkd(raw: str) -> float:
-    """解析新浪 fx_susdhkd，返回 USD/HKD 汇率；失败/越界返回 0.0。"""
-    m = re.search(r'var hq_str_fx_susdhkd="([^"]*)"', raw or "")
+def parse_tencent_wh_fx(raw: str) -> float:
+    """解析腾讯外汇行 v_whUSDHKD（波浪线布局 f[3] 现价），失败/越界返回 0.0。
+
+    wh 行仅 ~21 字段且布局与 us 股票不同（f[4] 恒 0），不能复用
+    parse_tencent_quotes 的 us/hk 分支；汇率场景只需现价。@author yys
+    """
+    m = re.search(r'v_whUSDHKD="([^"]*)"', raw or "")
     if not m:
         return 0.0
-    f = m.group(1).split(",")
-    if len(f) < 2:
-        return 0.0
-    v = _f(f[1])
+    f = m.group(1).split("~")
+    v = _f(f[3]) if len(f) > 3 else 0.0
     return v if 7.5 <= v <= 8.5 else 0.0
 
 
@@ -1056,8 +1057,9 @@ async def fetch_equity_overnight_quotes(symbols: list[str]) -> dict[str, dict]:
 async def fetch_td_fx(pair: str) -> float:
     """twelvedata 外汇行情（USD/CNH、USD/HKD 等），失败/越界返回 0.0。
 
-    免费 8 credits/min 共享限额：USD/CNH 由 _market_loop 60s 节流调用
-    （1 credit/min），USD/HKD 每天 2 次（可忽略）；无独立节流，频次由调用方控制。
+    免费 8 credits/min 共享限额：USD/CNH 由 _market_loop 30min 节流调用
+    （48 credits/天），USD/HKD 仅腾讯主源失败时冷备调用（可忽略）；无独立
+    节流，频次由调用方控制。
     """
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -1078,11 +1080,12 @@ async def fetch_td_fx(pair: str) -> float:
 async def fetch_fx_usdhkd(proxy_urls: list[str] | None = None) -> tuple[float, bool]:
     """获取 USD/HKD 汇率。返回 (汇率, 是否兜底)。
 
-    主源新浪 fx_susdhkd（直连 403 时代理重试），失败回切 twelvedata 冷备
-    （TD 免费额度让位锚点恢复与 USDCNH 主价），再失败置 7.80 静态兜底。
+    主源腾讯 whUSDHKD 走 tencent_bus 攒批总线（与股票/候选池同请求节奏，
+    零额外请求；新浪易风控已退役），失败回切 twelvedata 冷备
+    （TD 免费额度让位锚点恢复与 USDCNH 主价），再失败置 7.80 静态兜底。@author yys
     """
-    raw = await _get_text_resilient(SINA_FX_URL, headers=SINA_HEADERS, proxy_urls=proxy_urls)
-    v = parse_fx_usdhkd(raw or "")
+    raw = await tencent_bus.get(["whUSDHKD"])
+    v = parse_tencent_wh_fx(raw or "")
     if v > 0:
         return v, False
     v = await fetch_td_fx("USD/HKD")
@@ -1117,7 +1120,7 @@ async def fetch_fund_nav(proxy_urls: list[str] | None = None) -> dict | None:
 # 市场参考看板（QQQ/SPY/SOXX/HSI/BZ/GC/DXY/US30Y/US10Y/VIX/DJI/NDX/SPX/USDCNH + 当日分时 spark）
 # ---------------------------------------------------------------------------
 
-MARKET_PANEL = [  # (key, 腾讯代码(空=新浪DINIW/fx_susdcnh 或 Yahoo 主价), 展示名, 币种, 分时口径标记)
+MARKET_PANEL = [  # (key, 腾讯代码(空=冷备/回落价 或 Yahoo 主价), 展示名, 币种, 分时口径标记)
     # 第 5 位 spark_src 仅作历史主源标记：现行分时统一读 market_ticks 组装——
     # 主价快照价变即写累积（US30Y/US10Y/VIX 由 Yahoo 主价刷新顺带落库 5m 分时），
     # 不再单独请求分时接口
@@ -1130,11 +1133,11 @@ MARKET_PANEL = [  # (key, 腾讯代码(空=新浪DINIW/fx_susdcnh 或 Yahoo 主�
     ("HSI", "hkHSI", "恒生指数", "HKD", "tencent"),   # 主价腾讯混排
     ("BZ", "hf_OIL", "布伦特原油", "USD", "yahoo_day"),   # 主价腾讯 hf_ 混排(新浪兜底)
     ("GC", "hf_GC", "COMEX黄金", "USD", "yahoo_day"),     # 主价腾讯 hf_ 混排(新浪兜底)
-    ("DXY", "", "美元指数", "", "yahoo_day"),             # 主价新浪 DINIW
+    ("DXY", "", "美元指数", "", "yahoo_day"),             # 主价 Yahoo backfill(4h,新浪批冷备)
     ("US30Y", "", "美债30Y", "%", "yahoo_day"),           # 主价 Yahoo ^TYX（刷新顺带 5m 分时落库），单位百分点
     ("US10Y", "", "美债10Y", "%", "yahoo_day"),           # 主价 Yahoo ^TNX（同上）
     ("VIX", "", "恐慌指数", "", "yahoo_day"),             # 主价长桥 .VIX.US 实时（Yahoo ^VIX 兜底）
-    ("USDCNH", "", "美元人民币", "", "yahoo_day"),        # 主价新浪 fx_susdcnh
+    ("USDCNH", "", "美元人民币", "", "yahoo_day"),        # 主价 twelvedata(30min,新浪批冷备)
 ]
 
 
@@ -1199,12 +1202,12 @@ async def fetch_yahoo_day_minutes(symbol: str, proxy_urls: list[str] | None = No
 
 
 async def fetch_sina_panel(proxy_urls: list[str] | None = None) -> dict:
-    """抓新浪看板批（DXY 主价 + USDCNH 冷备价 + hf_OIL/hf_GC 兜底，一次合并请求）。
+    """抓新浪看板批（BZ/GC 兜底 + USDCNH 冷备 + DXY 回落冷备，一次合并请求）。
 
-    数据源架构升级（2026-10-03）：本批由 server _market_loop 以 5min 节流
-    低频调用（成功固定间隔、失败指数退避），产物缓存透传 fetch_market_panel；
-    USDCNH 主价已切 twelvedata、VIX 已切长桥，新浪仅剩 DXY 主价职责（免费源
-    中无平替）与 BZ/GC 的低频兜底。返回 {dxy: dict, cnh: float, hf: {key: dict}}。
+    数据源架构升级（2026-10-05）：本批由 server _market_loop 以 15min 节流
+    低频调用（纯兜底批：BZ/GC 兜底 + USDCNH 冷备 + DXY 回落冷备；主价职责
+    已全部分离——DXY→Yahoo backfill、USDCNH→twelvedata、VIX→长桥），
+    产物缓存透传 fetch_market_panel。返回 {dxy: dict, cnh: float, hf: {key: dict}}。
     """
     raw = await _get_text_resilient(SINA_PANEL_URL, headers=SINA_HEADERS,
                                     proxy_urls=proxy_urls)
@@ -1221,17 +1224,17 @@ async def fetch_market_panel(proxy_urls: list[str] | None = None,
                              fetch_missing: bool = True,
                              sina_panel: dict | None = None,
                              td_usdcnh: float | None = None) -> list[dict]:
-    """抓市场看板 14 项主价并组装 spark：腾讯混排批量 + 新浪低频批(DXY 主用/
-    USDCNH、hf 兜底，server 5min 节流传入) + twelvedata USDCNH 主价 +
-    Yahoo(US30Y/US10Y 主价，代理池；VIX/DJI/NDX/SPX 四项指数由长桥实时价
+    """抓市场看板 14 项主价并组装 spark：腾讯混排批量 + 新浪低频批(BZ/GC 兜底/
+    USDCNH 与 DXY 冷备，server 15min 节流传入) + twelvedata USDCNH 主价 +
+    Yahoo(US30Y/US10Y/DXY 主价，代理池；VIX/DJI/NDX/SPX 四项指数由长桥实时价
     经 yahoo_day 注入，Yahoo 仅兜底) + spark 经 spark_map 注入。
 
     数据分工：
     - 主价：QQQ/SPY/SOXX/HSI/BZ/GC 腾讯混排（BZ/GC 新浪 hf 低频兜底）；DXY
-      新浪 DINIW（5min 鲜度）；USDCNH twelvedata 主价（60s）缺失回落新浪批
-      冷备价；US30Y/US10Y 取 yahoo_day（server 主价刷新轮传入）；
-      VIX/DJI/NDX/SPX 取 yahoo_day（server 长桥 .VIX/.DJI/.NDX/.SPX 实时价
-      填充，长桥不可用时 Yahoo ^VIX/^DJI/^NDX/^GSPC 兜底）；
+      Yahoo DX-Y.NYB backfill（4h，失败回落新浪批冷备）；USDCNH twelvedata
+      主价（30min）缺失回落新浪批冷备价；US30Y/US10Y 取 yahoo_day（server
+      主价刷新轮传入）；VIX/DJI/NDX/SPX 取 yahoo_day（server 长桥
+      .VIX/.DJI/.NDX/.SPX 实时价填充，长桥不可用时 Yahoo ^VIX/^DJI/^NDX/^GSPC 兜底）；
     - spark：全部由 server 读库（market_ticks 主价快照累积）后经 spark_map 传入
       [ts,price] 对（前端悬浮显示时间+价格），本函数不请求分时接口；缺项置 []。
     fetch_missing=False 时跳过内部 Yahoo 补拉（server 调用方传入：节流单点化到
@@ -1249,8 +1252,9 @@ async def fetch_market_panel(proxy_urls: list[str] | None = None,
     if raw:
         quotes = parse_tencent_quotes(raw, list(code_sym.values()), sym_prefix)
 
-    # 2. 新浪低频批（server 5min 节流传入）：DXY 主用（美元指数）+ USDCNH
-    #    冷备价 + hf_OIL/hf_GC 兜底腾讯失败项；未传入时现场拉一次保独立可用
+    # 2. 新浪低频批（server 15min 节流传入）：纯兜底批——BZ/GC 兜底腾讯失败项
+    #    + USDCNH 冷备价（twelvedata 缺失时）+ DXY 回落冷备价（Yahoo 缺失时）；
+    #    未传入时现场拉一次保独立可用
     sina = sina_panel if sina_panel is not None else await fetch_sina_panel(proxy_urls)
     sina_dxy: dict = sina.get("dxy") or {}
     sina_cnh: dict = sina.get("cnh") or {}
@@ -1260,7 +1264,7 @@ async def fetch_market_panel(proxy_urls: list[str] | None = None,
     #    主价+分时两用）；正常轮 server 刷新轮已传 yahoo_day，此处零请求。
     #    fetch_missing=False 直接跳过（server 侧节流单点化，缓存为空也不放大请求）
     yahoo_day = dict(yahoo_day or {})
-    need_keys = [k for k in ("US30Y", "US10Y", "VIX", "DJI", "NDX", "SPX")
+    need_keys = [k for k in ("US30Y", "US10Y", "VIX", "DJI", "NDX", "SPX", "DXY")
                  if not (yahoo_day.get(k) or {}).get("price")] if fetch_missing else []
 
     async def _yahoo(key: str) -> tuple[str, dict]:
@@ -1278,22 +1282,22 @@ async def fetch_market_panel(proxy_urls: list[str] | None = None,
     panel: list[dict] = []
     for key, code, name, cur, spark_src in MARKET_PANEL:
         price = change = None
-        if key == "DXY":
-            # 主价新浪 DINIW（5min 鲜度，免费源无平替）
-            q = sina_dxy
-        elif key == "USDCNH":
-            # 主价 twelvedata（60s），缺失回落新浪批冷备价（5min 鲜度）
+        if key == "USDCNH":
+            # 主价 twelvedata（30min），缺失回落新浪批冷备价（15min 鲜度）
             q = {"price": td_usdcnh} if td_usdcnh else sina_cnh
         elif key in ("BZ", "GC"):
             # 腾讯 hf 行优先，失败用新浪 hf 兜底
             q = quotes.get(code_sym.get(code, "")) or {}
             if not q.get("price"):
                 q = sina_hf.get(key) or {}
-        elif key in ("US30Y", "US10Y", "VIX", "DJI", "NDX", "SPX"):
+        elif key in ("US30Y", "US10Y", "VIX", "DJI", "NDX", "SPX", "DXY"):
             # 主价+分时同源 Yahoo 当日分时缓存；VIX/DJI/NDX/SPX 常态由长桥
             # 实时价填充 yahoo_day（server 注入），Yahoo 仅长桥不可用时兜底；
-            # 收益率类 price 保留 3 位小数（前端再 fmt）
+            # DXY 唯一免费源 Yahoo（server 4h backfill 节流），失败窗口回落
+            # 新浪批冷备价；收益率类 price 保留 3 位小数（前端再 fmt）
             q = yahoo_day.get(key) or {}
+            if not q.get("price") and key == "DXY":
+                q = sina_dxy
             if q.get("price") and key in ("US30Y", "US10Y"):
                 q = {**q, "price": round(q["price"], 3)}
         else:

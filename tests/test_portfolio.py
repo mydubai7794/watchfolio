@@ -114,17 +114,22 @@ class TestParseSinaUs:
         assert ext["SKHY"]["ext_price"] == 0.0
 
 
-class TestParseFx:
+class TestParseTencentWhFx:
+    """腾讯外汇行 v_whUSDHKD 解析：f[3] 现价 + 7.5~8.5 区间校验。"""
+
+    WH_OK_RAW = 'v_whDINIW="310~美元指数~DINIW~99.6400~0~x";v_whUSDHKD="310~美元港元~USDHKD~7.8454~0~20261005124608~7.8470"'
+
     def test_ok(self):
-        raw = 'var hq_str_fx_susdhkd="21:55:24,7.846600,7.847600,7.846400,19,7.846700,7.847300,7.845400,7.846600,美元兑港元即期汇率,0.010000,0.000200,0.0002421,,7.847600,7.781500,,2026-10-01";'
-        assert pf.parse_fx_usdhkd(raw) == 7.8466
+        assert pf.parse_tencent_wh_fx(self.WH_OK_RAW) == 7.8454
 
-    def test_out_of_range(self):
-        raw = 'var hq_str_fx_susdhkd="21:55:24,70.8466,7.847,7.846,19,7.8467,7.847,7.845,7.8466,x,0.01,0.0002,0.0002,,7.847,7.781,,2026-10-01";'
-        assert pf.parse_fx_usdhkd(raw) == 0.0
+    def test_out_of_band(self):
+        raw = 'v_whUSDHKD="310~美元港元~USDHKD~9.9000~0~x"'
+        assert pf.parse_tencent_wh_fx(raw) == 0.0   # 越界视为失败
 
-    def test_garbage(self):
-        assert pf.parse_fx_usdhkd("") == 0.0
+    def test_missing_or_empty(self):
+        assert pf.parse_tencent_wh_fx("") == 0.0
+        assert pf.parse_tencent_wh_fx('v_whXXXX="1~2~3"') == 0.0
+        assert pf.parse_tencent_wh_fx('v_whUSDHKD="310~a~b"') == 0.0   # 字段不足
 
 
 FT_DATA = {"data": {"Overview": {"fundname": "Templeton Select APAC Equity Income Fund",
@@ -337,11 +342,6 @@ class _FakeProxyClient:
         return _FakeResp()
 
 
-FX_OK_RAW = ('var hq_str_fx_susdhkd="21:55:24,7.846600,7.847600,7.846400,19,7.846700,'
-             '7.847300,7.845400,7.846600,美元兑港元即期汇率,0.010000,0.000200,0.0002421,,'
-             '7.847600,7.781500,,2026-10-01";')
-
-
 class TestGetTextResilient:
     """新浪容错版 GET：直连优先，403/失败时代理候选依次重试。"""
 
@@ -397,58 +397,56 @@ class TestGetTextResilient:
         assert asyncio.run(pf._get_text_resilient("http://x")) is None
 
 
-class TestFetchFxUsesProxies:
-    def test_proxy_passthrough(self, monkeypatch):
-        """fetch_fx_usdhkd 新浪主源直连 403 时，代理清单透传 _get_text_resilient。"""
-        captured = {}
+class TestFetchFxTencentPrimary:
+    """fetch_fx_usdhkd：主源腾讯 whUSDHKD（总线攒批，零额外请求）→ TD 冷备 → 静态兜底。"""
 
-        async def fake_resilient(url, headers=None, proxy_urls=None, timeout=10.0):
-            captured["url"] = url
-            captured["proxy_urls"] = proxy_urls
-            return None   # 新浪失败 → 回切 TD
+    def test_tencent_primary_no_td(self, monkeypatch):
+        """腾讯主源成功：零 TD 请求。"""
+        called = {"td": 0, "bus_codes": None}
+
+        async def td_spy(pair):
+            called["td"] += 1
+            return 7.8470
+
+        async def fake_bus_get(codes):
+            called["bus_codes"] = codes
+            return 'v_whUSDHKD="310~美元港元~USDHKD~7.8466~0~x~7.8470"'
+
+        monkeypatch.setattr(pf, "fetch_td_fx", td_spy)
+        monkeypatch.setattr(pf.tencent_bus, "get", fake_bus_get)
+        rate, fallback = asyncio.run(pf.fetch_fx_usdhkd())
+        assert rate == 7.8466 and fallback is False
+        assert called["td"] == 0
+        assert called["bus_codes"] == ["whUSDHKD"]   # 与股票/候选池同总线的攒批代码
+
+    def test_tencent_fail_td_cold_backup(self, monkeypatch):
+        """腾讯失败（总线空返回）→ 回切 TD 冷备。"""
+
+        async def fake_bus_get(codes):
+            return ""
 
         async def td_ok(pair):
             assert pair == "USD/HKD"
             return 7.8470
 
         monkeypatch.setattr(pf, "fetch_td_fx", td_ok)
-        monkeypatch.setattr(pf, "_get_text_resilient", fake_resilient)
-        rate, fallback = asyncio.run(pf.fetch_fx_usdhkd(proxy_urls=["p9"]))
+        monkeypatch.setattr(pf.tencent_bus, "get", fake_bus_get)
+        rate, fallback = asyncio.run(pf.fetch_fx_usdhkd())
         assert rate == 7.8470 and fallback is True
-        assert captured["proxy_urls"] == ["p9"]
-        assert "susdhkd" in captured["url"]
 
-    def test_sina_primary_no_td(self, monkeypatch):
-        """fetch_fx_usdhkd 新浪主源成功：零 TD 请求（免费额度让位锚点恢复/USDCNH）。"""
-        called = {"td": 0}
+    def test_all_fail_static_fallback(self, monkeypatch):
+        """腾讯与 TD 均失败 → 7.80 静态兜底。"""
 
-        async def td_spy(pair):
-            called["td"] += 1
-            return 7.8470
+        async def fake_bus_get(codes):
+            return None
 
-        async def fake_resilient(url, headers=None, proxy_urls=None, timeout=10.0):
-            return FX_OK_RAW
-
-        monkeypatch.setattr(pf, "fetch_td_fx", td_spy)
-        monkeypatch.setattr(pf, "_get_text_resilient", fake_resilient)
-        rate, fallback = asyncio.run(pf.fetch_fx_usdhkd(proxy_urls=["p9"]))
-        assert rate == 7.8466 and fallback is False
-        assert called["td"] == 0
-
-    def test_all_fail_fallback(self, monkeypatch):
-        """新浪与 TD 均失败：置 7.80 静态兜底。"""
         async def no_td(pair):
             return 0.0
 
         monkeypatch.setattr(pf, "fetch_td_fx", no_td)
-        monkeypatch.setattr(pf, "_get_text_resilient",
-                            lambda *a, **k: _async_none())
+        monkeypatch.setattr(pf.tencent_bus, "get", fake_bus_get)
         rate, fallback = asyncio.run(pf.fetch_fx_usdhkd())
         assert rate == pf.FX_FALLBACK and fallback is True
-
-
-async def _async_none():
-    return None
 
 
 class TestDetectIsolatedSpike:
@@ -1132,8 +1130,9 @@ class TestMarketPanelYahooSpark:
 
     def test_market_panel_assembly(self, monkeypatch):
         """组装：spark 由 spark_map 注入（缺项空数组）；主价分工不变——BZ/GC=新浪 hf
-        兜底、DXY=DINIW、USDCNH=fx_susdcnh、US30Y/US10Y/VIX=yahoo_day 缺失时内部补拉
-        Yahoo 当日分时；腾讯分时死请求已消除（主价轮不打 minute 接口）。"""
+        兜底、DXY=Yahoo 当日分时补拉（新浪批冷备）、USDCNH=fx_susdcnh、
+        US30Y/US10Y/VIX=yahoo_day 缺失时内部补拉 Yahoo 当日分时；腾讯分时死请求
+        已消除（主价轮不打 minute 接口）。"""
         minute_urls: list[str] = []
 
         async def fake_get_text(url, headers=None, timeout=10.0):
@@ -1168,14 +1167,14 @@ class TestMarketPanelYahooSpark:
         # spark 注入：传入项取库内序列，未传项为空数组
         assert got["QQQ"]["spark"] == [1.0, 2.0, 3.0, 4.0, 5.0]
         assert got["BZ"]["spark"] == [] and got["USDCNH"]["spark"] == []
-        # 主价分工：BZ/GC=新浪 hf 兜底、DXY=DINIW、USDCNH=fx_susdcnh
+        # 主价分工：BZ/GC=新浪 hf 兜底、DXY=Yahoo 补拉主价、USDCNH=fx_susdcnh
         assert got["BZ"]["price"] == 66.10
         assert got["GC"]["price"] == 3860.5
-        assert got["DXY"]["price"] == 102.1406
+        assert got["DXY"]["price"] == 5.6
         assert got["USDCNH"]["price"] == 6.7068
-        # US30Y 已有 yahoo_day 数据（零补拉）；US10Y/VIX/DJI/NDX/SPX 缺失
-        # → 内部补拉当日分时接口（按 MARKET_PANEL 顺序）
-        assert yahoo_calls == ["^TNX", "^VIX", "^DJI", "^NDX", "^GSPC"]
+        # US30Y 已有 yahoo_day 数据（零补拉）；US10Y/VIX/DJI/NDX/SPX/DXY 缺失
+        # → 内部补拉当日分时接口（按 need_keys 顺序，DXY 排末位）
+        assert yahoo_calls == ["^TNX", "^VIX", "^DJI", "^NDX", "^GSPC", "DX-Y.NYB"]
         assert got["US30Y"]["price"] == 5.603 and got["US10Y"]["price"] == 5.6
         assert got["DJI"]["price"] == 5.6 and got["SPX"]["price"] == 5.6
         # 腾讯分时死请求已消除：主价轮不再打 minute 接口
