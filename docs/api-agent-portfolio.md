@@ -9,7 +9,8 @@
 ## 鉴权
 
 - 请求头 `X-API-Key: <AGENT_API_KEY>`；Key 存于服务端 `sys_config` 表 `AGENT_API_KEY` 项
-- 未配置 → 404（视为禁用，不暴露端点存在性）；不匹配 → 401（常量时间比较，防时序侧信道）
+- 鉴权在 `/api/agent` 路由域以 FastAPI router 依赖统一收口：该域下所有端点挂同一 `APIRouter` 即自动受保护，无需各端点手写
+- 未配置 → 404（视为禁用，不暴露端点存在性）；不匹配/缺失头 → 401（常量时间比较，防时序侧信道）；Key 配置读取异常 fail-closed 同 404 并留服务端日志
 - 更换 Key = 更新配置即时生效（无缓存，每次请求实时读配置）
 - 配置方法（在服务器上执行 MySQL）：
 
@@ -27,17 +28,17 @@ ON DUPLICATE KEY UPDATE value=VALUES(value);
 curl -H "X-API-Key: <key>" http://***REMOVED***/api/agent/portfolio
 ```
 
-错误响应格式：
+错误响应格式（FastAPI 原生形态，统一为 `{"detail": "..."}`）：
 
 ```json
-{"ok": false, "message": "无效的 API Key"}
+{"detail": "无效的 API Key"}
 ```
 
-| 状态码 | 含义 |
-|--------|------|
-| 200 | 成功返回快照 |
-| 401 | Key 不匹配 |
-| 404 | Key 未配置（端点视为禁用）/ 路径不存在 |
+| 状态码 | 含义 | 响应 body |
+|--------|------|-----------|
+| 200 | 成功返回快照 | 见「响应结构」 |
+| 401 | Key 不匹配 / 未携带 `X-API-Key` 头 | `{"detail": "无效的 API Key"}` |
+| 404 | Key 未配置（端点视为禁用）→ `{"detail": "接口未启用"}`；路径不存在 → FastAPI 默认 `{"detail": "Not Found"}` | `{"detail": "..."}` |
 
 ## 响应结构
 
@@ -46,6 +47,7 @@ curl -H "X-API-Key: <key>" http://***REMOVED***/api/agent/portfolio
 ```json
 {
   "ok": true,
+  "ready": true,
   "generated_at": "2026-10-05 22:35:18",
   "session": "regular",
   "trade_date": "2026-10-02",
@@ -106,6 +108,7 @@ curl -H "X-API-Key: <key>" http://***REMOVED***/api/agent/portfolio
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `ok` | bool | 恒为 `true`（鉴权通过即成功） |
+| `ready` | bool | 行情快照是否就绪：`true` 正常 / `false` 服务冷启动中（此时 `summary` 为空对象、`holdings` 为 `[]`、`cny` 为 `null`，agent 应稍后重试而非按空仓处理） |
 | `generated_at` | string | 快照生成时间，北京时间 `YYYY-MM-DD HH:MM:SS` |
 | `session` | string\|null | 美股当前时段：`regular` 盘中 / `pre` 盘前 / `post` 盘后 / `closed` 闭市（含周末假日）；服务冷启动未就绪时为 `null` |
 | `trade_date` | string\|null | 当前美东交易日 `YYYY-MM-DD` |

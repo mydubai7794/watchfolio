@@ -15,7 +15,7 @@ from typing import Optional
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Query, Request, Response
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -2401,24 +2401,35 @@ async def portfolio_daily(days_range: str = Query(default="30", alias="range")):
          "p": float(r["day_pnl"]), "pct": float(r["total_pnl_pct"])} for r in rows]}
 
 
-@app.get("/api/agent/portfolio")
-async def agent_portfolio(request: Request):
+async def _require_agent_key(request: Request) -> None:
+    """agent 接口公共鉴权：sys_config.AGENT_API_KEY 未配置 → 404（视为禁用），
+    key 不匹配 → 401（常量时间比较）；DB 异常 fail-closed 同 404 并记日志。@author yys"""
+    try:
+        api_key = await db.get_config("AGENT_API_KEY") or ""
+    except Exception as e:
+        logger.warning("AGENT_API_KEY 读取失败（本轮视为未配置）: %s", e)
+        api_key = ""
+    if not api_key:
+        raise HTTPException(status_code=404, detail="接口未启用")
+    provided = request.headers.get("X-API-Key", "")
+    if not hmac.compare_digest(provided.encode(), api_key.encode()):
+        raise HTTPException(status_code=401, detail="无效的 API Key")
+
+
+# 外部 agent 只读接口域：router 级统一鉴权，新端点挂此 router 即受保护
+agent_router = APIRouter(prefix="/api/agent",
+                         dependencies=[Depends(_require_agent_key)])
+
+
+@agent_router.get("/portfolio")
+async def agent_portfolio():
     """外部 agent 持仓快照（X-API-Key 鉴权，读缓存零额外行情请求）。
 
-    供外部 agent 做持仓鉴定/再平衡分析；sys_config.AGENT_API_KEY 未配置
-    → 404（视为禁用，不暴露端点存在性）；key 不匹配 → 401（常量时间比较）。
+    供外部 agent 做持仓鉴定/再平衡分析；鉴权由 router 级依赖统一收口
+    （AGENT_API_KEY 未配置 → 404 视为禁用，key 不匹配 → 401 常量时间比较）。
     cny 与 overview 同逻辑：用最新看板 USDCNH + 本金配置实时重算，
     不受 600s 慢轮快照拖累。@author yys
     """
-    try:
-        api_key = await db.get_config("AGENT_API_KEY") or ""
-    except Exception:
-        api_key = ""
-    if not api_key:
-        return JSONResponse(status_code=404, content={"ok": False, "message": "Not Found"})
-    provided = request.headers.get("X-API-Key", "")
-    if not hmac.compare_digest(provided.encode(), api_key.encode()):
-        return JSONResponse(status_code=401, content={"ok": False, "message": "无效的 API Key"})
     data = dict(portfolio_cache)
     usdcnh = next((m.get("price") for m in (market_cache or [])
                    if m.get("key") == "USDCNH" and m.get("price")), None)
@@ -2426,6 +2437,8 @@ async def agent_portfolio(request: Request):
                                usdcnh, _cny_cfg["invested"], _cny_cfg["expense"])
     return {
         "ok": True,
+        # 行情快照是否就绪：false=服务冷启动中（summary 空对象、盈亏不可用）
+        "ready": bool(data.get("ok")),
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "session": data.get("session"),
         "trade_date": data.get("trade_date"),
@@ -2445,6 +2458,9 @@ async def agent_portfolio(request: Request):
         "fx": {"usdhkd": data.get("fx_usdhkd"), "usdcnh": usdcnh},
         "cny": cny,
     }
+
+
+app.include_router(agent_router)
 
 
 @app.get("/api/portfolio/holding")

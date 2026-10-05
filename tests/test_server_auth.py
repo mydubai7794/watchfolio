@@ -501,7 +501,8 @@ class TestAgentPortfolioApi:
     """GET /api/agent/portfolio：API Key 鉴权三态与响应结构。
 
     middleware 放行 /api/agent/ 前缀（无需浏览器 session），
-    端点内自鉴权（X-API-Key 头）。
+    router 级依赖统一鉴权（X-API-Key 头），新增 agent 端点挂同
+    router 即受保护，无裸奔风险。
     """
 
     _base_cache = {
@@ -536,12 +537,36 @@ class TestAgentPortfolioApi:
         self._patch_key(monkeypatch, None)
         r = client.get("/api/agent/portfolio", headers={"X-API-Key": "x"})
         assert r.status_code == 404
+        assert "detail" in r.json()
 
     def test_401_wrong_key(self, monkeypatch):
         """key 不匹配 → 401。"""
         self._patch_key(monkeypatch, "right-key")
         r = client.get("/api/agent/portfolio", headers={"X-API-Key": "wrong-key"})
         assert r.status_code == 401
+        assert "detail" in r.json()
+
+    def test_401_missing_header(self, monkeypatch):
+        """不带 X-API-Key 头 → 401（视为空 key，与错误 key 同态）。"""
+        self._patch_key(monkeypatch, "right-key")
+        r = client.get("/api/agent/portfolio")
+        assert r.status_code == 401
+        assert "detail" in r.json()
+
+    def test_cold_cache_shape(self, monkeypatch):
+        """冷启动未就绪形态：portfolio_cache 保持模块初始值 → 200 且
+        ready=False、session=None、cny=None、holdings=[]（summary 空对象）。"""
+        self._patch_key(monkeypatch, "right-key")
+        # 不设置 portfolio_cache：沿用 teardown 重置后的模块初始形态（ok=False）
+        server.market_cache = []
+        r = client.get("/api/agent/portfolio", headers={"X-API-Key": "right-key"})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ready"] is False
+        assert data["session"] is None
+        assert data["summary"] == {}
+        assert data["holdings"] == []
+        assert data["cny"] is None
 
     def test_200_valid_key_and_structure(self, monkeypatch):
         """key 匹配 → 200，结构完整（summary/holdings/cash/fx/cny 键齐全）。"""
@@ -552,6 +577,7 @@ class TestAgentPortfolioApi:
         assert r.status_code == 200
         data = r.json()
         assert data["ok"] is True
+        assert data["ready"] is True
         assert data["session"] == "regular"
         assert data["trade_date"] == "2026-10-02"
         assert data["generated_at"]
