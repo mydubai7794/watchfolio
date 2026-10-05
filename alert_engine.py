@@ -15,6 +15,7 @@ import daily_bars
 logger = logging.getLogger("qdii.alert")
 
 COOLDOWN_SECONDS = 4 * 3600.0      # 同规则同方向冷却（sys_config ALERT_COOLDOWN_HOURS 可覆盖）
+MIN_MARKET_VALUE = 500.0           # 市值阈值（USD，sys_config ALERT_MIN_MARKET_VALUE 每轮刷新；读取失败沿用上轮）
 RESET_BAND = 0.005                  # 离开触发带 ±0.5% 重置冷却
 
 DEFAULT_PARAMS = {
@@ -26,7 +27,7 @@ DEFAULT_PARAMS = {
     "deep_dip": {"enabled": True, "dip_pct": 15.0},
 }
 
-_positions: dict[str, dict] = {}   # symbol → {"cost": 成本价, "qty": 数量}
+_positions: dict[str, dict[str, float]] = {}   # symbol → {"cost": 成本价, "qty": 数量}
 _positions_at = 0.0
 
 # 全局锁串行化求值：读-改-写含 await 点，轮询/push 多入口并发会丢更新
@@ -289,26 +290,32 @@ async def evaluate_round(prices: dict[str, float]) -> list[dict]:
 
     市值阈值过滤：持仓市值（现价×数量）低于 ALERT_MIN_MARKET_VALUE
     （sys_config，USD，默认 500）的标的跳过求值——不评估、不提醒、不落库；
-    设 0 或负值关闭过滤。@author yys"""
-    global COOLDOWN_SECONDS
-    threshold = 500.0
+    设 0 或负值关闭过滤。阈值读取失败沿用上轮值（与冷却时长语义对称，
+    避免关闭过滤的配置在 DB 抖动期间被默认 500 静默覆盖）。@author yys"""
+    global COOLDOWN_SECONDS, MIN_MARKET_VALUE
     try:
         hours = float(await db.get_config("ALERT_COOLDOWN_HOURS") or 4)
         COOLDOWN_SECONDS = hours * 3600.0
-        threshold = float(await db.get_config("ALERT_MIN_MARKET_VALUE") or 500)
+        MIN_MARKET_VALUE = float(await db.get_config("ALERT_MIN_MARKET_VALUE") or 500)
     except Exception:
         logger.warning("冷却/阈值配置加载失败，沿用当前 %sh / %.0f USD",
-                       COOLDOWN_SECONDS / 3600, threshold)
+                       COOLDOWN_SECONDS / 3600, MIN_MARKET_VALUE)
     await _load_positions()
     events = []
     for sym, price in prices.items():
-        pos = _positions.get(sym)
-        if price is None or pos is None:
+        try:
+            price = float(price)
+        except (TypeError, ValueError):
             continue
-        if threshold > 0 and float(price) * pos["qty"] < threshold:
+        pos = _positions.get(sym)
+        if pos is None:
+            continue
+        if MIN_MARKET_VALUE > 0 and price * pos["qty"] < MIN_MARKET_VALUE:
+            logger.debug("市值过滤跳过 %s: 市值 %.0f < 阈值 %.0f",
+                         sym, price * pos["qty"], MIN_MARKET_VALUE)
             continue
         try:
-            events += await evaluate(sym, float(price))
+            events += await evaluate(sym, price)
         except Exception as e:
             logger.warning("提醒求值异常 %s: %s", sym, e)
     return events

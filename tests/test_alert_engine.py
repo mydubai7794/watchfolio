@@ -37,6 +37,8 @@ def engine_env(monkeypatch):
     # 同步直调 eval_* 时模块级持仓缓存为空 → 直接预写缓存绕过异步加载
     monkeypatch.setattr(ae, "_positions", {"NVDA": {"cost": 200.0, "qty": 100.0}})
     monkeypatch.setattr(ae, "_positions_at", time.monotonic())
+    # 阈值起点显式归位（全局值会被 evaluate_round 刷新，见 _positions_env 注释）
+    monkeypatch.setattr(ae, "MIN_MARKET_VALUE", 500.0)
     return saved
 
 
@@ -318,9 +320,14 @@ def test_deep_dip_reset_persists(engine_env, monkeypatch):
 # ---------------- 市值阈值过滤（evaluate_round 收口） ----------------
 
 def _positions_env(monkeypatch, positions, config_value="500"):
-    """预写持仓缓存与 sys_config 桩（config_value 传 None 模拟配置缺失）。"""
+    """预写持仓缓存与 sys_config 桩（config_value 传 None 模拟配置缺失）。
+
+    显式锁定阈值起点 500：MIN_MARKET_VALUE 提为全局后由 evaluate_round
+    内 global 赋值刷新，monkeypatch 无法自动回收，不显式设起点会让
+    "沿用上轮"语义把上一用例的残值带进本用例（用例间污染）。"""
     monkeypatch.setattr(ae, "_positions", positions)
     monkeypatch.setattr(ae, "_positions_at", time.monotonic())
+    monkeypatch.setattr(ae, "MIN_MARKET_VALUE", 500.0)
 
     async def fake_config(key):
         return config_value
@@ -333,6 +340,7 @@ def test_round_filters_small_position(engine_env, monkeypatch):
     monkeypatch.setattr(ae.daily_bars, "get_indicators", lambda s: _ind(stop=150.0))
     evs = asyncio.run(ae.evaluate_round({"NVDA": 149.0}))
     assert evs == []
+    assert "last_event" not in engine_env      # 不落库：提醒表零写入
 
 
 def test_round_keeps_large_position(engine_env, monkeypatch):
@@ -344,11 +352,12 @@ def test_round_keeps_large_position(engine_env, monkeypatch):
 
 
 def test_round_threshold_boundary_equal(engine_env, monkeypatch):
-    """恰好等于阈值 → 保留（≥ 判定）：1 股 × 500 = 500。"""
+    """恰好等于阈值 → 保留（≥ 判定）：1 股 × 500 = 500。
+    500 触发 +8%=216 与 +15%=230 两档止盈（cost=200），atr_stop 不触发。"""
     _positions_env(monkeypatch, {"NVDA": {"cost": 200.0, "qty": 1.0}}, "500")
     monkeypatch.setattr(ae.daily_bars, "get_indicators", lambda s: _ind(stop=150.0))
     evs = asyncio.run(ae.evaluate_round({"NVDA": 500.0}))
-    assert evs != []
+    assert any(e["rule"] == "price_plan" for e in evs)
 
 
 def test_round_zero_threshold_disables_filter(engine_env, monkeypatch):
@@ -365,3 +374,37 @@ def test_round_missing_config_defaults_500(engine_env, monkeypatch):
     monkeypatch.setattr(ae.daily_bars, "get_indicators", lambda s: _ind(stop=150.0))
     evs = asyncio.run(ae.evaluate_round({"NVDA": 149.0}))
     assert evs == []
+
+
+def test_round_negative_threshold_disables_filter(engine_env, monkeypatch):
+    """阈值负值 → 不过滤（与 0 同语义）：2 股 × 149 = 298 仍评估。"""
+    _positions_env(monkeypatch, {"NVDA": {"cost": 200.0, "qty": 2.0}}, "-1")
+    monkeypatch.setattr(ae.daily_bars, "get_indicators", lambda s: _ind(stop=150.0))
+    evs = asyncio.run(ae.evaluate_round({"NVDA": 149.0}))
+    assert any(e["rule"] == "atr_stop" for e in evs)
+
+
+def test_round_invalid_config_defaults_500(engine_env, monkeypatch):
+    """配置非法（"abc"）→ float 抛 ValueError → 沿用默认 500：
+    3 股 × 149 = 447 < 500 被过滤。"""
+    _positions_env(monkeypatch, {"NVDA": {"cost": 200.0, "qty": 3.0}}, "abc")
+    monkeypatch.setattr(ae.daily_bars, "get_indicators", lambda s: _ind(stop=150.0))
+    evs = asyncio.run(ae.evaluate_round({"NVDA": 149.0}))
+    assert evs == []
+
+
+def test_round_failure_keeps_previous_threshold(engine_env, monkeypatch):
+    """回归：配置读取失败 → 沿用上轮阈值（与冷却时长语义对称）。
+
+    上轮已设 0（关闭过滤），DB 抖动轮内不得静默回退 500 重新开启过滤，
+    否则关闭开关在 DB 异常期间失效、小市值提醒悄然丢失。"""
+    monkeypatch.setattr(ae, "MIN_MARKET_VALUE", 0.0)
+
+    async def broken_config(key):
+        raise RuntimeError("db down")
+    monkeypatch.setattr(ae.db, "get_config", broken_config)
+    monkeypatch.setattr(ae, "_positions", {"NVDA": {"cost": 200.0, "qty": 2.0}})
+    monkeypatch.setattr(ae, "_positions_at", time.monotonic())
+    monkeypatch.setattr(ae.daily_bars, "get_indicators", lambda s: _ind(stop=150.0))
+    evs = asyncio.run(ae.evaluate_round({"NVDA": 149.0}))
+    assert any(e["rule"] == "atr_stop" for e in evs)   # 沿用 0 → 298 市值仍评估
