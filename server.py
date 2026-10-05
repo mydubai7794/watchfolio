@@ -19,11 +19,17 @@ from fastapi.responses import StreamingResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import alert_backtest
+import alert_engine
 import database as db
+import daily_bars
 import email_trader as et
 import fetcher
 import ledger
+import longport_push as lpp
+import mailer
 import portfolio_fetcher as pf
+import quotes_hub as qh
 import scorer
 from config import (
     MIN_INTERVAL_SEC,
@@ -176,6 +182,21 @@ async def lifespan(app: FastAPI):
     global ledger_fx_task
     ledger_fx_task = asyncio.create_task(_ledger_fx_loop())
 
+    # 提醒模块：邮件队列 worker + 日K每日刷新（07:00 拉取+指标重算；
+    # 提醒三表建表已并入 db.init_tables 内部，无需单独初始化）
+    global alert_mail_task, daily_bars_task
+    alert_mail_task = asyncio.create_task(mailer.mail_worker())
+    daily_bars_task = asyncio.create_task(daily_bars.daily_refresh_loop())
+
+    # 二期实时链路：长桥推送守护循环（shadow/live 由 sys_config.LP_PUSH_MODE
+    # 热切换，shadow 不写 quotes_hub 不动线上展示）+ 内存真相源攒批落库
+    # + SSE quote 快照节流广播；live 提醒事件接线与轮询侧同款处理
+    global lp_push_task, quotes_flush_task, sse_quote_task
+    lp_push_task = asyncio.create_task(lpp.push_loop())
+    quotes_flush_task = asyncio.create_task(qh.flush_loop())
+    sse_quote_task = asyncio.create_task(_sse_quote_loop())
+    lpp.on_events = _lp_on_events
+
     yield
     global monitor_running
     monitor_running = False
@@ -199,6 +220,16 @@ async def lifespan(app: FastAPI):
         daily_task.cancel()
     if scheduler_task:
         scheduler_task.cancel()
+    if alert_mail_task:
+        alert_mail_task.cancel()
+    if daily_bars_task:
+        daily_bars_task.cancel()
+    if lp_push_task:
+        lp_push_task.cancel()
+    if quotes_flush_task:
+        quotes_flush_task.cancel()
+    if sse_quote_task:
+        sse_quote_task.cancel()
     await db.close_pool()
     logger.info("Server shutdown complete")
 
@@ -279,6 +310,11 @@ portfolio_task: Optional[asyncio.Task] = None
 fund_nav_task: Optional[asyncio.Task] = None
 market_task: Optional[asyncio.Task] = None
 email_task: Optional[asyncio.Task] = None   # HSBC 成交邮件轮询任务
+alert_mail_task: Optional[asyncio.Task] = None   # 提醒邮件队列 worker
+daily_bars_task: Optional[asyncio.Task] = None   # 日K每日刷新循环（拉取+指标重算）
+lp_push_task: Optional[asyncio.Task] = None       # 长桥推送守护循环（shadow/live）
+quotes_flush_task: Optional[asyncio.Task] = None  # 内存真相源攒批落库循环
+sse_quote_task: Optional[asyncio.Task] = None     # SSE quote 快照节流广播循环
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +331,46 @@ async def _broadcast(event: str, data: dict):
     payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
     for queue in clients:
         queue.put_nowait(payload)
+
+
+async def _sse_quote_loop(interval: float = 1.0):
+    """SSE quote 快照：1s 节流批量广播内存真相源（一期轮询写入时同样生效）。
+
+    quotes_hub 为内存真相源（推送 live / 轮询 poll 双入口写入），本协程
+    只读快照广播、零外部请求；前端以 source=lp_push 的条目刷新展示价。
+    """
+    while True:
+        await asyncio.sleep(interval)
+        if not clients:
+            continue  # 无 SSE 客户端时空转短路，跳过快照与序列化（少算不放大）
+        try:
+            items = qh.snapshot()
+            if items:
+                await _broadcast("quote", {"items": [
+                    {"symbol": i["symbol"], "price": i["price"],
+                     "bid": i.get("bid"), "ask": i.get("ask"), "ts": str(i.get("ts")),
+                     "source": i.get("source")} for i in items]})
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("SSE quote 广播失败: %s", e)
+
+
+async def _lp_on_events(events: list[dict]):
+    """长桥 live 推送提醒事件接线（push_loop → on_events 钩子 → 宿主）。
+
+    与 _portfolio_loop 轮询侧完全同款：邮件入队（完整事件含 body）+
+    SSE 广播（剥离 body——/api/stream 为存量无鉴权通道，价格/成本等详情
+    不经它外泄，前端收到事件后经有鉴权的 GET /api/alerts 拉详情）。
+    事件已在引擎内落库+冷却置位，此处仅通知分发；字段取值用 .get 温和
+    防御（缺字段降级为 None 广播，不在通知层炸推送循环）。
+    """
+    for ev in events:
+        mailer.enqueue(ev)
+        await _broadcast("alert", {
+            "id": ev.get("id"), "symbol": ev.get("symbol"),
+            "rule": ev.get("rule"), "level": ev.get("level"),
+            "title": ev.get("title")})
 
 
 def _safe_float(val, default=0.0) -> float:
@@ -1523,6 +1599,29 @@ async def _portfolio_loop():
                     pending_tick = None
                     await db.save_portfolio_tick(*tick_row)
                     last_tick_state.update(p=p_now, v=v_now)
+            # ---- 提醒引擎：本轮最新价全量求值（引擎不感知数据来源）----
+            try:
+                _prices = {s: q.get("price") for s, q in quotes.items()
+                           if s in us_symbols and q.get("price")}
+                if _prices:
+                    # 轮询价同步写内存真相源（float 归一 Decimal）：SSE quote
+                    # 快照双入口之一，仅进内存不落库（tick 落库仅经 Sampler）
+                    for _s, _p in _prices.items():
+                        qh.update(_s, float(_p), source="poll")
+                    _events = await alert_engine.evaluate_round(_prices)
+                    for _ev in _events:
+                        mailer.enqueue(_ev)
+                        # SSE 广播剥离 body：/api/stream 为存量无鉴权通道，价格/成本等
+                        # 详情不经它外泄；前端收到事件后经有鉴权的 GET /api/alerts 拉详情
+                        await _broadcast("alert", {
+                            "id": _ev.get("id"), "symbol": _ev["symbol"],
+                            "rule": _ev["rule"], "level": _ev["level"],
+                            "title": _ev["title"]})
+                    if _events:
+                        logger.info("提醒触发 %d 条: %s", len(_events),
+                                    [e["title"] for e in _events])
+            except Exception as e:
+                logger.warning("提醒引擎评估异常: %s", e)
         except asyncio.CancelledError:
             logger.info("持仓行情采集循环已停止")
             break
@@ -1952,6 +2051,250 @@ async def _market_loop():
             logger.exception("市场看板采集错误: %s", e)
             interval = 120.0
         await asyncio.sleep(interval)
+
+
+# ---------------------------------------------------------------------------
+# Alert API（提醒/规则/K线/指标/回测）
+# ---------------------------------------------------------------------------
+
+async def _auth_or_401(request: Request):
+    """session cookie 鉴权（惯用法同 /api/me）。@author yys"""
+    token = request.cookies.get("session_token")
+    session = await db.get_session(token) if token else None
+    if not session:
+        return JSONResponse(status_code=401, content={"ok": False, "message": "未登录"})
+    return None
+
+
+class RuleInput(BaseModel):
+    params: dict = {}
+    enabled: int = 1
+
+
+# 规则键白名单：从 alert_engine.DEFAULT_PARAMS 同源派生——新规则只改引擎
+# 默认参数表，此处自动跟随，杜绝两处清单漂移
+_RULE_KEYS = tuple(alert_engine.DEFAULT_PARAMS)
+
+# 规则数值参数取值规格：(下限, 上限, 下限是否开区间)，None=该侧无界。
+# 键存在时严格数值（bool 是 int 子类须排除、字符串数字拒绝）：畸形值会让
+# 引擎 float() 抛异常中断该标的求值，或比较恒假使规则静默失效——入库前拦下
+_NUMERIC_PARAM_SPECS: dict[str, tuple[float | None, float | None, bool]] = {
+    "profit_pct": (0.0, None, True),       # 浮盈阈值 >0
+    "vix_pctile_max": (0.0, 100.0, False),  # VIX 分位上界 0~100
+    "dip_pct": (0.0, None, True),           # 回撤阈值 >0
+    "k": (0.0, None, True),                 # ATR 止损倍数 >0
+    "rsi_low": (0.0, 100.0, False),         # 超卖阈值 0~100
+    "bias_low": (None, None, False),        # 乖离阈值：数值即可，允许负
+}
+
+
+def _validate_rule_params(params: dict) -> str | None:
+    """策略包白名单校验：返回错误消息（None=合法）。@author yys
+
+    畸形配置（非 dict 值、levels 含非数值项、数值参数越界/非数值）会让
+    _merged_params 产出坏包，导致 kline 500 与该标的引擎静默失效——入库前拦下。
+    """
+    for key, val in params.items():
+        if key not in _RULE_KEYS:
+            return f"未知规则键: {key}"
+        if not isinstance(val, dict):
+            return f"规则 {key} 的配置必须为对象"
+        levels = val.get("levels")
+        if levels is not None:
+            if not isinstance(levels, list):
+                return f"规则 {key} 的 levels 必须为列表"
+            for p in levels:
+                # 严格类型：字符串 "8.0" 能过 float() 但会让下游
+                # p/100.0 TypeError、f"{pct:+g}" ValueError——直接拒绝
+                if isinstance(p, bool) or not isinstance(p, (int, float)):
+                    return f"规则 {key} 的 levels 含非数值项: {p!r}"
+        for pkey, (lo, hi, lo_open) in _NUMERIC_PARAM_SPECS.items():
+            if pkey not in val:
+                continue
+            v = val[pkey]
+            # v != v 排除 NaN（json.loads 可解析 NaN 字面量，入库后比较恒假致规则静默失效）
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or v != v:
+                return f"规则 {key} 的 {pkey} 须为数值"
+            if lo is not None and (v <= lo if lo_open else v < lo):
+                return f"规则 {key} 的 {pkey} 超出取值范围: {v}"
+            if hi is not None and v > hi:
+                return f"规则 {key} 的 {pkey} 超出取值范围: {v}"
+    return None
+
+
+@app.get("/api/alert/rules")
+async def alert_rules(request: Request):
+    """全部规则配置（含默认值合成）。"""
+    deny = await _auth_or_401(request)
+    if deny:
+        return deny
+    return {"ok": True, "rules": await db.get_alert_rules(),
+            "defaults": alert_engine.DEFAULT_PARAMS}
+
+
+@app.put("/api/alert/rules/{symbol}")
+async def alert_rule_save(symbol: str, body: RuleInput, request: Request):
+    """保存单票策略包（仅更新 params/enabled 两列，fired_state 列不受影响，
+    消除与求值循环读-改-写的丢更新竞态）。"""
+    deny = await _auth_or_401(request)
+    if deny:
+        return deny
+    bad = _validate_rule_params(body.params)
+    if bad:
+        return JSONResponse(status_code=400, content={"ok": False, "message": bad})
+    await db.update_alert_rule_params(symbol, body.params, body.enabled)
+    return {"ok": True}
+
+
+@app.get("/api/alerts")
+async def alerts_list(request: Request, unread: int = 0, limit: int = 50):
+    """提醒历史（unread=1 只看未读）。"""
+    deny = await _auth_or_401(request)
+    if deny:
+        return deny
+    rows = await db.get_alerts(unread_only=bool(unread), limit=limit)
+    return {"ok": True, "total": len(rows), "alerts": rows}
+
+
+@app.post("/api/alerts/{alert_id}/read")
+async def alert_read(alert_id: int, request: Request):
+    """标记单条提醒已读。"""
+    deny = await _auth_or_401(request)
+    if deny:
+        return deny
+    await db.mark_alert_read(alert_id)
+    return {"ok": True}
+
+
+@app.post("/api/alerts/read_all")
+async def alert_read_all(request: Request):
+    """全部提醒标记已读。"""
+    deny = await _auth_or_401(request)
+    if deny:
+        return deny
+    await db.mark_all_alerts_read()
+    return {"ok": True}
+
+
+@app.get("/api/indicators/{symbol}")
+async def indicators(symbol: str, request: Request):
+    """指标缓存快照 + MA200 趋势状态（策略管理页展示）。"""
+    deny = await _auth_or_401(request)
+    if deny:
+        return deny
+    ind = daily_bars.get_indicators(symbol)
+    rule = await db.get_alert_rule(symbol)
+    bars = await db.get_daily_bars(symbol)
+    trend = alert_engine.eval_trend(bars, alert_engine._merged_params(rule))
+    return {"ok": True, "symbol": symbol, "indicators": ind, "trend": trend}
+
+
+_KLINE_CACHE: dict[str, tuple[float, dict]] = {}    # (symbol, tf) -> (monotonic, 全量 payload)
+
+
+def _round_series(vals: list, nd: int) -> list:
+    """指标序列统一取整（None 占位保留）。@author yys"""
+    return [round(v, nd) if v is not None else None for v in vals]
+
+
+def _kl_series(bars: list[dict]) -> dict:
+    """对 bars 计算 RSI/MACD/KDJ 三指标序列（与 bars 等长）。"""
+    closes = [float(b["close"]) for b in bars]
+    highs = [float(b["high"]) for b in bars]
+    lows = [float(b["low"]) for b in bars]
+    macd = daily_bars.macd(closes)
+    kdj = daily_bars.kdj(highs, lows, closes)
+    return {"rsi_series": _round_series(daily_bars.rsi_wilder(closes), 2),
+            "macd_series": {k: _round_series(v, 3) for k, v in macd.items()},
+            "kdj_series": {k: _round_series(v, 2) for k, v in kdj.items()}}
+
+
+@app.get("/api/kline/{symbol}")
+async def kline(symbol: str, request: Request, range: int = 120, tf: str = "day"):
+    """K线 + 指标 + 标注：tf=day/week/month（daily_bars 聚合）/5m（market_ticks
+    聚合，库内分时）。零新增长桥历史K请求；(symbol,tf) 60s 内存缓存，
+    缓存存全量、range 仅截尾响应。"""
+    deny = await _auth_or_401(request)
+    if deny:
+        return deny
+    range = max(int(range), 0)    # 负值入口钳制：防误传触发无意义全量查询/截尾异常 @author yys
+    if tf not in ("day", "week", "month", "5m"):
+        return JSONResponse(status_code=400,
+                            content={"ok": False, "message": f"invalid tf: {tf}"})
+    cache_key = f"{symbol}:{tf}"
+    hit = _KLINE_CACHE.get(cache_key)
+    if not (hit and time.monotonic() - hit[0] < 60.0):
+        rule = await db.get_alert_rule(symbol)
+        params = alert_engine._merged_params(rule)
+        holdings = await db.get_holdings(enabled_only=True)
+        cost = next((float(h["cost_price"]) for h in holdings
+                     if h["symbol"] == symbol), None)
+        levels = params["price_plan"].get("levels", [])
+        ind = daily_bars.get_indicators(symbol) if tf == "day" else None
+        marks = {
+            "cost": cost,
+            "levels": [{"pct": p, "price": round(cost * (1 + p / 100.0), 2)}
+                       for p in levels] if cost else [],
+            "stop_level": ind.get("stop_level") if ind else None,
+            "hhv22": ind.get("hhv22") if ind else None,
+        }
+        if tf == "5m":
+            rows = await db.get_market_ticks_range(symbol)
+            bars = daily_bars.ticks_to_bars(rows, bucket_sec=300)
+            volume_mode = "ticks"
+        else:
+            limit = None if tf != "day" else (None if range >= 1000 else range)
+            bars = await db.get_daily_bars(symbol, limit=limit)
+            if tf != "day":
+                bars = daily_bars.aggregate_bars(bars, tf)
+            volume_mode = "volume"
+        payload = {"ok": True, "symbol": symbol, "tf": tf, "bars": bars,
+                   "volume_mode": volume_mode, "marks": marks,
+                   "indicators": {k: ind.get(k) for k in
+                                  ("ma50", "ma200", "rsi14", "stop_level",
+                                   "enough_history", "asof")} if ind else {}}
+        payload.update(_kl_series(bars))
+        _KLINE_CACHE[cache_key] = (time.monotonic(), payload)
+        hit = _KLINE_CACHE[cache_key]
+    p = hit[1]
+    n = len(p["bars"])
+    keep = n if range >= n else range        # 截尾窗口（series 与 bars 同步截）
+    if keep < n:
+        cut = n - keep
+        out = dict(p)
+        out["bars"] = p["bars"][cut:]
+        out["rsi_series"] = p["rsi_series"][cut:]
+        out["macd_series"] = {k: v[cut:] for k, v in p["macd_series"].items()}
+        out["kdj_series"] = {k: v[cut:] for k, v in p["kdj_series"].items()}
+        return out
+    return p
+
+
+class BacktestInput(BaseModel):
+    symbols: list[str] = []
+    rule: str = "atr_stop"
+    params: dict = {}
+    days: int = 750
+
+
+@app.post("/api/backtest/run")
+async def backtest_run(body: BacktestInput, request: Request):
+    """四类规则历史回测（daily_bars 日K回放；symbols 空=全部美股持仓）。"""
+    deny = await _auth_or_401(request)
+    if deny:
+        return deny
+    symbols = body.symbols or [h["symbol"] for h in
+                               await db.get_holdings(enabled_only=True)
+                               if h["market"] == "US"]
+    out = {}
+    for sym in symbols:
+        bars = await db.get_daily_bars(sym)
+        if len(bars) < 30:
+            out[sym] = {"skipped": "insufficient_data"}
+            continue
+        out[sym] = await asyncio.to_thread(
+            alert_backtest.run, sym, body.rule, body.params, bars, days=body.days)
+    return {"ok": True, "results": out}
 
 
 # ---------------------------------------------------------------------------

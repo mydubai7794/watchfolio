@@ -224,6 +224,78 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
   .modal-mask { align-items: stretch; }
   .modal { width: 100%; height: 100%; max-width: none; max-height: none; border-radius: 0; }
 }
+
+/* ---- 提醒中心（铃铛 + 下拉面板）+ 策略/K线弹层 ---- */
+.alert-bell { position: relative; cursor: pointer; font-size: 16px; line-height: 1.2;
+  padding: 2px 6px; user-select: none; }
+.bell-badge { position: absolute; top: -4px; right: -2px; background: #E5443B; color: #fff;
+  border-radius: 999px; font-size: 10px; padding: 0 5px; min-width: 14px; text-align: center;
+  line-height: 14px; }
+.alert-panel { display: none; position: absolute; right: 24px; top: 100%; width: 340px;
+  max-height: 60vh; overflow: auto; background: var(--card); border-radius: 12px;
+  box-shadow: 0 8px 30px rgba(0,0,0,.14); z-index: 60; padding: 12px 14px; }
+.alert-panel.open { display: block; }
+.alert-head { display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 4px; }
+.alert-item { padding: 8px 6px; border-bottom: 1px solid var(--bg); font-size: 12px;
+  cursor: pointer; border-left: 3px solid transparent; line-height: 1.5; }
+.alert-item:last-child { border-bottom: none; }
+.alert-item.crit { border-left-color: var(--up); }
+.alert-item.info { border-left-color: var(--accent); }
+.alert-item.read { opacity: .55; }
+.a-title { font-weight: 500; }
+.a-meta { color: var(--txt2); margin-top: 2px; }
+/* 持仓行内联入口：symbol → 日K弹层、⚙ → 策略弹层 */
+.sym-link { cursor: pointer; text-decoration: underline dotted; text-underline-offset: 2px; }
+.sym-link:hover { color: var(--accent); }
+.rule-btn { cursor: pointer; margin-left: 6px; font-size: 11px; color: var(--txt2); }
+.rule-btn:hover { color: var(--accent); }
+/* 策略弹层：每规则一行（开关 + 参数 + 回测按钮 + 结果容器） */
+.rule-row { border-bottom: 1px solid var(--bg); padding: 12px 0; }
+.rule-row:last-child { border-bottom: none; }
+.rule-name { font-size: 13px; font-weight: 500; display: flex; align-items: center;
+  gap: 8px; flex-wrap: wrap; }
+.rule-name input { width: 16px; height: 16px; padding: 0; background: transparent; }
+.rule-desc { font-weight: 400; color: var(--txt2); font-size: 11px; flex: 1; }
+.rule-bt-btn { padding: 4px 12px; font-size: 12px; }
+.rule-params { display: flex; gap: 12px; margin: 8px 0 0 24px; flex-wrap: wrap;
+  font-size: 12px; color: var(--txt2); align-items: center; }
+.rule-params label { display: flex; align-items: center; gap: 6px; }
+.rule-params input { width: 150px; padding: 5px 10px; font-size: 13px; }
+/* 参数非法回落的红框标记：全局 input 无描边，用红色 ring 贴合 focus 视觉语言 */
+.rule-params input.bad { box-shadow: 0 0 0 2px rgba(229,68,59,.45); }
+.bt-result { margin: 8px 0 0 24px; font-size: 12px; color: var(--txt2); overflow-x: auto; }
+.bt-result table { border-collapse: collapse; }
+.bt-result th, .bt-result td { padding: 3px 10px 3px 0; text-align: right;
+  font-size: 12px; white-space: nowrap; }
+.bt-result th { color: var(--txt2); font-weight: 400; }
+.bt-result td:first-child, .bt-result th:first-child { text-align: left; }
+/* K线弹层：高分屏适配由 setupCanvas 处理；tabs/量能/指标/悬浮浮层样式 */
+.kline-modal { width: min(860px, 94vw); }
+.kline-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.kline-head #klTitle { font-weight: 600; font-size: 15px; }
+.kline-tabs, .kline-intabs { display: flex; gap: 4px; }
+.kline-tabs button, .kline-intabs button {
+  border: 1px solid #DCDFE6; background: #fff; color: var(--txt2); border-radius: 4px;
+  padding: 2px 10px; font-size: 12px; cursor: pointer; }
+.kline-tabs button.on, .kline-intabs button.on {
+  background: #2A6CF0; border-color: #2A6CF0; color: #fff; }
+.kline-close { margin-left: auto; border: none; background: none; font-size: 20px;
+  color: var(--txt2); cursor: pointer; line-height: 1; }
+#klMain { width: 100%; height: 300px; display: block; cursor: crosshair; touch-action: none; }
+#klVol { width: 100%; height: 64px; display: block; }
+#klRsi { width: 100%; height: 96px; display: block; }
+.kline-intabs { margin: 6px 0 2px; }
+.kline-info { font-size: 12px; color: var(--txt2); margin-top: 8px; min-height: 18px; }
+.kline-tip { position: fixed; z-index: 120; background: rgba(38, 42, 52, .94);
+  color: #fff; border-radius: 6px; padding: 8px 10px; font-size: 12px;
+  line-height: 1.7; pointer-events: none; max-width: 240px; }
+.kline-tip b { color: #F3D19E; }
+@media (max-width: 768px) {
+  .alert-panel { right: 12px; width: calc(100vw - 24px); }
+  .rule-params, .bt-result { margin-left: 0; }
+  #klMain { height: 220px; } #klVol { height: 48px; } #klRsi { height: 80px; }
+}
 </style>
 </head>
 <body>
@@ -238,7 +310,10 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
     <span id="fetchTime">--:--:--</span>
     <span id="fxInfo"></span>
     <a class="link" href="#" onclick="logout();return false;">登出</a>
+    <span class="alert-bell" id="alertBell" title="提醒中心">🔔<span class="bell-badge" id="bellBadge" style="display:none">0</span></span>
   </div>
+  <!-- 提醒中心下拉面板：铃铛点击开合，SSE alert 事件实时刷新 -->
+  <div class="alert-panel" id="alertPanel"></div>
 </header>
 
 <!-- 数据源提醒条：长桥 token 失效/临期、或主源异常已切新浪冷备时显示 -->
@@ -409,6 +484,47 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
   </div>
 </div>
 
+<!-- 策略弹层：单票六类规则开关/参数编辑 + 保存 + 回测 -->
+<div class="modal-mask" id="ruleMask">
+  <div class="modal" style="width:640px">
+    <h3 id="ruleTitle">策略设置</h3>
+    <label class="chk" style="margin:0 0 8px"><input type="checkbox" id="ruleEnabled">总开关（关闭后该标的全部规则停用）</label>
+    <!-- 参数非法回落提示行：collectRuleParams 发生回落时显示（配合红框） -->
+    <div id="ruleHint" style="font-size:12px;color:#E5443B;margin-bottom:4px"></div>
+    <div id="ruleRows"></div>
+    <div style="text-align:right;margin-top:16px;display:flex;gap:8px;justify-content:flex-end">
+      <button class="btn btn-ghost" onclick="closeRuleModal()">关闭</button>
+      <button class="btn btn-primary" onclick="saveRuleModal()">保存策略</button>
+    </div>
+  </div>
+</div>
+
+<!-- K线弹层：周期 tabs + 蜡烛主图 + 量能副图 + 指标副图（RSI/MACD/KDJ 切换）+ 悬浮详情 -->
+<div class="modal-mask" id="klineMask">
+  <div class="modal kline-modal">
+    <div class="kline-head">
+      <span id="klTitle">日K</span>
+      <div class="kline-tabs" id="klTabs">
+        <button data-tf="day" class="on">日K</button>
+        <button data-tf="week">周K</button>
+        <button data-tf="month">月K</button>
+        <button data-tf="5m" id="klTab5m" hidden>分时</button>
+      </div>
+      <button class="kline-close" onclick="closeKline()">×</button>
+    </div>
+    <div class="kline-tip" id="klTip" hidden></div>
+    <canvas id="klMain"></canvas>
+    <canvas id="klVol"></canvas>
+    <div class="kline-intabs" id="klIndTabs">
+      <button data-ind="rsi" class="on">RSI</button>
+      <button data-ind="macd">MACD</button>
+      <button data-ind="kdj">KDJ</button>
+    </div>
+    <canvas id="klRsi"></canvas>
+    <div class="kline-info" id="klInfo"></div>
+  </div>
+</div>
+
 <script>
 // HTML 转义：名称/代码等用户可控字段插入 DOM 前统一转义（含双/单引号），防止 XSS
 function esc(str) {
@@ -435,6 +551,8 @@ function esc(str) {
 // session 徽章口径：盘前计入上一场 / 盘后实时累计；夜盘（美东 20:00-04:00）单独覆盖为「数据定格」
 const SESSION_BADGE = {pre:'盘前 · 计入上一场', regular:'盘中', post:'盘后 · 实时累计', closed:'休市'};
 const UP_COLOR = '#E5443B', DOWN_COLOR = '#00A870';
+/* 半透明涨跌色：量能柱/MACD 柱共用（透明度统一 .6，与实色同源）@author yys */
+const UP_COLOR_ALPHA = 'rgba(229,68,59,.6)', DOWN_COLOR_ALPHA = 'rgba(0,168,112,.6)';
 const TXT = '#111114', TXT2 = '#8A8A8E', TXT3 = '#C7C7CC';
 const FONT = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif';
 const F11 = '11px ' + FONT, F12 = '12px ' + FONT, F600_13 = '600 13px ' + FONT, F600_16 = '600 16px ' + FONT;
@@ -673,8 +791,8 @@ function renderPositions(d) {
     const priceHtml = p.price ? fmt(p.price, p.market==='HKFUND'?4:2) : '--';
     const nb = nightBadge(p, session, nightOf(d).window);
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td><div>${esc(p.name||p.symbol)}${tags}</div><div class="sym">${esc(p.symbol)} ${esc(sub)}</div></td>
-      <td>${priceHtml}${nb}</td>
+    tr.innerHTML = `<td><div>${esc(p.name||p.symbol)}${tags}</div><div class="sym"><span class="sym-link" data-sym="${esc(p.symbol)}" title="查看日K">${esc(p.symbol)}</span><span class="rule-btn" data-sym="${esc(p.symbol)}" title="策略设置">⚙</span> ${esc(sub)}</div></td>
+      <td class="p-price"><span class="pv">${priceHtml}</span>${nb}</td>
       <td class="${cls(liveChg)}">${chgHtml}</td>
       <td>$${fmt(p.value)}</td>
       <td class="${cls(p.today_pnl)}">${p.today_pnl===null?'--':sign(p.today_pnl)+'$'+fmt(Math.abs(p.today_pnl))}</td>
@@ -685,10 +803,12 @@ function renderPositions(d) {
     // 移动端卡片：行1 名称+tags | 现价+涨跌幅；行2 三段 Micro（市值·数量·成本 | 今日 | 持仓）
     const mc = document.createElement('div');
     mc.className = 'm-card';
-    mc.innerHTML = `<div class="m-top"><span class="m-name">${esc(p.name||p.symbol)}${tags}</span>
-        <span class="m-quote ${cls(liveChg)}">${priceHtml}${nb}
+    mc.innerHTML = `<div class="m-top"><span class="m-name">${esc(p.name||p.symbol)}${tags}<span class="rule-btn" data-sym="${esc(p.symbol)}" title="策略设置">⚙</span></span>
+        <span class="m-quote ${cls(liveChg)}"><span class="pv">${priceHtml}</span>${nb}
           <em class="${cls(liveChg)}">${chgHtml}</em></span></div>
       <div class="m-meta">
+        <span><span class="sym-link" data-sym="${esc(p.symbol)}" title="查看日K">${esc(p.symbol)}</span></span>
+        <span class="m-div"></span>
         <span>市值 <b>$${fmt(p.value)}</b> · 数量 ${fmt(p.quantity,0)} · 成本 <b>$${fmt(p.cost_price)}</b></span>
         <span class="m-div"></span>
         <span>今日 <b class="${cls(p.today_pnl)}">${p.today_pnl===null?'--':sign(p.today_pnl)+'$'+fmt(Math.abs(p.today_pnl))}</b></span>
@@ -1503,6 +1623,885 @@ setInterval(checkDatasource, 60000); checkDatasource();
 setInterval(refresh, 10000);
 // 分时（24h/当日）30s 轮询；日线区间不轮询
 setInterval(() => { if (isIntradayMode()) loadChart(); }, 30000);
+
+// ===== 提醒中心 + 策略/K线弹层 + SSE alert（@author yys）=====
+// 后端契约：GET/PUT /api/alert/rules(/{symbol})、GET /api/alerts、
+// POST /api/alerts/{id}/read、POST /api/alerts/read_all、
+// GET /api/kline/{symbol}、POST /api/backtest/run、SSE event: alert
+
+// 六类规则元信息（键与 server 白名单同源；默认参数前端兜底，接口 defaults 返回后覆盖）
+const RULE_META = {
+  price_plan:    {name: '价格档位计划', desc: '成本价锚定档位%，跌=加仓/涨=止盈提示'},
+  atr_stop:      {name: 'ATR 吊灯止损', desc: '价跌破 22日高 − k×ATR22 时提醒'},
+  trend_filter:  {name: 'MA200 趋势过滤', desc: '趋势状态标记（用于回测回撤对照）'},
+  extreme_guard: {name: 'RSI 极值防护', desc: 'rsi_low 超卖阈值 / bias_low 低位偏离%'},
+  vix_take_profit: {name: 'VIX 低分位止盈', desc: '浮盈≥阈值% 且 VIX≤2年低分位才提醒（仅QQQ，双条件缺一不可）'},
+  deep_dip:      {name: '深跌回投窗口', desc: '距 52 周高回撤≥阈值% 提示（仅QQQ）'},
+};
+const RULE_ORDER = ['price_plan', 'atr_stop', 'trend_filter', 'extreme_guard',
+                    'vix_take_profit', 'deep_dip'];
+// 与 alert_engine.DEFAULT_PARAMS 同构的前端兜底（正常时以后端 defaults 为准）
+const DEFAULT_RULE_PARAMS = {
+  price_plan: {enabled: true, levels: [-5, -10, 8, 15]},
+  atr_stop: {enabled: true, k: 3},
+  trend_filter: {enabled: true},
+  extreme_guard: {enabled: true, rsi_low: 30, bias_low: -8},
+  vix_take_profit: {enabled: true, profit_pct: 20, vix_pctile_max: 20},
+  deep_dip: {enabled: true, dip_pct: 15},
+};
+// 提醒 body 字段中文映射（摘要展示；未收录键原样展示）
+const ALERT_BODY_LABELS = {pct: '档位', target: '档位价', cost: '成本', price: '现价',
+  stop_level: '止损位', hhv22: '22日高', atr22: 'ATR22', rsi: 'RSI', bias: '偏离',
+  profit_pct: '浮盈', vix_pctile: 'VIX分位', drawdown_pct: '距52周高', week52_high: '52周高'};
+
+let alertPanelOpen = false;   // 提醒面板开合态（点击面板外收起用）
+let ruleModalSym = null;      // 策略弹层当前 symbol
+let ruleDraft = null;         // 策略编辑草稿 {ruleKey: {enabled, ...params}}
+let ruleBaseline = null;      // 弹层打开时的草稿初值快照（参数非法回落基准：已保存值优先，防自定义配置被默认值静默冲掉）
+let ruleParamBad = false;     // 最近一次 collectRuleParams 是否发生非法回落（保存提示用）
+let ruleDefaults = null;      // 服务端下发的规则默认值（/api/alert/rules 的 defaults）
+
+/**
+ * 拉取最近 50 条提醒并渲染面板与未读 badge。
+ * @author yys
+ */
+async function loadAlerts() {
+  try {
+    const r = await fetch('/api/alerts?limit=50');
+    if (!r.ok) return;
+    const d = await r.json();
+    renderAlerts(d.alerts || []);
+  } catch (e) { /* 拉取失败保留下份数据，不放大请求 */ }
+}
+
+/**
+ * 渲染提醒面板（未读高亮/已读置灰）与铃铛未读 badge。
+ * @author yys
+ */
+function renderAlerts(list) {
+  const badge = document.getElementById('bellBadge');
+  const unread = list.filter(a => !a.is_read).length;
+  badge.style.display = unread ? 'inline' : 'none';
+  badge.textContent = unread > 99 ? '99+' : unread;
+  const panel = document.getElementById('alertPanel');
+  const keepScroll = panel.scrollTop;   // innerHTML 重建会重置滚动位，重建后恢复
+  panel.innerHTML = '<div class="alert-head"><b>提醒中心</b>' +
+      '<a class="link" href="javascript:void(0)" onclick="markAllRead()">全部已读</a></div>' +
+    (list.length ? list.map(a => {
+      const body = (a.body && typeof a.body === 'object')
+        ? Object.entries(a.body).map(([k, v]) =>
+            (ALERT_BODY_LABELS[k] || k) + ' ' + v).join(' · ') : '';
+      return '<div class="alert-item ' + (a.level === 'critical' ? 'crit' : 'info') +
+        (a.is_read ? ' read' : '') + '" onclick="readAlert(' + Number(a.id) + ')">' +
+        '<div class="a-title">' + esc(a.title) + '</div>' +
+        (body ? '<div>' + esc(body) + '</div>' : '') +
+        '<div class="a-meta">' + esc(alertTime(a.triggered_at)) + ' · ' +
+        esc(ruleName(a.rule)) + ' · ' + esc(a.symbol) + '</div></div>';
+    }).join('') : '<div style="padding:16px;color:var(--txt3);text-align:center">暂无提醒</div>');
+  panel.scrollTop = keepScroll;
+}
+
+/** 提醒时间文案（MM-DD HH:mm）。@author yys */
+function alertTime(ts) { return ts ? String(ts).slice(5, 16).replace('T', ' ') : ''; }
+
+/** 规则键 → 中文名（未知键原样返回）。@author yys */
+function ruleName(key) { return (RULE_META[key] && RULE_META[key].name) || key; }
+
+/** 单条提醒标记已读并刷新面板。@author yys */
+async function readAlert(id) {
+  try { await fetch('/api/alerts/' + id + '/read', {method: 'POST'}); } catch (e) {}
+  loadAlerts();
+}
+
+/** 全部提醒标记已读并刷新面板。@author yys */
+async function markAllRead() {
+  try { await fetch('/api/alerts/read_all', {method: 'POST'}); } catch (e) {}
+  loadAlerts();
+}
+
+// 铃铛开合；点击面板与铃铛以外区域收起
+document.getElementById('alertBell').addEventListener('click', e => {
+  e.stopPropagation();
+  alertPanelOpen = !alertPanelOpen;
+  document.getElementById('alertPanel').classList.toggle('open', alertPanelOpen);
+  if (alertPanelOpen) loadAlerts();
+});
+document.addEventListener('click', e => {
+  if (!alertPanelOpen) return;
+  if (e.target.closest('#alertPanel') || e.target.closest('#alertBell')) return;
+  alertPanelOpen = false;
+  document.getElementById('alertPanel').classList.remove('open');
+});
+
+// ---- 策略弹层（单票六类规则：开关 + 参数 + 保存 + 回测）----
+
+/**
+ * 打开策略弹层：库内配置缺失的键用默认值合成可编辑草稿。
+ * @author yys
+ */
+async function openRuleModal(sym) {
+  ruleModalSym = sym;
+  document.getElementById('ruleTitle').textContent = '策略设置 · ' + sym;
+  document.getElementById('ruleRows').innerHTML =
+    '<div style="color:var(--txt3);font-size:13px;padding:8px 0">加载中…</div>';
+  document.getElementById('ruleMask').classList.add('show');
+  let saved = {}, enabled = 1;
+  try {
+    const r = await fetch('/api/alert/rules');
+    if (r.ok) {
+      const d = await r.json();
+      if (d.defaults) ruleDefaults = d.defaults;
+      const mine = (d.rules || []).find(x => x.symbol === sym);
+      if (mine) { saved = mine.params || {}; enabled = mine.enabled ? 1 : 0; }
+    }
+  } catch (e) { /* 拉取失败按默认值渲染，保存时以后端校验为准 */ }
+  const base = ruleDefaults || DEFAULT_RULE_PARAMS;
+  ruleDraft = {};
+  RULE_ORDER.forEach(k => {
+    ruleDraft[k] = Object.assign({}, base[k] || DEFAULT_RULE_PARAMS[k], saved[k] || {});
+  });
+  // 初值快照（深拷贝）：collectRuleParams 的非法回落基准，保证用户已保存的自定义
+  // 参数不会被前端默认值静默冲掉
+  ruleBaseline = JSON.parse(JSON.stringify(ruleDraft));
+  document.getElementById('ruleHint').textContent = '';
+  document.getElementById('ruleEnabled').checked = !!enabled;
+  renderRuleRows();
+}
+
+/**
+ * 渲染六类规则编辑行（开关/参数输入/回测按钮/结果容器）。
+ * @author yys
+ */
+function renderRuleRows() {
+  const box = document.getElementById('ruleRows');
+  box.innerHTML = RULE_ORDER.map(k => {
+    const g = ruleDraft[k], m = RULE_META[k];
+    let paramsHtml = '';
+    if (k === 'price_plan') {
+      paramsHtml = '<label>档位%（逗号分隔）<input id="rp_levels" value="' +
+        esc(String((g.levels || []).join(','))) + '"></label>';
+    } else if (k === 'atr_stop') {
+      paramsHtml = '<label>k（ATR 倍数）<input id="rp_k" type="number" step="any" value="' +
+        esc(String(g.k != null ? g.k : 3)) + '"></label>';
+    } else if (k === 'extreme_guard') {
+      paramsHtml = '<label>rsi_low<input id="rp_rsi_low" type="number" step="any" value="' +
+        esc(String(g.rsi_low != null ? g.rsi_low : 30)) + '"></label>' +
+        '<label>bias_low%<input id="rp_bias_low" type="number" step="any" value="' +
+        esc(String(g.bias_low != null ? g.bias_low : -8)) + '"></label>';
+    } else if (k === 'vix_take_profit') {
+      paramsHtml = '<label>浮盈阈值%<input id="rp_profit_pct" type="number" step="any" value="' +
+        esc(String(g.profit_pct != null ? g.profit_pct : 20)) + '"></label>' +
+        '<label>VIX分位≤%<input id="rp_vix_pctile_max" type="number" step="any" value="' +
+        esc(String(g.vix_pctile_max != null ? g.vix_pctile_max : 20)) + '"></label>';
+    } else if (k === 'deep_dip') {
+      paramsHtml = '<label>回撤阈值%<input id="rp_dip_pct" type="number" step="any" value="' +
+        esc(String(g.dip_pct != null ? g.dip_pct : 15)) + '"></label>';
+    }
+    // V2 双规则（VIX止盈/深跌）不参与回测，隐藏按钮防点击后落「未知规则」死胡同
+    const noBacktest = (k === 'vix_take_profit' || k === 'deep_dip');
+    return '<div class="rule-row"><div class="rule-name">' +
+      '<input type="checkbox" id="re_' + k + '"' + (g.enabled === false ? '' : ' checked') + '>' +
+      esc(m.name) + '<span class="rule-desc">' + esc(m.desc) + '</span>' +
+      (noBacktest ? '' : '<button class="btn btn-ghost rule-bt-btn" onclick="runBacktest(\'' + k + '\')">回测</button>') + '</div>' +
+      (paramsHtml ? '<div class="rule-params">' + paramsHtml + '</div>' : '') +
+      '<div class="bt-result" id="bt_' + k + '"></div></div>';
+  }).join('');
+}
+
+/**
+ * 从弹层 DOM 收集编辑值 → 嵌套 params 包（只含六类规则键，形态与库内存储同构）。
+ * 非法输入（空/NaN/档位非法项）回落弹层打开时的初值快照 ruleBaseline（已保存值
+ * 优先，无保存值才落前端默认），同时红框标记无效输入框并在提示行说明回落事实，
+ * 避免后端白名单 400 且用户无感知参数被改。
+ * @author yys
+ */
+function collectRuleParams() {
+  const base = ruleBaseline || DEFAULT_RULE_PARAMS;
+  const pick = (o, k, d) => (o && o[k] != null) ? o[k] : d;
+  // 每次收集前重置上一轮红框，重新评估
+  document.querySelectorAll('#ruleRows input.bad').forEach(el => el.classList.remove('bad'));
+  const badIds = [];
+  const num = (id, fallback) => {
+    const el = document.getElementById(id);
+    if (!el) return fallback;
+    let v = null;
+    if (el.value.trim() !== '') v = Number(el.value);
+    if (v == null || !Number.isFinite(v)) {   // 空/NaN → 回落初值快照
+      el.classList.add('bad'); badIds.push(id);
+      return fallback;
+    }
+    return v;
+  };
+  // 档位：部分合法 → 保留合法项并红框提示；全部非法 → 整体回落初值快照
+  const lvEl = document.getElementById('rp_levels');
+  const tokens = String(lvEl.value || '').split(/[,，\s]+/).filter(s => s !== '');
+  const parsed = tokens.map(Number).filter(v => Number.isFinite(v));
+  let levels;
+  if (parsed.length === tokens.length && parsed.length) {
+    levels = parsed;
+  } else {
+    lvEl.classList.add('bad'); badIds.push('rp_levels');
+    levels = parsed.length ? parsed : pick(base.price_plan, 'levels',
+      DEFAULT_RULE_PARAMS.price_plan.levels);
+  }
+  const params = {
+    price_plan: {enabled: document.getElementById('re_price_plan').checked, levels: levels},
+    atr_stop: {enabled: document.getElementById('re_atr_stop').checked,
+               k: num('rp_k', pick(base.atr_stop, 'k', DEFAULT_RULE_PARAMS.atr_stop.k))},
+    trend_filter: {enabled: document.getElementById('re_trend_filter').checked},
+    extreme_guard: {enabled: document.getElementById('re_extreme_guard').checked,
+                    rsi_low: num('rp_rsi_low',
+                      pick(base.extreme_guard, 'rsi_low', DEFAULT_RULE_PARAMS.extreme_guard.rsi_low)),
+                    bias_low: num('rp_bias_low',
+                      pick(base.extreme_guard, 'bias_low', DEFAULT_RULE_PARAMS.extreme_guard.bias_low))},
+    vix_take_profit: {enabled: document.getElementById('re_vix_take_profit').checked,
+                      profit_pct: num('rp_profit_pct',
+                        pick(base.vix_take_profit, 'profit_pct',
+                          DEFAULT_RULE_PARAMS.vix_take_profit.profit_pct)),
+                      vix_pctile_max: num('rp_vix_pctile_max',
+                        pick(base.vix_take_profit, 'vix_pctile_max',
+                          DEFAULT_RULE_PARAMS.vix_take_profit.vix_pctile_max))},
+    deep_dip: {enabled: document.getElementById('re_deep_dip').checked,
+               dip_pct: num('rp_dip_pct',
+                 pick(base.deep_dip, 'dip_pct', DEFAULT_RULE_PARAMS.deep_dip.dip_pct))},
+  };
+  ruleParamBad = badIds.length > 0;
+  document.getElementById('ruleHint').textContent =
+    ruleParamBad ? '部分参数无效已回落（红框项），请检查后重新保存' : '';
+  return params;
+}
+
+/**
+ * 保存该标的策略包（PUT /api/alert/rules/{symbol}，保存后不关弹层便于继续回测）。
+ * @author yys
+ */
+async function saveRuleModal() {
+  if (!ruleModalSym) return;
+  const body = {params: collectRuleParams(),
+                enabled: document.getElementById('ruleEnabled').checked ? 1 : 0};
+  try {
+    const r = await fetch('/api/alert/rules/' + encodeURIComponent(ruleModalSym),
+      {method: 'PUT', headers: {'Content-Type': 'application/json'},
+       body: JSON.stringify(body)});
+    const d = await r.json();
+    if (!r.ok || (d && d.ok === false)) { alert((d && d.message) || '保存失败'); return; }
+  } catch (e) { alert('网络错误'); return; }
+  alert(ruleParamBad ? '策略已保存，但部分参数无效已回落，请检查红框项' : '策略已保存');
+}
+
+function closeRuleModal() { document.getElementById('ruleMask').classList.remove('show'); }
+
+/**
+ * 单票单规则回测（POST /api/backtest/run）并渲染指标表。
+ * @author yys
+ */
+async function runBacktest(ruleKey) {
+  if (!ruleModalSym) return;
+  const box = document.getElementById('bt_' + ruleKey);
+  box.textContent = '回测中…';
+  try {
+    const r = await fetch('/api/backtest/run', {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({symbols: [ruleModalSym], rule: ruleKey,
+                            params: collectRuleParams(), days: 750})});
+    if (!r.ok) { box.textContent = '回测失败'; return; }
+    const d = await r.json();
+    box.innerHTML = renderBacktest(ruleKey, d.results && d.results[ruleModalSym]);
+  } catch (e) { box.textContent = '回测失败'; }
+}
+
+/**
+ * 回测结果 HTML：四类规则各自的指标表；price_plan 档位 key 为 str(原值) 直接展示。
+ * @author yys
+ */
+function renderBacktest(ruleKey, res) {
+  if (!res) return '无结果';
+  if (res.skipped) return '历史数据不足，跳过回测';
+  if (res.note) return '历史数据不足，无法回测';
+  const pct = v => (v == null) ? '—' : (v * 100).toFixed(1) + '%';
+  const n0 = v => (v == null) ? '—' : Number(v).toFixed(0);
+  const n1 = v => (v == null) ? '—' : Number(v).toFixed(1);
+  let html = '';
+  if (ruleKey === 'trend_filter') {
+    html = '<table><tr><th>触发次数</th><th>5日胜率</th><th>5日均收</th><th>10日胜率</th>' +
+           '<th>10日均收</th><th>20日胜率</th><th>20日均收</th><th>全程最大回撤</th><th>过滤后回撤</th></tr>' +
+      '<tr><td>' + n0(res.count) + '</td><td>' + pct(res.win5) + '</td><td>' + pct(res.avg5) + '</td>' +
+      '<td>' + pct(res.win10) + '</td><td>' + pct(res.avg10) + '</td>' +
+      '<td>' + pct(res.win20) + '</td><td>' + pct(res.avg20) + '</td>' +
+      '<td>' + pct(res.max_dd_all) + '</td><td>' + pct(res.max_dd_filtered) + '</td></tr></table>';
+  } else if (ruleKey === 'atr_stop') {
+    const fs = (res.trades || []).filter(t => t.false_stop).length;
+    const op = res.open_position ? '<div style="margin-top:4px">尾仓未平：' +
+      esc(String(res.open_position.entry)) + ' 起已持有 ' + n0(res.open_position.days) + ' 日</div>' : '';
+    html = '<table><tr><th>笔数</th><th>胜率</th><th>均收/笔</th><th>均持仓日</th><th>假止损笔数</th></tr>' +
+      '<tr><td>' + n0(res.count) + '</td><td>' + pct(res.win_rate) + '</td><td>' + pct(res.avg_ret) + '</td>' +
+      '<td>' + n1(res.avg_days) + '</td><td>' + n0(fs) + '</td></tr></table>' + op;
+  } else if (ruleKey === 'extreme_guard') {
+    const row = (label, side) => '<tr><td>' + label + '</td><td>' + n0(side.count) + '</td><td>' +
+      pct(side.win5) + '</td><td>' + pct(side.avg5) + '</td></tr>';
+    html = '<table><tr><th>信号</th><th>次数</th><th>5日胜率</th><th>5日均收</th></tr>' +
+      row('超卖（RSI ≤ 低位）', res.oversold || {}) +
+      row('超买（RSI ≥ 高位）', res.overbought || {}) + '</table>';
+  } else if (ruleKey === 'price_plan') {
+    const keys = Object.keys(res).sort((a, b) => Number(a) - Number(b));
+    html = keys.length ? '<table><tr><th>档位</th><th>触及概率(60日内)</th><th>平均触及天数</th></tr>' +
+      keys.map(k => '<tr><td>' + esc(k) + '%</td><td>' + pct(res[k].touch_prob) + '</td><td>' +
+        n1(res[k].avg_days) + '</td></tr>').join('') + '</table>' : '未配置档位';
+  } else {
+    return '未知规则';
+  }
+  return html;
+}
+
+// ---- K线弹层（周期 tabs + 拖动/缩放 + 悬浮详情 + 量能 + 指标切换）----
+// 数据一次拉满（range=1000），平移缩放纯客户端开窗零请求；
+// 分时 tab 惰性加载，market_ticks 无数据则隐藏入口。@author yys
+
+const KL = {
+  sym: '', tf: 'day', data: {},        // tf -> {bars, rsi_series, macd_series, kdj_series, marks, volume_mode, _at}
+  off: 0, count: 120,                  // 可见窗口：全量尾部锚定，off=从可见起点到全量尾部的偏移
+  ind: 'rsi', drag: null, pinch: null, tipIdx: -1,
+};
+
+/**
+ * 拉取指定周期 K线（客户端 60s 缓存，命中不重发；_at 为取数时间戳）。
+ * @author yys
+ */
+async function klLoad(tf) {
+  if (KL.data[tf] && Date.now() - KL.data[tf]._at < 60000) return KL.data[tf];
+  const r = await fetch('/api/kline/' + encodeURIComponent(KL.sym) +
+    '?tf=' + tf + '&range=1000');
+  if (!r.ok) throw new Error('http ' + r.status);
+  const d = await r.json();
+  d._at = Date.now();
+  KL.data[tf] = d;
+  return d;
+}
+
+/**
+ * 打开 K线弹层：默认日K，随后试探分时可用性（空数据隐藏 5m 入口）。
+ * @author yys
+ */
+async function openKline(sym) {
+  KL.sym = sym; KL.tf = 'day'; KL.data = {}; KL.off = 0; KL.count = 120;
+  KL.ind = 'rsi'; KL.tipIdx = -1;
+  document.getElementById('klTab5m').hidden = false;   // 试探后再决定隐藏
+  document.querySelectorAll('#klTabs button').forEach(b =>
+    b.classList.toggle('on', b.dataset.tf === 'day'));
+  document.querySelectorAll('#klIndTabs button').forEach(b =>
+    b.classList.toggle('on', b.dataset.ind === 'rsi'));
+  document.getElementById('klTitle').textContent = sym + ' K线';
+  document.getElementById('klInfo').textContent = '加载中…';
+  // 打开即清空上一只标的的残图/浮层：加载中/失败等任何中间态不得残留旧数据
+  klClearCanvas();
+  document.getElementById('klineMask').classList.add('show');
+  try {
+    await klApply('day');
+    // 分时可用性试探（不强制打开）：库内无 ticks 则隐藏入口
+    try {
+      const d5 = await klLoad('5m');
+      if (!(d5.bars || []).length) document.getElementById('klTab5m').hidden = true;
+    } catch (e) { document.getElementById('klTab5m').hidden = true; }
+  } catch (e) {
+    closeKline(); alert(sym + ' K线加载失败，请稍后重试');
+  }
+}
+
+/** 清空三块画布并隐藏悬浮浮层。@author yys */
+function klClearCanvas() {
+  ['klMain', 'klVol', 'klRsi'].forEach(id => {
+    const cv = document.getElementById(id);
+    cv.getContext('2d').clearRect(0, 0, cv.width, cv.height);
+  });
+  klHideTip();
+}
+
+/**
+ * 关闭弹层：隐藏遮罩、终止拖动/缩放中间态、隐藏十字线浮层并复位开窗状态
+ * （off/count 归位，下次打开不残留上一次的窗口位置）。@author yys
+ */
+function closeKline() {
+  const m = document.getElementById('klineMask');
+  if (m) m.classList.remove('show');
+  KL.drag = null; KL.pinch = null; KL.tipIdx = -1;
+  KL.off = 0; KL.count = 120;
+  klHideTip();
+}
+
+/**
+ * 应用周期切换：取数 → 复位窗口（尾部锚定 120 根）→ 刷 tabs 高亮/标题/信息行 → 重绘。
+ * 空数据 throw 交由调用方处理（5m 隐藏入口 / 其余提示失败）。
+ * @author yys
+ */
+async function klApply(tf) {
+  const d = await klLoad(tf);
+  if (!(d.bars || []).length) throw new Error('empty');
+  KL.tf = tf;
+  KL.off = 0;
+  KL.count = Math.min(120, d.bars.length);
+  document.querySelectorAll('#klTabs button').forEach(b =>
+    b.classList.toggle('on', b.dataset.tf === tf));
+  document.getElementById('klTitle').textContent =
+    KL.sym + ' ' + (tf === '5m' ? '分时(5m)' : tf === 'day' ? '日K' :
+                    tf === 'week' ? '周K' : '月K');
+  document.getElementById('klInfo').textContent = klInfoLine(d);
+  klRender();
+}
+
+/**
+ * 信息行：日级指标摘要（MA50/MA200/RSI14/止损位，来自 day 响应 indicators），
+ * 附历史不足提示与数据截止日；非 day 周期 indicators 为空 → 显示「--」。@author yys
+ */
+function klInfoLine(d) {
+  const ind = (d && d.indicators) || {};
+  const items = [['MA50', ind.ma50, 2], ['MA200', ind.ma200, 2],
+                 ['RSI14', ind.rsi14, 1], ['吊灯止损', ind.stop_level, 2]];
+  const parts = items.filter(([, v]) => v != null)
+    .map(([k, v, nd]) => k + ' ' + (+v).toFixed(nd));
+  if (ind.enough_history === false) parts.push('历史不足：趋势/止损类规则未生效');
+  if (ind.asof) parts.push('截至 ' + ind.asof);
+  return parts.length ? parts.join(' · ') : '--';
+}
+
+/** 当前可见窗口切片：{d, n, start, end}（end 不含，均相对全量 bars）；加载空档返回 null。@author yys */
+function klSlice() {
+  const d = KL.data[KL.tf];
+  if (!d || !d.bars) return null;   // fetch 未返回/切周期空档：返回 null 交调用方短路，防解引用 TypeError
+  const n = d.bars.length;
+  const end = n - KL.off;                 // 可见窗口右端（不含）
+  const start = Math.max(0, end - KL.count);
+  return { d, n, start, end: Math.min(end, n) };
+}
+
+/** 总重绘：主图 + 量能 + 指标副图（窗口内切片）；加载空档直接跳过。@author yys */
+function klRender() {
+  const s = klSlice();
+  if (!s) return;
+  const { d, n, start, end } = s;
+  const bars = d.bars.slice(start, end);
+  if (!bars.length) return;
+  const rsi = d.rsi_series.slice(start, end);
+  const macd = d.macd_series || { dif: [], dea: [], hist: [] };
+  const kdj = d.kdj_series || { k: [], d: [], j: [] };
+  klDrawMain(bars, d.marks || {});
+  klDrawVol(bars, d.volume_mode === 'ticks');
+  klDrawInd(bars,
+    { rsi, dif: macd.dif.slice(start, end), dea: macd.dea.slice(start, end),
+      hist: macd.hist.slice(start, end),
+      k: kdj.k.slice(start, end), d2: kdj.d.slice(start, end), j: kdj.j.slice(start, end) });
+}
+
+/** 三块画布共用几何：左右留白 + 右侧价格轴宽 + 单根K线槽宽。@author yys */
+function klGeom(W, count) {
+  const pad = { l: 6, r: 64, t: 10, b: 20 };
+  const cw = (W - pad.l - pad.r) / count;
+  return { pad, cw, x: i => pad.l + (i + 0.5) * cw };
+}
+
+/**
+ * 主图：蜡烛（红涨绿跌）+ 右侧价格轴 + 底部日期 + 成本/档位/止损/22日高标注虚线
+ * + 悬浮十字竖线（date：日/周/月=YYYY-MM-DD，分时=北京时间 MM-DD HH:MM）。@author yys
+ */
+function klDrawMain(bars, marks) {
+  const cv = document.getElementById('klMain');
+  const ctx = setupCanvas(cv, 300);
+  const W = cv._cssW, H = cv._cssH;
+  ctx.clearRect(0, 0, W, H);
+  const { pad, cw, x } = klGeom(W, bars.length);
+  let lo = Math.min(...bars.map(b => +b.low));
+  let hi = Math.max(...bars.map(b => +b.high));
+  const lines = [];
+  if (marks.cost != null) lines.push(['成本', +marks.cost, '#E6A23C']);
+  (marks.levels || []).forEach(v => lines.push(
+    [(v.pct > 0 ? '+' : '') + v.pct + '%', +v.price, v.pct > 0 ? DOWN_COLOR : TXT2]));
+  if (marks.stop_level != null) lines.push(['止损', +marks.stop_level, UP_COLOR]);
+  if (marks.hhv22 != null) lines.push(['22日高', +marks.hhv22, '#2A6CF0']);
+  lines.forEach(([, p]) => { lo = Math.min(lo, p); hi = Math.max(hi, p); });
+  const span = (hi - lo) || 1;
+  lo -= span * 0.04; hi += span * 0.04;
+  const y = p => pad.t + (hi - p) / (hi - lo) * (H - pad.t - pad.b);
+  ctx.font = F11; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  for (let g = 0; g <= 4; g++) {
+    const p = lo + (hi - lo) * g / 4;
+    ctx.strokeStyle = '#F0F0F2';
+    ctx.beginPath(); ctx.moveTo(pad.l, y(p)); ctx.lineTo(W - pad.r, y(p)); ctx.stroke();
+    ctx.fillStyle = TXT3;
+    ctx.fillText(p.toFixed(2), W - pad.r + 4, y(p));
+  }
+  bars.forEach((b, i) => {
+    const cx = x(i);
+    const up = +b.close >= +b.open;
+    ctx.strokeStyle = ctx.fillStyle = up ? UP_COLOR : DOWN_COLOR;
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(cx, y(+b.high)); ctx.lineTo(cx, y(+b.low)); ctx.stroke();
+    const top = y(Math.max(+b.open, +b.close));
+    const bot = y(Math.min(+b.open, +b.close));
+    const bw = Math.max(cw * 0.7, 1);
+    ctx.fillRect(cx - bw / 2, top, bw, Math.max(bot - top, 1));
+  });
+  // 底部日期标签（均匀 5 个）：日/周/月取 MM-DD；分时取 HH:MM（去日期段与空格）
+  ctx.textAlign = 'center';
+  for (let g = 0; g < 5; g++) {
+    const i = Math.round((bars.length - 1) * g / 4);
+    ctx.fillStyle = TXT3;
+    ctx.fillText(String(bars[i].date).slice(KL.tf === '5m' ? 6 : 5), x(i), H - 8);
+  }
+  ctx.textAlign = 'left';
+  lines.forEach(([name, p, color]) => {
+    ctx.strokeStyle = color; ctx.setLineDash([4, 3]); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(pad.l, y(p)); ctx.lineTo(W - pad.r, y(p)); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = color;
+    ctx.fillText(name + ' ' + p.toFixed(2), W - pad.r + 4, y(p) - 8);
+  });
+  // 悬浮十字竖线（随 tipIdx 高亮当前桶）
+  if (KL.tipIdx >= 0 && KL.tipIdx < bars.length) {
+    const cx = x(KL.tipIdx);
+    ctx.strokeStyle = '#C0C4CC'; ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(cx, pad.t); ctx.lineTo(cx, H - pad.b); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+}
+
+/** 量能副图：随涨跌配色的柱状图；分时模式标注为 tick 数（无量能字段的活跃度近似）。@author yys */
+function klDrawVol(bars, tickMode) {
+  const cv = document.getElementById('klVol');
+  const ctx = setupCanvas(cv, 64);
+  const W = cv._cssW, H = cv._cssH;
+  ctx.clearRect(0, 0, W, H);
+  const { pad, cw, x } = klGeom(W, bars.length);
+  const mx = Math.max(...bars.map(b => +b.volume), 1);
+  bars.forEach((b, i) => {
+    const h = (+b.volume / mx) * (H - 14);
+    const up = +b.close >= +b.open;
+    ctx.fillStyle = up ? UP_COLOR_ALPHA : DOWN_COLOR_ALPHA;
+    ctx.fillRect(x(i) - Math.max(cw * 0.7, 1) / 2, H - 12 - h,
+                 Math.max(cw * 0.7, 1), Math.max(h, 1));
+  });
+  ctx.font = F11; ctx.fillStyle = TXT3; ctx.textBaseline = 'top';
+  ctx.textAlign = 'left';
+  ctx.fillText(tickMode ? 'tick数 ' + mx.toLocaleString() : '量 ' + mx.toLocaleString(), pad.l, 2);
+}
+
+/**
+ * 指标副图：KL.ind 决定 RSI（30/70 参考线）/ MACD（柱+DIF/DEA 双线，零轴）/
+ * KDJ（20/80 参考线，K/D/J 三线）；null 断线。@author yys
+ */
+function klDrawInd(bars, s) {
+  const cv = document.getElementById('klRsi');
+  const ctx = setupCanvas(cv, 96);
+  const W = cv._cssW, H = cv._cssH;
+  ctx.clearRect(0, 0, W, H);
+  const { pad, cw, x } = klGeom(W, bars.length);
+  const rx = i => x(i);
+  const line = (vals, color, y, width) => {
+    ctx.strokeStyle = color; ctx.lineWidth = width || 1.5; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    let started = false;
+    vals.forEach((v, i) => {
+      if (v == null) { started = false; return; }
+      const px = rx(i), py = y(+v);
+      if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
+    });
+    ctx.stroke();
+  };
+  ctx.font = F11; ctx.textBaseline = 'middle';
+  if (KL.ind === 'rsi') {
+    const ry = v => 6 + (100 - v) / 100 * (H - 12);
+    [30, 70].forEach(v => {
+      ctx.strokeStyle = '#DCDFE6'; ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(pad.l, ry(v)); ctx.lineTo(W - pad.r, ry(v)); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = TXT3; ctx.textAlign = 'left';
+      ctx.fillText(String(v), W - pad.r + 4, ry(v));
+    });
+    line(s.rsi, '#2A6CF0', ry);
+  } else if (KL.ind === 'macd') {
+    const vals = [...s.dif, ...s.dea, ...s.hist].filter(v => v != null);
+    const lo = Math.min(...vals, -1e-9), hi = Math.max(...vals, 1e-9);
+    const ry = v => 6 + (hi - v) / (hi - lo) * (H - 12);
+    ctx.strokeStyle = '#DCDFE6'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(pad.l, ry(0)); ctx.lineTo(W - pad.r, ry(0)); ctx.stroke();
+    s.hist.forEach((v, i) => {
+      if (v == null) return;
+      ctx.fillStyle = v >= 0 ? UP_COLOR_ALPHA : DOWN_COLOR_ALPHA;
+      const y0 = ry(0), y1 = ry(+v);
+      ctx.fillRect(x(i) - Math.max(cw * 0.5, 1) / 2, Math.min(y0, y1),
+                   Math.max(cw * 0.5, 1), Math.max(Math.abs(y1 - y0), 1));
+    });
+    line(s.dif, '#E6A23C', ry, 1.3);
+    line(s.dea, '#2A6CF0', ry, 1.3);
+    ctx.fillStyle = TXT3; ctx.textAlign = 'left';
+    ctx.fillText('0', W - pad.r + 4, ry(0));
+  } else {                                   // kdj
+    const vals = [...s.k, ...s.d2, ...s.j].filter(v => v != null);
+    const lo = Math.min(...vals, 0), hi = Math.max(...vals, 100);
+    const ry = v => 6 + (hi - v) / (hi - lo) * (H - 12);
+    [20, 80].forEach(v => {
+      ctx.strokeStyle = '#DCDFE6'; ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(pad.l, ry(v)); ctx.lineTo(W - pad.r, ry(v)); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = TXT3; ctx.textAlign = 'left';
+      ctx.fillText(String(v), W - pad.r + 4, ry(v));
+    });
+    line(s.k, '#E6A23C', ry, 1.3);
+    line(s.d2, '#2A6CF0', ry, 1.3);
+    line(s.j, '#909399', ry, 1);
+  }
+}
+
+// ---- 交互：拖动平移 / 滚轮与双指缩放 / 双击复位 / 悬浮详情 ----
+
+/**
+ * 以 anchorIdx（窗口内索引）为锚缩放：锚点全局位置在缩放前后保持不动；
+ * count 钳制 [20, 全量]，off 钳制 [0, 全量-count]。@author yys
+ */
+function klZoom(factor, anchorIdx) {
+  const s = klSlice();
+  if (!s) return;                              // 加载空档：滚轮/双指缩放短路
+  const d = s.d, { start } = s;
+  const minC = 20, maxC = d.bars.length;
+  const newC = Math.round(KL.count * factor);
+  if (newC < minC || newC > maxC) return;
+  const ratio = anchorIdx / KL.count;          // 锚点在窗口内的比例
+  const anchorGlobal = start + anchorIdx;      // 锚点全局索引
+  KL.count = Math.min(maxC, Math.max(minC, newC));
+  const wantStart = Math.round(anchorGlobal - ratio * KL.count);
+  KL.off = Math.max(0, Math.min(d.bars.length - KL.count,
+                                d.bars.length - (wantStart + KL.count)));
+  klRender();
+}
+
+/** 事件绑定（window._klBound 防重绑，脚本顶层只执行一次）。@author yys */
+function klBindEvents() {
+  const cv = document.getElementById('klMain');
+  cv.addEventListener('mousedown', e => {
+    KL.drag = { x: e.clientX, off: KL.off }; KL.tipIdx = -1;
+  });
+  window.addEventListener('mousemove', e => {
+    if (!KL.drag) return;
+    const d = KL.data[KL.tf];
+    if (!d || !d.bars) return;           // 加载空档：拖动平移短路
+    const shift = Math.round((e.clientX - KL.drag.x) / klCwPx());
+    KL.off = Math.max(0, Math.min(d.bars.length - KL.count,
+                                  KL.drag.off + shift));
+    klRender();
+  });
+  window.addEventListener('mouseup', () => { KL.drag = null; });
+  // 悬浮 rAF 合帧：mousemove 高频触发时每帧至多一次定位+重绘，新事件只更新坐标
+  let klHoverPending = false, klHoverEvt = null;
+  cv.addEventListener('mousemove', e => {
+    if (KL.drag) return;
+    klHoverEvt = e;
+    if (klHoverPending) return;
+    klHoverPending = true;
+    requestAnimationFrame(() => {
+      klHoverPending = false;
+      const ev = klHoverEvt;
+      if (!ev || KL.drag) return;
+      const idx = klIdxAt(ev);
+      if (idx == null) {
+        if (KL.tipIdx !== -1) { KL.tipIdx = -1; klHideTip(); klRender(); }   // 状态变化才重绘，隐藏态不空转
+        return;
+      }
+      KL.tipIdx = idx;
+      klShowTip(ev, idx);
+      klRender();
+    });
+  });
+  cv.addEventListener('mouseleave', () => { klHoverEvt = null; KL.tipIdx = -1; klHideTip(); klRender(); });  // 同步清待处理事件，防悬挂 rAF 回调重显 tip
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    const idx = klIdxAt(e);
+    klZoom(e.deltaY > 0 ? 1.2 : 1 / 1.2, idx == null ? KL.count - 1 : idx);
+  }, { passive: false });
+  cv.addEventListener('dblclick', () => {
+    const d = KL.data[KL.tf];
+    if (!d || !d.bars) return;           // 加载空档：双击复位短路
+    KL.off = 0; KL.count = Math.min(120, d.bars.length); klRender();
+  });
+  // 触摸：单指拖动 / 双指缩放 / 点按悬浮（touch-action:none 已禁浏览器手势）
+  cv.addEventListener('touchstart', e => {
+    if (e.touches.length === 1) {
+      KL.drag = { x: e.touches[0].clientX, off: KL.off, moved: false };
+      KL.pinch = null;
+    } else if (e.touches.length === 2) {
+      KL.pinch = { dist: klTouchDist(e), count: KL.count };
+      KL.drag = null;
+    }
+  }, { passive: true });
+  cv.addEventListener('touchmove', e => {
+    e.preventDefault();
+    if (KL.pinch && e.touches.length === 2) {
+      const f = KL.pinch.dist / Math.max(klTouchDist(e), 1);
+      klZoom(f, KL.count - 1);
+    } else if (KL.drag && e.touches.length === 1) {
+      KL.drag.moved = true;
+      const d = KL.data[KL.tf];
+      if (!d || !d.bars) return;         // 加载空档：拖动短路（moved 已置位防 touchend 误判点按悬浮）
+      const shift = Math.round((e.touches[0].clientX - KL.drag.x) / klCwPx());
+      KL.off = Math.max(0, Math.min(d.bars.length - KL.count,
+                                    KL.drag.off + shift));
+      klRender();
+    }
+  }, { passive: false });
+  cv.addEventListener('touchend', e => {
+    if (KL.drag && !KL.drag.moved && e.changedTouches.length) {
+      const fake = { clientX: e.changedTouches[0].clientX,
+                     clientY: e.changedTouches[0].clientY };
+      const idx = klIdxAt(fake);
+      if (idx != null) { KL.tipIdx = idx; klShowTip(fake, idx); klRender(); }
+    }
+    KL.drag = null; KL.pinch = null;
+  });
+  // 周期 tabs（事件委托）：切换重绘；分时空数据隐藏入口，其余提示失败
+  document.getElementById('klTabs').addEventListener('click', async e => {
+    const btn = e.target.closest('button[data-tf]');
+    if (!btn || btn.classList.contains('on')) return;
+    const tf = btn.dataset.tf;
+    try {
+      await klApply(tf);
+    } catch (err) {
+      if (tf === '5m') {
+        btn.hidden = true;
+        alert(KL.sym + ' 暂无分时数据');
+      } else { alert(KL.sym + ' 加载失败，请稍后重试'); }
+    }
+  });
+  // 指标 tabs：切换重绘副图（量能 subplot 固定）
+  document.getElementById('klIndTabs').addEventListener('click', e => {
+    const btn = e.target.closest('button[data-ind]');
+    if (!btn) return;
+    KL.ind = btn.dataset.ind;
+    document.querySelectorAll('#klIndTabs button').forEach(b =>
+      b.classList.toggle('on', b === btn));
+    klRender();
+  });
+  window.addEventListener('resize', () => {
+    if (document.getElementById('klineMask').classList.contains('show')) klRender();
+  });
+}
+
+/** 双指间距（px）。@author yys */
+function klTouchDist(e) {
+  const dx = e.touches[0].clientX - e.touches[1].clientX;
+  const dy = e.touches[0].clientY - e.touches[1].clientY;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+/** 当前单根K线槽宽（px，含越界兜底）。@author yys */
+function klCwPx() {
+  const cv = document.getElementById('klMain');
+  const w = cv._cssW || cv.getBoundingClientRect().width;
+  const { pad } = klGeom(w, KL.count);
+  return Math.max((w - pad.l - pad.r) / KL.count, 1);
+}
+
+/** 事件坐标 → 窗口内K线索引（0..count-1）；绘图区外返回 null。@author yys */
+function klIdxAt(e) {
+  const cv = document.getElementById('klMain');
+  const rect = cv.getBoundingClientRect();
+  const { pad } = klGeom(rect.width, KL.count);
+  const px = e.clientX - rect.left - pad.l;
+  const cw = (rect.width - pad.l - pad.r) / KL.count;
+  if (px < 0 || px > rect.width - pad.l - pad.r) return null;
+  const idx = Math.floor(px / cw);
+  return Math.max(0, Math.min(KL.count - 1, idx));
+}
+
+/**
+ * 悬浮信息浮层：时间戳 + OHLC + 涨跌幅（相对前一桶，首根不显示）+ 量/tick数
+ * + 当前位置 RSI/MACD/KDJ 值；屏幕边缘自动翻转防溢出。@author yys
+ */
+function klShowTip(e, idx) {
+  const s = klSlice();
+  if (!s) return;                        // 加载空档：无数据可展示
+  const { d, start } = s;
+  const b = d.bars[start + idx];
+  if (!b) return;
+  const prev = d.bars[start + idx - 1];
+  const pct = prev ? ((+b.close - +prev.close) / +prev.close * 100) : null;
+  const r = (d.rsi_series || [])[start + idx];
+  const m = (d.macd_series || {}), k = (d.kdj_series || {});
+  const fmt2 = v => v == null ? '--' : (+v).toFixed(2);
+  const tip = document.getElementById('klTip');
+  tip.innerHTML =
+    '<b>' + esc(String(b.date)) + '</b><br>' +
+    '开 ' + fmt2(b.open) + '　高 ' + fmt2(b.high) + '<br>' +
+    '低 ' + fmt2(b.low) + '　收 ' + fmt2(b.close) +
+    (pct == null ? '' : '（' + (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%）') + '<br>' +
+    (d.volume_mode === 'ticks' ? 'tick数 ' : '量 ') + (+b.volume).toLocaleString() + '<br>' +
+    'RSI ' + fmt2(r) + '　MACD ' + fmt2((m.dif || [])[start + idx]) +
+    '/' + fmt2((m.dea || [])[start + idx]) + '<br>' +
+    'KDJ ' + fmt2((k.k || [])[start + idx]) + '/' + fmt2((k.d || [])[start + idx]) +
+    '/' + fmt2((k.j || [])[start + idx]);
+  tip.hidden = false;
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  let left = e.clientX + 16, top = e.clientY + 12;
+  if (left + tw > window.innerWidth - 8) left = e.clientX - tw - 16;
+  if (top + th > window.innerHeight - 8) top = e.clientY - th - 12;
+  tip.style.left = left + 'px';
+  tip.style.top = top + 'px';
+}
+
+/** 隐藏悬浮信息浮层。@author yys */
+function klHideTip() {
+  const tip = document.getElementById('klTip');
+  if (tip) tip.hidden = true;
+}
+
+// 弹层初始化：事件只绑一次（脚本在 DOM 之后执行，元素均已就绪）
+if (!window._klBound) { klBindEvents(); window._klBound = true; }
+
+// 持仓行内联入口事件委托：symbol → 日K弹层、⚙ → 策略弹层（桌面表格与移动卡片通用）
+document.addEventListener('click', e => {
+  const link = e.target.closest('.sym-link');
+  if (link) { openKline(link.dataset.sym); return; }
+  const btn = e.target.closest('.rule-btn');
+  if (btn) openRuleModal(btn.dataset.sym);
+});
+
+// SSE 提醒推送（本页此前无长连接，独立一条不与他页复用）：
+// 广播 payload 仅含 {id, symbol, rule, level, title}（无鉴权通道不推 body 详情），
+// 详情由 loadAlerts() 经有鉴权的 GET /api/alerts 刷新；系统通知仅在用户已授权时发出
+// （不主动索权），tag=symbol 合并同标的连续通知防轰炸
+const esAlert = new EventSource('/api/stream');
+esAlert.addEventListener('alert', ev => {
+  loadAlerts();
+  try {
+    const a = JSON.parse(ev.data);
+    if (window.Notification && Notification.permission === 'granted') {
+      new Notification(a.title || '行情提醒',
+        {tag: a.symbol || 'alert', body: (a.symbol || '') + ' ' + ruleName(a.rule)});
+    }
+  } catch (e) { /* 通知失败不影响面板刷新 */ }
+});
+// SSE 断连保护：连续 3 次错误关闭长连接，回退现有 10s 轮询（页面不炸）；
+// onopen 复位计数——EventSource 原生自动重连成功后清零，防长跑页面跨多次
+// 偶发断连累计到 3 后永久放弃 SSE（实时价静默降级且无自愈）@author yys
+let sseFails = 0;
+esAlert.onopen = () => { sseFails = 0; };
+esAlert.onerror = () => { if (++sseFails >= 3) esAlert.close(); };
+// SSE quote 事件（二期实时链路）：仅 live 推送价（source=lp_push）覆盖现价
+// 展示——轻量原地替换数字，下次轮询 renderPositions 全量重渲染自然回落
+// 轮询值（双通道并存：SSE 有新价用新价，超时回落轮询）；shadow 观测期/
+// 轮询快照（source=poll）不动展示
+esAlert.addEventListener('quote', ev => {
+  try {
+    const d = JSON.parse(ev.data);
+    (d.items || []).forEach(q => {
+      if (!q.price || q.source !== 'lp_push') return;
+      const link = document.querySelector('.sym-link[data-sym="' + q.symbol + '"]');
+      if (!link) return;
+      link.dataset.price = q.price;   // 标记最新价（弹层/调试可读）
+      const root = link.closest('tr') || link.closest('.m-card');
+      const pv = root && root.querySelector('.pv');
+      if (pv) pv.textContent = fmt(q.price, 2);
+    });
+  } catch (e) { /* quote 事件解析失败不影响主流程 */ }
+});
+
+loadAlerts();   // 首次进入初始化未读 badge
 </script>
 </body>
 </html>
