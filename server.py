@@ -1881,7 +1881,7 @@ async def _market_loop():
     - 主价 60s 快轮（腾讯混排）→ **价变即写 market_ticks**，分时由主价
       快照自然累积（不再单独请求分时接口，「少请求、多数据、回显全用库」；
       闭市价不变不堆重复点）；
-    - US30Y/US10Y 主价源为 Yahoo：缺价即拉（缓存无主价触发，仅受 5min
+    - US30Y/US10Y/DXY 主价源为 Yahoo：缺价即拉（缓存无主价触发，仅受 5min
       失败节流）+ 例行 backfill（库内最新 tick 距今 >30min 且 4h 冷却到期），
       一次请求两用——meta 现价刷新主价缓存、当日 5m 分时顺带落库（零额外
       请求）；面板组装传 fetch_missing=False，Yahoo 节流单点化到本循环；
@@ -1890,9 +1890,11 @@ async def _market_loop():
       链路；长桥不可用时 pop 缓存交还 Yahoo 兜底（代理池 backfill，恢复后
       自动切回长桥）；长桥 token 到期自动续期也挂本循环（轮首检查，最后
       7 天触发、6h 节流，成功写回 sys_config 热加载）；
-    - USDCNH 主价源为 twelvedata（60s 节流 1 credit/min），失败回落新浪批
-      冷备价；新浪批（DXY 主价/BZ/GC 兜底）降频 5min 节流（成功固定 300s、
-      失败指数退避 600s→1800s 封顶），产物缓存透传面板组装；
+    - USDCNH 主价源为 twelvedata（30min 节流 48 credits/天，根除免费配额
+      429；失败回落新浪批冷备价）；DXY 主价随 Yahoo 组 backfill（4h），缺失
+      窗口回落新浪批冷备；新浪批降级纯兜底（BZ/GC 兜底 + USDCNH/DXY 冷备）
+      15min 节流（成功固定 900s、失败指数退避 600s→1800s 封顶），产物缓存
+      透传面板组装；
     - spark 统一读库并按 [ts,price] 对下发（前端悬浮展示时间+价格，闭市回退
       上一交易时段）；异常钳制 120s。
     """
@@ -1905,11 +1907,12 @@ async def _market_loop():
     sina_panel_cache: dict = {}          # fetch_sina_panel 产物缓存
     sina_panel_at = 0.0                  # 上次成功拉取时刻（monotonic）
     sina_panel_fail = 0                  # 连续失败轮数（指数退避）
-    sina_panel_interval = 300.0          # 成功固定 5min；失败 min(600*2^n, 1800)
-    # twelvedata USDCNH 主价状态（60s 节流；连续无价回落新浪冷备）
+    sina_panel_interval = 900.0          # 成功固定 15min（纯兜底批）；失败 min(600*2^n, 1800)
+    # twelvedata USDCNH 主价状态（30min 节流 48 credits/天，根除免费配额 429；
+    # 连续无价回落新浪冷备）
     td_usdcnh: float | None = None
-    td_fx_at = 0.0        # 上次尝试时刻（60s 节流）
-    td_fx_ok_at = 0.0     # 上次成功时刻（>10min 无有效价回落新浪）
+    td_fx_at = 0.0        # 上次尝试时刻（30min 节流）
+    td_fx_ok_at = 0.0     # 上次成功时刻（>90min 无有效价回落新浪）
     lp_idx_ok = False                    # 长桥指数可用性（VIX/DJI/NDX/SPX，失败交还 Yahoo 兜底）
     while True:
         interval = 60.0
@@ -1923,28 +1926,28 @@ async def _market_loop():
             now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
             now_mono = time.monotonic()
 
-            # ---- 新浪看板批（DXY 主价 + USDCNH/BZ/GC 冷备兜底）：5min 节流 ----
+            # ---- 新浪看板批（纯兜底批：BZ/GC 兜底 + USDCNH/DXY 冷备）：15min 节流 ----
             if now_mono - sina_panel_at >= sina_panel_interval:
                 fetched = await pf.fetch_sina_panel(proxy_urls=proxies)
                 if fetched:
                     sina_panel_cache, sina_panel_at = fetched, now_mono
                     if sina_panel_fail:
                         logger.info("新浪看板批恢复（此前连续失败 %d 轮）", sina_panel_fail)
-                    sina_panel_fail, sina_panel_interval = 0, 300.0
+                    sina_panel_fail, sina_panel_interval = 0, 900.0
                 else:
                     sina_panel_fail += 1
                     sina_panel_interval = min(600.0 * (2 ** (sina_panel_fail - 1)), 1800.0)
-                    logger.warning("新浪看板批失败(退避至 %ds): DXY 维持上次价",
+                    logger.warning("新浪看板批失败(退避至 %ds): 冷备价维持上次值",
                                    int(sina_panel_interval))
 
-            # ---- twelvedata USDCNH 主价（60s 节流，失败沿用上次值，>10min 无
+            # ---- twelvedata USDCNH 主价（30min 节流，失败沿用上次值，>90min 无
             #      有效价置 None 回落新浪批冷备价）----
-            if now_mono - td_fx_at >= 60.0:
+            if now_mono - td_fx_at >= 1800.0:
                 td_fx_at = now_mono
                 v = await pf.fetch_td_fx("USD/CNH")
                 if 6.0 < v < 8.5:
                     td_usdcnh, td_fx_ok_at = v, now_mono
-                elif td_usdcnh is not None and now_mono - td_fx_ok_at < 600.0:
+                elif td_usdcnh is not None and now_mono - td_fx_ok_at < 5400.0:
                     pass   # 瞬时失败沿用上次值（汇率低频波动）
                 else:
                     td_usdcnh = None
@@ -1984,7 +1987,7 @@ async def _market_loop():
             #      这三项无腾讯/长桥主价源时由 Yahoo 一次请求两用——meta 现价刷新主价
             #      缓存、当日 5m 分时顺带落库；其余 8 项分时纯由主价快照累积。
             #      判定/节流抽 yahoo_refresh_plan 纯函数（见其 docstring）----
-            yahoo_keys = ("US30Y", "US10Y") + (
+            yahoo_keys = ("US30Y", "US10Y", "DXY") + (
                 () if lp_idx_ok else ("VIX", "DJI", "NDX", "SPX"))
             due = yahoo_refresh_plan(yahoo_day, last_map, now_utc, now_mono,
                                      backfill_at, backfill_fail, yahoo_keys)
