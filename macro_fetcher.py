@@ -28,9 +28,14 @@ BROWSER_HEADERS = {
                   "Chrome/126.0.0.0 Safari/537.36",
     "Accept": "application/json,text/csv,text/html,*/*",
 }
-# CNN 短 UA 会得到 200+teapot 反爬文本，需完整 UA 串 + Referer 才返回真 JSON
+# CNN 短 UA 会得到 200+teapot 反爬文本，需完整 UA 串 + Referer 才返回真 JSON；
+# 且境内代理中转出口会被 CNN 降级响应（score 缺失），故 CNN 只直连不走代理
 CNN_HEADERS = {**BROWSER_HEADERS,
                "Referer": "https://edition.cnn.com/markets/fear-and-greed"}
+# 巴菲特指标序列：原 Wilshire 系列（WILL5000PRFC 等）已从 FRED 下架（404），
+# 改用非金融企业市值（NCBEILQ027S，单位百万$）÷ GDP（单位十亿$，差 1000 倍）
+BUFFETT_MCAP_SID = "NCBEILQ027S"
+BUFFETT_GDP_SID = "GDP"
 
 
 async def _proxy_candidates() -> list[str | None]:
@@ -43,10 +48,13 @@ async def _proxy_candidates() -> list[str | None]:
     return [None] + urls
 
 
-async def _get_text(url: str, headers: dict | None = None) -> str | None:
-    """直连→代理容错取响应文本（headers=None 用 httpx 默认 UA）；全失败返回 None。@author yys"""
+async def _get_text(url: str, headers: dict | None = None,
+                    allow_proxy: bool = True) -> str | None:
+    """直连→代理容错取响应文本（headers=None 用 httpx 默认 UA；
+    allow_proxy=False 仅直连，用于代理出口会被目标站降级的源）。@author yys"""
     last_err = ""
-    for proxy in await _proxy_candidates():
+    candidates = await _proxy_candidates() if allow_proxy else [None]
+    for proxy in candidates:
         try:
             async with httpx.AsyncClient(timeout=15, proxy=proxy,
                                          follow_redirects=True,
@@ -104,14 +112,16 @@ def parse_cnn_fg(text: str) -> tuple[float, str] | None:
 
 
 async def fetch_buffett() -> dict | None:
-    """巴菲特指标 = Wilshire5000 / 年化GDP ×100%（FRED 两 CSV）。@author yys"""
-    w = parse_fred_csv(await _get_text(FRED_CSV_URL.format(sid="WILL5000PRFC")) or "")
-    g = parse_fred_csv(await _get_text(FRED_CSV_URL.format(sid="GDP")) or "")
-    if not w or not g or g[1] <= 0:
+    """巴菲特指标 = 非金融企业市值(NCBEILQ027S,百万$) / GDP(十亿$) ×100%。
+    Wilshire 系列已从 FRED 下架故改此口径；asof 取两序列较旧者。@author yys"""
+    m = parse_fred_csv(await _get_text(FRED_CSV_URL.format(sid=BUFFETT_MCAP_SID)) or "")
+    g = parse_fred_csv(await _get_text(FRED_CSV_URL.format(sid=BUFFETT_GDP_SID)) or "")
+    if not m or not g or g[1] <= 0:
         return None
-    return {"name": "buffett", "asof": w[0], "value": round(w[1] / g[1] * 100.0, 1),
-            "extra": {"wilshire": w[1], "gdp": g[1],
-                      "wilshire_asof": w[0], "gdp_asof": g[0]}}
+    return {"name": "buffett", "asof": min(m[0], g[0]),
+            "value": round(m[1] / 1_000.0 / g[1] * 100.0, 1),
+            "extra": {"mcap_musd": m[1], "gdp_busd": g[1],
+                      "mcap_asof": m[0], "gdp_asof": g[0]}}
 
 
 async def fetch_cape() -> dict | None:
@@ -134,9 +144,15 @@ async def fetch_yield_spread() -> dict | None:
 
 
 async def fetch_fear_greed() -> dict | None:
-    """恐慌贪婪：CNN 主源；失败回退 VIX 2 年分位合成（extra.source 标注）。@author yys"""
+    """恐慌贪婪：CNN 主源（仅直连，响应偶发降级缺失 score 时隔 2s 重试一次）；
+    仍失败回退 VIX 2 年分位合成（extra.source 标注）。@author yys"""
     asof = datetime.now().strftime("%Y-%m-%d")
-    got = parse_cnn_fg(await _get_text(CNN_FG_URL, headers=CNN_HEADERS) or "")
+    got = parse_cnn_fg(await _get_text(CNN_FG_URL, headers=CNN_HEADERS,
+                                       allow_proxy=False) or "")
+    if not got:
+        await asyncio.sleep(2.0)
+        got = parse_cnn_fg(await _get_text(CNN_FG_URL, headers=CNN_HEADERS,
+                                           allow_proxy=False) or "")
     if got:
         return {"name": "fear_greed", "asof": asof, "value": round(got[0], 1),
                 "extra": {"rating": got[1], "source": "cnn"}}

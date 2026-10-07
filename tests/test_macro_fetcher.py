@@ -35,6 +35,10 @@ def test_source_urls_and_anti_bot_headers():
     assert "Chrome/" in mf.CNN_HEADERS["User-Agent"] and "Safari" in mf.CNN_HEADERS["User-Agent"]
     # FRED 歧视伪造浏览器 UA（实测 Chrome UA 挂起超时、默认 UA 200），不配浏览器头
     assert "User-Agent" not in mf.FRED_HEADERS
+    # 巴菲特指标：Wilshire 系列已从 FRED 下架（WILL5000PRFC 等 404），
+    # 改用非金融企业市值（NCBEILQ027S，百万$）÷ GDP（十亿$，单位差 1000 倍）
+    assert mf.BUFFETT_MCAP_SID == "NCBEILQ027S"
+    assert mf.BUFFETT_GDP_SID == "GDP"
 
 
 def test_parse_cnn_fg():
