@@ -485,4 +485,45 @@ def test_fib_retrace_gates():
     p = ae._merged_params(None)
     assert ae.eval_fib_retrace("QQQ", 98.0, p, {}, dict(_IND_OK, fib=None)) == []
     assert ae.eval_fib_retrace("QQQ", 98.0, p, {},
-                              {"enough_history": False, "fib": _IND_OK["fib"]}) == []
+                               {"enough_history": False, "fib": _IND_OK["fib"]}) == []
+
+
+def test_ma200_zone_touch_cooldown_and_reset():
+    params = ae._merged_params(None)
+    state = {}
+    assert len(ae.eval_ma200_zone("QQQ", 101.0, params, state, _IND_OK)) == 1
+    assert ae.eval_ma200_zone("QQQ", 102.0, params, state, _IND_OK) == []   # 冷却内
+    ae.eval_ma200_zone("QQQ", 110.0, params, state, _IND_OK)                # |bias|=10 离开年线带
+    assert "touch" not in state["ma200_zone"]                               # 冷却重置
+    assert len(ae.eval_ma200_zone("QQQ", 101.0, params, state, _IND_OK)) == 1
+
+
+def test_ma200_zone_band_override():
+    params = {k: dict(v) for k, v in ae.DEFAULT_PARAMS.items()}
+    params["ma200_zone"]["band_pct"] = 5.0
+    assert len(ae.eval_ma200_zone("QQQ", 104.0, params, {}, _IND_OK)) == 1  # bias=4 在 5% 带内
+
+
+def test_fib_retrace_depth_override():
+    params = {k: dict(v) for k, v in ae.DEFAULT_PARAMS.items()}
+    params["fib_retrace"]["depth"] = 0.6
+    assert ae.eval_fib_retrace("QQQ", 98.0, params, {}, _IND_OK) == []      # 0.55 未达 0.6
+
+
+def test_evaluate_dispatches_v3_rules(engine_env, monkeypatch):
+    """evaluate() 接线冒烟：ma200_zone/fib_retrace 两规则被纳入单标的求值链。
+
+    state 须跨轮持久化才能验证冷却（engine_env 桩每轮返回 None），
+    故用 _rule_store + 冷却不过期，同 atr_stop 重置回归用例模式。"""
+    monkeypatch.setattr(ae, "COOLDOWN_SECONDS", 3600.0)   # 冷却不过期，才能测出第二轮不再触发
+    _rule_store(monkeypatch)
+    monkeypatch.setitem(ae.daily_bars.INDICATORS, "QQQ", _IND_OK)
+    monkeypatch.setattr(ae, "_positions", {"QQQ": {"cost": 100.0, "qty": 10.0}})
+    monkeypatch.setattr(ae, "_positions_at", time.monotonic())
+    evs = asyncio.run(ae.evaluate("QQQ", 85.0))
+    rules = {e["rule"] for e in evs}
+    assert "ma200_zone" in rules        # bias=-15 深乖离触发
+    assert "fib_retrace" in rules       # depth 0.55 ≥ 0.5 触发
+    rules2 = {e["rule"] for e in asyncio.run(ae.evaluate("QQQ", 85.0))}
+    # 第二轮同价：冷却内不再触发（接线后冷却状态机同样生效）
+    assert "ma200_zone" not in rules2
