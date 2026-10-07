@@ -25,6 +25,8 @@ DEFAULT_PARAMS = {
     "extreme_guard": {"enabled": True, "rsi_low": 30.0, "bias_low": -8.0},
     "vix_take_profit": {"enabled": True, "profit_pct": 20.0, "vix_pctile_max": 20.0},
     "deep_dip": {"enabled": True, "dip_pct": 15.0},
+    "ma200_zone": {"enabled": True, "bias_low": -10.0, "band_pct": 2.0},
+    "fib_retrace": {"enabled": True, "depth": 0.5},
 }
 
 _positions: dict[str, dict[str, float]] = {}   # symbol → {"cost": 成本价, "qty": 数量}
@@ -238,6 +240,77 @@ def eval_deep_dip(symbol: str, price: float, params: dict, state: dict,
     return []
 
 
+def eval_ma200_zone(symbol: str, price: float, params: dict, state: dict,
+                    ind: dict | None) -> list[dict]:
+    """年线区域提醒：深度乖离（bias 键）与贴近年线（touch 键）两个独立子信号。
+
+    与 extreme_guard 的 MA50 乖离口径独立（本规则锚 200 日年线）；
+    短历史（enough_history=False）静默禁用，同 atr_stop 惯例。@author yys"""
+    cfg = params.get("ma200_zone", {})
+    if not cfg.get("enabled", True) or not ind or not ind.get("enough_history"):
+        return []
+    ma200 = ind.get("ma200")
+    if not ma200:
+        return []
+    bias = (price - ma200) / ma200 * 100.0
+    bias_low = float(cfg.get("bias_low", -10.0))
+    band = float(cfg.get("band_pct", 2.0))
+    events = []
+    now = time.time()
+    st = state.setdefault("ma200_zone", {})
+    if bias > bias_low + 0.5:
+        st.pop("bias", None)      # 离开深乖离带 → 冷却重置（0.5 个百分点边际）
+    elif bias <= bias_low and _cooldown_ok(st, "bias", now):
+        _set_cooldown(st, "bias", now, COOLDOWN_SECONDS)
+        events.append(_event(
+            symbol, "ma200_zone",
+            f"{symbol} 现价较200日线乖离 {bias:+.1f}%，历史级低估区",
+            "warning",
+            {"bias_pct": round(bias, 2), "ma200": round(ma200, 2), "price": price}))
+    if abs(bias) > band + 0.5:
+        st.pop("touch", None)     # 离开年线带 → 冷却重置
+    elif abs(bias) <= band and _cooldown_ok(st, "touch", now):
+        _set_cooldown(st, "touch", now, COOLDOWN_SECONDS)
+        events.append(_event(
+            symbol, "ma200_zone",
+            f"{symbol} 贴近200日线（乖离 {bias:+.1f}%），长线支撑测试",
+            "info",
+            {"bias_pct": round(bias, 2), "ma200": round(ma200, 2), "price": price}))
+    return events
+
+
+def eval_fib_retrace(symbol: str, price: float, params: dict, state: dict,
+                     ind: dict | None) -> list[dict]:
+    """斐波那契回撤提醒：252 日上涨波段回撤深度 ≥ 阈值 → 底部区域提示。
+
+    波段口径见 daily_bars.compute_indicators（先低后高才定义回撤，
+    下跌延续段 fib=None 静默禁用）。@author yys"""
+    cfg = params.get("fib_retrace", {})
+    if not cfg.get("enabled", True) or not ind or not ind.get("enough_history"):
+        return []
+    fib = ind.get("fib")
+    if not fib or fib.get("depth") is None:
+        return []
+    depth = float(fib["depth"])
+    want = float(cfg.get("depth", 0.5))
+    now = time.time()
+    st = state.setdefault("fib_retrace", {})
+    if depth < want - 0.05:
+        st.pop("main", None)      # 回撤收窄离开触发带 → 冷却重置
+        return []
+    if depth >= want and _cooldown_ok(st, "main", now):
+        _set_cooldown(st, "main", now, COOLDOWN_SECONDS)
+        lv = fib.get("levels") or {}
+        return [_event(
+            symbol, "fib_retrace",
+            f"{symbol} 本轮涨幅已回撤 {depth * 100:.0f}%，斐波那契底部区域关注",
+            "info",
+            {"depth": round(depth, 3), "swing_high": fib.get("high"),
+             "swing_low": fib.get("low"), "fib_382": lv.get("382"),
+             "fib_500": lv.get("500"), "fib_618": lv.get("618"), "price": price})]
+    return []
+
+
 def eval_trend(bars: list[dict], params: dict) -> dict | None:
     """MA200 趋势状态（日收盘判定，供日K刷新后调用与指标接口展示）。"""
     if not params.get("trend_filter", {}).get("enabled", True):
@@ -275,6 +348,8 @@ async def evaluate(symbol: str, price: float) -> list[dict]:
         events += eval_extreme_guard(symbol, price, params, state, ind)
         events += eval_vix_take_profit(symbol, price, params, state, ind)
         events += eval_deep_dip(symbol, price, params, state, ind)
+        events += eval_ma200_zone(symbol, price, params, state, ind)
+        events += eval_fib_retrace(symbol, price, params, state, ind)
         state_changed = json.dumps(state, sort_keys=True, default=str) != snapshot
         if events or state_changed:
             # 写回库内原始配置（非合并快照），避免固化默认值、

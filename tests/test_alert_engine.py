@@ -408,3 +408,81 @@ def test_round_failure_keeps_previous_threshold(engine_env, monkeypatch):
     monkeypatch.setattr(ae.daily_bars, "get_indicators", lambda s: _ind(stop=150.0))
     evs = asyncio.run(ae.evaluate_round({"NVDA": 149.0}))
     assert any(e["rule"] == "atr_stop" for e in evs)   # 沿用 0 → 298 市值仍评估
+
+
+# ---------------------------------------------------------------------------
+# V3 新规则：ma200_zone（年线区域）/ fib_retrace（斐波那契回撤）
+# ---------------------------------------------------------------------------
+
+_IND_OK = {"enough_history": True, "ma200": 100.0,
+           "fib": {"high": 120.0, "low": 80.0, "depth": 0.55,
+                   "levels": {"382": 104.8, "500": 100.0, "618": 95.2}}}
+
+
+def test_default_params_include_v3_rules():
+    assert "ma200_zone" in ae.DEFAULT_PARAMS
+    assert "fib_retrace" in ae.DEFAULT_PARAMS
+
+
+def test_ma200_zone_deep_bias_fires():
+    state = {}
+    evs = ae.eval_ma200_zone("QQQ", 85.0, ae._merged_params(None), state, _IND_OK)
+    assert len(evs) == 1
+    assert evs[0]["rule"] == "ma200_zone" and evs[0]["level"] == "warning"
+    assert evs[0]["body"]["bias_pct"] == -15.0
+
+
+def test_ma200_zone_touch_fires():
+    state = {}
+    evs = ae.eval_ma200_zone("QQQ", 101.0, ae._merged_params(None), state, _IND_OK)
+    assert len(evs) == 1 and evs[0]["level"] == "info"
+    assert "贴近200日线" in evs[0]["title"]
+
+
+def test_ma200_zone_cooldown_and_reset():
+    params = ae._merged_params(None)
+    state = {}
+    assert len(ae.eval_ma200_zone("QQQ", 85.0, params, state, _IND_OK)) == 1
+    assert ae.eval_ma200_zone("QQQ", 84.0, params, state, _IND_OK) == []   # 冷却内
+    ae.eval_ma200_zone("QQQ", 99.0, params, state, _IND_OK)                # bias=-1 离开深乖离带
+    assert "bias" not in state["ma200_zone"]                               # 冷却重置
+    assert len(ae.eval_ma200_zone("QQQ", 85.0, params, state, _IND_OK)) == 1
+
+
+def test_ma200_zone_gates():
+    p = ae._merged_params(None)
+    assert ae.eval_ma200_zone("QQQ", 85.0, p, {},
+                              {"enough_history": False, "ma200": 100.0}) == []
+    assert ae.eval_ma200_zone("QQQ", 85.0, p, {}, {"enough_history": True}) == []
+    assert ae.eval_ma200_zone("QQQ", 85.0, p, {}, None) == []
+
+
+def test_ma200_zone_param_override():
+    params = {k: dict(v) for k, v in ae.DEFAULT_PARAMS.items()}
+    params["ma200_zone"]["bias_low"] = -20.0
+    assert ae.eval_ma200_zone("QQQ", 85.0, params, {}, _IND_OK) == []      # -15 未达 -20
+
+
+def test_fib_retrace_fires():
+    evs = ae.eval_fib_retrace("QQQ", 98.0, ae._merged_params(None), {}, _IND_OK)
+    assert len(evs) == 1 and evs[0]["rule"] == "fib_retrace"
+    assert evs[0]["body"]["fib_500"] == 100.0
+    assert evs[0]["body"]["depth"] == 0.55
+
+
+def test_fib_retrace_cooldown_and_reset():
+    p = ae._merged_params(None)
+    state = {}
+    assert len(ae.eval_fib_retrace("QQQ", 98.0, p, state, _IND_OK)) == 1
+    assert ae.eval_fib_retrace("QQQ", 97.0, p, state, _IND_OK) == []       # 冷却内
+    ind2 = dict(_IND_OK, fib=dict(_IND_OK["fib"], depth=0.42))             # 离开带 <0.45
+    ae.eval_fib_retrace("QQQ", 97.0, p, state, ind2)
+    assert "main" not in state["fib_retrace"]
+    assert len(ae.eval_fib_retrace("QQQ", 98.0, p, state, _IND_OK)) == 1
+
+
+def test_fib_retrace_gates():
+    p = ae._merged_params(None)
+    assert ae.eval_fib_retrace("QQQ", 98.0, p, {}, dict(_IND_OK, fib=None)) == []
+    assert ae.eval_fib_retrace("QQQ", 98.0, p, {},
+                              {"enough_history": False, "fib": _IND_OK["fib"]}) == []
