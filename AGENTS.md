@@ -30,7 +30,7 @@
 | ledger_seed.py | v3 盘点 68 笔种子事件（幂等 upsert CLI，仅首次/修数跑） |
 | fetcher.py | A股 ETF 监控抓取（腾讯 ETF + 新浪/东财期指智能路由） |
 | tencent_bus.py | 腾讯行情攒批发送路由（微批合并：监控/候选/持仓/看板共用一个节奏） |
-| email_trader.py | HSBC 成交邮件 → trade_records 幂等入库 → **自动应用持仓与现金**（apply_trade 先插表再动 holdings/cash，可安全重放；QQ IMAP，30min，轮询水位失败不推进按水位回溯）；fetch_za_notice_emails 众安通知（换汇/转出/派息/入金）仅供记账对账采样，**不进自动轮询** |
+| email_trader.py | 券商成交邮件 → trade_records 幂等入库 → **自动应用持仓与现金**（汇丰「全部執行」/致富「待成交=0 终态」两类门控；apply_trade 先插表再动 holdings/cash，可安全重放；QQ IMAP，30min 双源同轮，任一源失败水位不推进按水位回溯）；fetch_za_notice_emails 众安通知（换汇/转出/派息/入金）仅供记账对账采样，**不进自动轮询** |
 | database.py | MySQL 全部表结构与 CRUD（远程 ***REMOVED***:3914） |
 | static/portfolio.html | 持仓前端（单文件，无构建） |
 
@@ -46,7 +46,7 @@
 | 长桥 LongPort | 冷启动锚点恢复主源（日K收盘价）+ pre/post 扩展价 | 直连 | 扩展价随轮 30/60s；锚点后台逐只 4s |
 | 24h数据源 | 收盘→开盘全段美股活价 | **直连可用**（公开行情镜像域名） | 闭市 60s（bookTicker 批量 weight 1） |
 | 24h数据源·股票行情 | 无交易标的（AMKR/PCG/F）夜盘活价 | 直连（***REMOVED*** 网关，X-Auth-Token+X-H24-APIKEY 双鉴权同值） | 闭市 60s 逐只并发（weight 1/只）；日均 ~4.7K 次 ≈ 200K events/天套餐的 2.4% |
-| HSBC 邮件 | 成交记录（自动应用持仓/现金） | IMAP 直连 | 30min |
+| HSBC/致富邮件 | 成交记录（自动应用持仓/现金，致富同发件人营销邮件靠解析门槛挡） | IMAP 直连 | 30min 双源同轮 |
 | 众安银行邮件 | 换汇/转出/派息/入金通知 | IMAP 直连 | 按需（记账采样辅助，无自动轮询） |
 | ECB frankfurter.dev | 记账汇率日线（CNY/HKD/USD） | 直连 | 每日 22:35（库空回填一次区间） |
 

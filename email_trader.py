@@ -1,9 +1,15 @@
-"""HSBC 成交邮件 → 解析 → 幂等落交易表 → 自动更新持仓与现金。
+"""券商成交邮件 → 解析 → 幂等落交易表 → 自动更新持仓与现金。
 
-链路：QQ 邮箱 IMAP 拉取 HSBC 成交通知邮件（回溯窗口按上次成功轮询时刻
-自适应放大，停机多久补多久，宁多勿漏）→ parse_hsbc_trade 解析关键字段
-（纯函数，繁体中文/全半角冒号/空格差异容错）→ apply_trade 幂等
-编排：先插 trade_records（幂等锁）再更新 holdings 数量与 cash_accounts 余额。
+链路：QQ 邮箱 IMAP 拉取成交通知邮件（回溯窗口按上次成功轮询时刻自适应放大，
+停机多久补多久，宁多勿漏）→ parse_hsbc_trade / parse_chief_trade 解析关键字段
+（纯函数，繁简/全半角冒号空格差异容错）→ apply_trade 幂等编排：先插
+trade_records（幂等锁）再更新 holdings 数量与 cash_accounts 余额。
+
+支持两类成交邮件：
+- HSBC（HSBC@notification.hsbc.com.hk）：只处理「全部執行」，部分執行等终态邮件；
+- 致富证券（donotreply@chiefgroup.com.hk，同发件人有营销邮件，靠解析门槛判别）：
+  「订单成交及部份成交通知」，只处理待成交数量=0 的终态邮件，
+  数量取该邮件已成交数量（订单累计终态，同 HSBC 口径）。
 """
 import asyncio
 import email
@@ -12,6 +18,7 @@ import imaplib
 import logging
 import os
 import re
+import unicodedata
 from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 
@@ -28,6 +35,7 @@ IMAP_USER = "***REMOVED***"
 # IMAP 授权码属敏感凭据：优先从环境变量读取，缺省回退现值保持部署零影响
 IMAP_PASSWORD = os.getenv("QDII_IMAP_PASSWORD", "***REMOVED***")
 HSBC_SENDER = "HSBC@notification.hsbc.com.hk"
+CHIEF_SENDER = "donotreply@chiefgroup.com.hk"
 
 POLL_INTERVAL_SEC = 1800  # 轮询间隔 30 分钟
 FIRST_DELAY_SEC = 60      # 启动后首跑延迟
@@ -146,6 +154,89 @@ def parse_hsbc_trade(text: str) -> dict | None:
     }
 
 # ---------------------------------------------------------------------------
+# 致富证券成交通知解析（纯函数）
+# ---------------------------------------------------------------------------
+# 版式（text/html 剥标签后，字段行无冒号）：「您卖出 #03152 (Ａ博时港元)的成交，
+# 详情如下：」+ 字段表（参考编号/客户编号/货币/价格/已成交数量/待成交数量/
+# 成交金额/最后更新时间）。同发件人还投递营销/研究邮件——以成交字段齐备为
+# 门槛，营销邮件无这些字段自然被挡。
+
+_CHIEF_SIDE_RE = re.compile(r"您\s*([買买]入|[賣卖]出|沽出)")
+_CHIEF_SYM_RE = re.compile(
+    r"([買买]入|[賣卖]出|沽出)\s*#?\s*([A-Za-z0-9.\-]+)\s*[（(]\s*([^()（）]+?)\s*[)）]")
+_CHIEF_REF_RE = re.compile(r"参考编号\s*[:：]?\s*([A-Za-z0-9\-]+)")
+_CHIEF_CUR_RE = re.compile(r"货币\s*[:：]?\s*([A-Z]{3})")
+_CHIEF_PRICE_RE = re.compile(r"价格\s*[:：]?\s*([\d,]+(?:\.\d+)?)")
+_CHIEF_FILLED_RE = re.compile(r"已成交数量\s*[:：]?\s*([\d,]+(?:\.\d+)?)")
+_CHIEF_PENDING_RE = re.compile(r"待成交数量\s*[:：]?\s*([\d,]+(?:\.\d+)?)")
+_CHIEF_AMOUNT_RE = re.compile(r"成交金额\s*[:：]?\s*([\d,]+(?:\.\d+)?)")
+
+
+def parse_chief_trade(text: str) -> dict | None:
+    """解析致富成交邮件正文 → 交易 dict；非终态成交或字段不全返回 None。
+
+    终态口径（与 HSBC「全部執行」同款）：待成交数量=0 才应用，数量取该邮件
+    已成交数量（订单累计终态）；部份成交邮件跳过等终态覆盖。
+    全文先 NFKC 归一化：全角Ａ→A（与 holdings 名称一致）、全角数字/括号容错。
+
+    返回 {trade_no, side(BUY/SELL), symbol, name, market, quantity, price,
+    currency, amount(可为 None)}；amount 为邮件成交金额（致富现金动账口径，
+    缺省退化 qty×price）。
+    """
+    if not text:
+        return None
+    text = unicodedata.normalize("NFKC", text).replace("\u00a0", " ")
+
+    # 成交字段门槛：任一缺失视为非成交邮件（营销/研究邮件在此被挡）
+    sm = _CHIEF_SIDE_RE.search(text)
+    rm = _CHIEF_REF_RE.search(text)
+    fm = _CHIEF_FILLED_RE.search(text)
+    pm = _CHIEF_PENDING_RE.search(text)
+    if not (sm and rm and fm and pm):
+        return None
+
+    # 终态门控：待成交>0 为部份成交中间态，跳过
+    if float(pm.group(1).replace(",", "")) > 0:
+        return None
+    quantity = float(fm.group(1).replace(",", ""))
+    if quantity <= 0:
+        return None
+
+    # 代码与名称：「#03152 (Ａ博时港元)」→ 03152 / A博时港元；美股无 # 前缀
+    sym = _CHIEF_SYM_RE.search(text)
+    if not sym or not sym.group(3).strip():
+        return None
+    symbol = sym.group(2).strip()
+    name = sym.group(3).strip()
+
+    prm = _CHIEF_PRICE_RE.search(text)
+    if not prm:
+        return None
+    price = float(prm.group(1).replace(",", ""))
+    if price <= 0:
+        return None
+
+    market = "HK" if symbol.isdigit() else "US"
+    cm = _CHIEF_CUR_RE.search(text)
+    currency = cm.group(1) if cm else _MARKET_CURRENCY[market]
+
+    am = _CHIEF_AMOUNT_RE.search(text)
+    amount = float(am.group(1).replace(",", "")) if am else None
+
+    side = "SELL" if "出" in sm.group(1) else "BUY"
+    return {
+        "trade_no": rm.group(1),
+        "side": side,
+        "symbol": symbol,
+        "name": name,
+        "market": market,
+        "quantity": quantity,
+        "price": price,
+        "currency": currency,
+        "amount": amount,
+    }
+
+# ---------------------------------------------------------------------------
 # 邮件拉取（imaplib 标准库，同步；调用方用 asyncio.to_thread 包装）
 # ---------------------------------------------------------------------------
 
@@ -201,8 +292,8 @@ def _extract_text(msg) -> str:
     return ""
 
 
-def fetch_hsbc_emails(days: int = 1) -> list[dict]:
-    """拉取最近 N 天 HSBC 成交邮件 → [{message_id, date, text}]。
+def _fetch_sender_emails(sender: str, days: int, label: str) -> list[dict]:
+    """拉取最近 N 天指定发件人的邮件 → [{message_id, date, text}]。
 
     只读操作（SEARCH + FETCH），不做任何标记/删除。
     拉取失败（登录/网络/协议异常）抛出异常而非返回 []——调用方需区分
@@ -217,7 +308,7 @@ def fetch_hsbc_emails(days: int = 1) -> list[dict]:
         imap.login(IMAP_USER, IMAP_PASSWORD)
         imap.select("INBOX")
         status, data = imap.search(
-            None, f'(FROM "{HSBC_SENDER}" SINCE "{since_str}")')
+            None, f'(FROM "{sender}" SINCE "{since_str}")')
         if status != "OK" or not data or not data[0]:
             return out
         for num in data[0].split():
@@ -237,7 +328,7 @@ def fetch_hsbc_emails(days: int = 1) -> list[dict]:
             })
         return out
     except Exception as e:
-        logger.error("拉取 HSBC 邮件失败: %s", e)
+        logger.error("拉取 %s 邮件失败: %s", label, e)
         raise
     finally:
         if imap is not None:
@@ -245,6 +336,19 @@ def fetch_hsbc_emails(days: int = 1) -> list[dict]:
                 imap.logout()
             except Exception:
                 pass
+
+
+def fetch_hsbc_emails(days: int = 1) -> list[dict]:
+    """拉取最近 N 天 HSBC 成交邮件 → [{message_id, date, text}]。"""
+    return _fetch_sender_emails(HSBC_SENDER, days, "HSBC")
+
+
+def fetch_chief_emails(days: int = 1) -> list[dict]:
+    """拉取最近 N 天致富证券邮件 → [{message_id, date, text}]。
+
+    同发件人包含营销/研究邮件，多拉的由 parse_chief_trade 解析门槛挡掉。
+    """
+    return _fetch_sender_emails(CHIEF_SENDER, days, "致富")
 
 
 def fetch_za_notice_emails(days: int = 30) -> list[dict]:
@@ -329,7 +433,8 @@ async def apply_trade(trade: dict) -> dict:
     qty = float(trade["quantity"])
     price = float(trade["price"])
     currency = trade["currency"]
-    amount = round(qty * price, 2)
+    # 现金动账金额：致富取邮件成交金额（含券商口径的整笔金额），缺省 qty×price（HSBC）
+    amount = round(float(trade.get("amount") or qty * price), 2)
 
     holdings = await db.get_holdings()
     row = next((h for h in holdings if h["symbol"] == symbol), None)
@@ -426,11 +531,12 @@ def _compute_backtrack_days(last_poll: str | None, default_days: int = 1) -> int
 
 
 async def poll_once(days: int = 1) -> list[dict]:
-    """单轮处理：自适应回溯拉邮件 → 逐封解析 → 幂等应用，返回各封处理结果。
+    """单轮处理（HSBC + 致富双源）：自适应回溯拉邮件 → 逐封解析 → 幂等应用。
 
     回溯天数 = max(days, (now - 上次成功轮询).days + 1)，修复停机超 1 天
-    成交邮件永久漏账的问题。仅当整轮无异常完成（即使 0 封新邮件）才把
-    last_poll 推进到当前时刻；拉取/解析链路异常时保持旧水位，下轮重试。
+    成交邮件永久漏账的问题。仅当全部源整轮无异常完成（即使 0 封新邮件）才把
+    last_poll 推进到当前时刻；任一源拉取异常时保持旧水位，下轮放大窗口重试
+    （幂等去重不怕重复；该轮已成功应用的交易不受影响）。
     """
     # 读取上次成功轮询时刻（读取失败不阻断本轮，回退保守窗口）
     try:
@@ -440,15 +546,23 @@ async def poll_once(days: int = 1) -> list[dict]:
         last_poll = None
     backtrack_days = _compute_backtrack_days(last_poll, days)
 
+    # 双源拉取：任一失败即标记，整轮结束不推进水位（防漏账放大）
+    fetch_failed = False
+    hsbc_mails: list[dict] = []
+    chief_mails: list[dict] = []
     try:
-        mails = await asyncio.to_thread(fetch_hsbc_emails, backtrack_days)
+        hsbc_mails = await asyncio.to_thread(fetch_hsbc_emails, backtrack_days)
     except Exception as e:
-        # 拉取失败：不推进水位，下轮以放大窗口重拉（幂等去重不怕重复）
+        fetch_failed = True
         logger.error("本轮 HSBC 邮件拉取失败，保持轮询水位不推进: %s", e)
-        return []
+    try:
+        chief_mails = await asyncio.to_thread(fetch_chief_emails, backtrack_days)
+    except Exception as e:
+        fetch_failed = True
+        logger.error("本轮致富邮件拉取失败，保持轮询水位不推进: %s", e)
 
     results: list[dict] = []
-    for mail in mails:
+    for mail in hsbc_mails:
         trade = parse_hsbc_trade(mail.get("text", ""))
         if trade is None:
             logger.info("HSBC 邮件未识别为全部执行交易(忽略): %s",
@@ -460,7 +574,21 @@ async def poll_once(days: int = 1) -> list[dict]:
         logger.info("HSBC 交易处理: %s", result)
         results.append(result)
 
+    for mail in chief_mails:
+        trade = parse_chief_trade(mail.get("text", ""))
+        if trade is None:
+            logger.info("致富邮件未识别为终态成交(忽略): %s",
+                        mail.get("message_id", ""))
+            continue
+        trade["message_id"] = mail.get("message_id", "")
+        trade["email_date"] = mail.get("date")
+        result = await apply_trade(trade)
+        logger.info("致富交易处理: %s", result)
+        results.append(result)
+
     # 整轮无异常完成才推进水位（回溯窗口随时间自动收敛回 1 天）
+    if fetch_failed:
+        return results
     await db.set_config(LAST_POLL_KEY, datetime.now().isoformat(timespec="seconds"),
-                        remark="HSBC 成交邮件上次成功轮询时刻")
+                        remark="成交邮件上次成功轮询时刻")
     return results

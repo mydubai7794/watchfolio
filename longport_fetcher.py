@@ -558,3 +558,29 @@ async def probe_available() -> bool:
         return True
     m = await fetch_quote_map([".VIX.US"])
     return bool(m)
+
+
+async def fetch_daily_bars_raw(symbol: str, count: int = 1000) -> list:
+    """长桥前复权日K（count≤1000）。失败/不可用返回 []。@author yys
+
+    日K底座主源（daily_bars 增量落库 + 除权检测）：前复权 ForwardAdjust
+    使指标与收益口径在除权/拆股事件后天然连续（回测已实测该参数可用）。
+    单 symbol 逐只调用，调用方需自行串行分散（限流契约 1s≤10 次）。
+    """
+    if not _SDK_OK or token_invalid or not symbol:
+        return []
+    if time.monotonic() < _backoff_until:
+        return []
+    ctx = await _get_ctx()
+    if ctx is None:
+        return []
+    try:
+        ks = await _sdk_call(ctx.candlesticks, symbol, _LpPeriod.Day,
+                             max(2, min(int(count), 1000)),
+                             _LpAdjustType.ForwardAdjust)
+        return list(ks or [])
+    except asyncio.TimeoutError:
+        return []   # 已在 _sdk_call 记账（超时废弃连接）
+    except Exception as e:
+        _mark_failure(e)
+        return []

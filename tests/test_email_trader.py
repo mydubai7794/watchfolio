@@ -49,6 +49,55 @@ HTML_BUY = """<html><body style="font-family:Arial">
 <li>餘下數量(股/單位): 0</li>
 </ul></body></html>"""
 
+# ---------------------------------------------------------------------------
+# 致富证券成交通知样例（2026-10-07 线上实测邮件正文，字段行无冒号、全角Ａ）
+# ---------------------------------------------------------------------------
+
+CHIEF_SELL = """
+订单成交及部份成交通知
+
+亲爱的客户：
+您卖出 #03152 (Ａ博时港元)的成交，详情如下：
+参考编号 98438804
+客户编号 M****27
+货币 HKD
+价格 1135.100
+已成交数量 1
+待成交数量 0
+成交金额 1135.100
+最后更新时间 2026-10-07 10:57:44
+"""
+
+CHIEF_BUY_HTML = """<html><body>
+<p>亲爱的客户：</p>
+<p>您买入 #03152 (Ａ博时港元)的成交，详情如下：</p>
+<table>
+<tr><td>参考编号</td><td>98438805</td></tr>
+<tr><td>客户编号</td><td>M****27</td></tr>
+<tr><td>货币</td><td>HKD</td></tr>
+<tr><td>价格</td><td>1135.100</td></tr>
+<tr><td>已成交数量</td><td>1</td></tr>
+<tr><td>待成交数量</td><td>0</td></tr>
+<tr><td>成交金额</td><td>1135.100</td></tr>
+<tr><td>最后更新时间</td><td>2026-10-07 11:00:00</td></tr>
+</table></body></html>"""
+
+CHIEF_MARKETING = """
+致富前瞻｜美欧央行纪会将揭晓，AI产业迎来哪些新看点？
+亲爱的客户：
+美光公布2026财年第四季度业绩：收入542.29亿美元，同比增长379.3%。
+致富证券研究部温馨提示：投资涉及风险，证券价格可升亦可跌。
+"""
+
+
+@pytest.fixture(autouse=True)
+def _stub_chief_fetch(monkeypatch):
+    """默认桩掉致富邮件拉取，保证全部用例离线（不触 IMAP）。
+
+    需要致富邮件的用例在测试体内再次 monkeypatch.setattr 覆盖即可
+    （后设者优先）。"""
+    monkeypatch.setattr(et, "fetch_chief_emails", lambda days=1: [])
+
 
 class TestParseHsbcTrade:
     def test_full_sample_buy(self):
@@ -203,6 +252,94 @@ def _patch_db(monkeypatch, holdings=None, message_exists=False, no_exists=False,
     return calls
 
 
+class TestParseChiefTrade:
+    """致富证券「订单成交及部份成交通知」解析：终态门控 + 全角/无冒号容错。"""
+
+    def test_real_sample_sell(self):
+        """线上实测样例：卖出 03152 1股 @HKD1135.10，Ａ全角归一化为 A。"""
+        t = et.parse_chief_trade(CHIEF_SELL)
+        assert t == {
+            "trade_no": "98438804", "side": "SELL", "symbol": "03152",
+            "name": "A博时港元", "market": "HK", "quantity": 1.0,
+            "price": 1135.10, "currency": "HKD", "amount": 1135.10,
+        }
+
+    def test_html_table_form(self):
+        """HTML 表格版式（text/html 剥标签后字段无冒号、各占一行）。"""
+        t = et.parse_chief_trade(et._strip_html(CHIEF_BUY_HTML))
+        assert t is not None
+        assert t["side"] == "BUY" and t["trade_no"] == "98438805"
+        assert t["symbol"] == "03152" and t["name"] == "A博时港元"
+        assert t["quantity"] == 1.0 and t["price"] == 1135.10
+
+    def test_partial_fill_skipped(self):
+        """待成交数量>0（部份成交非终态）→ None，等终态邮件。"""
+        text = CHIEF_SELL.replace("待成交数量 0", "待成交数量 3")
+        assert et.parse_chief_trade(text) is None
+
+    def test_zero_filled_skipped(self):
+        """已成交 0 / 待成交 0（订单未有任何成交）→ None。"""
+        text = CHIEF_SELL.replace("已成交数量 1", "已成交数量 0") \
+                         .replace("成交金额 1135.100", "成交金额 0.000")
+        assert et.parse_chief_trade(text) is None
+
+    def test_marketing_mail_rejected(self):
+        """同发件人的营销/研究邮件无成交字段 → None。"""
+        assert et.parse_chief_trade(CHIEF_MARKETING) is None
+
+    def test_us_symbol_buy(self):
+        """美股代码（无 # 前缀、字母）→ market US。"""
+        text = ("您买入 NVDA (NVIDIA CORP)的成交，详情如下：\n"
+                "参考编号 98438806\n货币 USD\n价格 1,229.80\n"
+                "已成交数量 1\n待成交数量 0\n成交金额 1,229.80\n")
+        t = et.parse_chief_trade(text)
+        assert t is not None
+        assert t["market"] == "US" and t["currency"] == "USD"
+        assert t["symbol"] == "NVDA" and t["side"] == "BUY"
+
+    def test_missing_currency_falls_back_by_market(self):
+        """货币行缺失 → 按市场兜底 HK。"""
+        text = CHIEF_SELL.replace("货币 HKD\n", "")
+        t = et.parse_chief_trade(text)
+        assert t is not None and t["currency"] == "HKD"
+
+    def test_missing_amount_degrades(self):
+        """成交金额行缺失 → amount None（应用时退化 qty×price）。"""
+        text = CHIEF_SELL.replace("成交金额 1135.100\n", "")
+        t = et.parse_chief_trade(text)
+        assert t is not None and t["amount"] is None
+        assert t["quantity"] == 1.0 and t["price"] == 1135.10
+
+    def test_thousand_separator(self):
+        """千分位数量/价格/金额。"""
+        text = ("您卖出 #03152 (Ａ博时港元)的成交，详情如下：\n"
+                "参考编号 98438807\n货币 HKD\n价格 1,135.100\n"
+                "已成交数量 1,000\n待成交数量 0\n成交金额 1,135,100.000\n")
+        t = et.parse_chief_trade(text)
+        assert t is not None
+        assert t["quantity"] == 1000.0 and t["price"] == 1135.10
+        assert t["amount"] == 1135100.0
+
+    def test_traditional_chinese_side(self):
+        """繁体買入/賣出句式兼容。"""
+        text = CHIEF_SELL.replace("您卖出", "您賣出")
+        t = et.parse_chief_trade(text)
+        assert t is not None and t["side"] == "SELL"
+        text2 = ("您買入 #03152 (Ａ博时港元)的成交，详情如下：\n"
+                 "参考编号 98438808\n货币 HKD\n价格 1135.100\n"
+                 "已成交数量 1\n待成交数量 0\n成交金额 1135.100\n")
+        assert et.parse_chief_trade(text2)["side"] == "BUY"
+
+    def test_field_incomplete_rejected(self):
+        """缺参考编号/缺待成交数量 → None（防营销邮件误伤 + 无法判定终态）。"""
+        assert et.parse_chief_trade(CHIEF_SELL.replace("参考编号 98438804\n", "")) is None
+        assert et.parse_chief_trade(CHIEF_SELL.replace("待成交数量 0\n", "")) is None
+
+    def test_empty_text(self):
+        assert et.parse_chief_trade("") is None
+        assert et.parse_chief_trade(None) is None
+
+
 class TestApplyTrade:
     def test_duplicate_message_id(self, monkeypatch):
         """message_id 已存在 → duplicated 跳过，不插表不动持仓。"""
@@ -305,6 +442,20 @@ class TestApplyTrade:
         assert r["status"] == "error"
         assert len(calls["insert"]) == 1   # 幂等锁已落
 
+    def test_amount_field_overrides_qty_times_price(self, monkeypatch):
+        """trade 带显式 amount（致富成交金额口径）→ 扣现金用 amount 而非 qty×price。"""
+        calls = _patch_db(monkeypatch, holdings=[])
+        r = asyncio.run(et.apply_trade(_trade(amount=100.01)))
+        assert r["status"] == "applied"
+        assert calls["deduct"] == [("USD", 100.01)]
+        assert r["amount"] == 100.01
+
+    def test_amount_none_falls_back_to_qty_times_price(self, monkeypatch):
+        """无 amount（HSBC 路径）→ 维持 qty×price 原行为。"""
+        calls = _patch_db(monkeypatch, holdings=[])
+        asyncio.run(et.apply_trade(_trade(amount=None)))
+        assert calls["deduct"] == [("USD", 229.80)]
+
 
 class TestPollOnce:
     def test_poll_once_end_to_end(self, monkeypatch):
@@ -388,6 +539,67 @@ class TestPollOnce:
         monkeypatch.setattr(et, "fetch_hsbc_emails", fake_fetch)
         assert asyncio.run(et.poll_once(days=1)) == []
         assert calls["config"] == []  # 水位未推进
+
+
+class TestPollOnceChief:
+    """poll_once 双源（HSBC + 致富）拉取/失败语义。"""
+
+    def test_chief_end_to_end(self, monkeypatch):
+        """致富终态邮件 → 解析 → 应用：落表 trade_no=98438804、HKD 现金入账 1135.10。"""
+        calls = _patch_db(monkeypatch, holdings=[_holding(
+            symbol="03152", name="A博时港元", market="HK", quantity=1.0,
+            cost_price=1135.10, currency="HKD")])
+
+        monkeypatch.setattr(et, "fetch_hsbc_emails", lambda days=1: [])
+        monkeypatch.setattr(et, "fetch_chief_emails",
+                            lambda days=1: [{"message_id": "<m1@chief>",
+                                             "date": None, "text": CHIEF_SELL}])
+        results = asyncio.run(et.poll_once(days=1))
+        assert len(results) == 1 and results[0]["status"] == "applied"
+        assert calls["insert"][0]["trade_no"] == "98438804"
+        assert calls["insert"][0]["symbol"] == "03152"
+        assert calls["update"][0][3] == 0.0          # 持仓 1 → 0
+        assert calls["deduct"] == [("HKD", -1135.10)]  # 卖出 → 负扣即入账
+        assert len(calls["config"]) == 1             # 双源成功 → 水位推进
+
+    def test_chief_partial_skipped(self, monkeypatch):
+        """致富部份成交邮件 → 跳过不触库；水位照常推进。"""
+        calls = _patch_db(monkeypatch, holdings=[])
+        monkeypatch.setattr(et, "fetch_hsbc_emails", lambda days=1: [])
+        monkeypatch.setattr(et, "fetch_chief_emails",
+                            lambda days=1: [{"message_id": "<m2@chief>", "date": None,
+                                             "text": CHIEF_SELL.replace(
+                                                 "待成交数量 0", "待成交数量 3")}])
+        assert asyncio.run(et.poll_once(days=1)) == []
+        assert calls["insert"] == []
+        assert len(calls["config"]) == 1
+
+    def test_chief_fetch_failure_keeps_waterline(self, monkeypatch):
+        """致富拉取失败（HSBC 正常）→ 水位不推进，返回空结果。"""
+        calls = _patch_db(monkeypatch, holdings=[])
+        monkeypatch.setattr(et, "fetch_hsbc_emails", lambda days=1: [])
+
+        def boom(days=1):
+            raise RuntimeError("imap down")
+
+        monkeypatch.setattr(et, "fetch_chief_emails", boom)
+        assert asyncio.run(et.poll_once(days=1)) == []
+        assert calls["config"] == []
+
+    def test_chief_fetch_failure_blocks_hsbc_waterline(self, monkeypatch):
+        """致富拉取失败时，即便 HSBC 有可应用邮件也不推进水位（防致富漏账放大）。"""
+        calls = _patch_db(monkeypatch, holdings=[])
+        monkeypatch.setattr(et, "fetch_hsbc_emails",
+                            lambda days=1: [{"message_id": "<mail1@hsbc>",
+                                             "date": None, "text": SAMPLE_BUY}])
+
+        def boom(days=1):
+            raise RuntimeError("imap down")
+
+        monkeypatch.setattr(et, "fetch_chief_emails", boom)
+        results = asyncio.run(et.poll_once(days=1))
+        assert len(results) == 1 and results[0]["status"] == "applied"  # HSBC 照常应用
+        assert calls["config"] == []                                    # 但水位不推进
 
 
 class TestComputeBacktrackDays:

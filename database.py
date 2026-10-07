@@ -2,9 +2,10 @@
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 import secrets
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import aiomysql
 from config import DB_HOST, DB_PORT, DB_USER, DB_PASS, DB_NAME, DB_POOL_SIZE
@@ -434,13 +435,13 @@ async def init_tables():
             _pool=pool,
         )
 
-    # ---- trade_records (HSBC 成交邮件交易记录，message_id 唯一作幂等锁) ----
+    # ---- trade_records (券商成交邮件交易记录，message_id 唯一作幂等锁) ----
     await execute(
         """
         CREATE TABLE IF NOT EXISTS trade_records (
             id          INT AUTO_INCREMENT PRIMARY KEY,
             message_id  VARCHAR(255) UNIQUE NOT NULL COMMENT '邮件 Message-ID(幂等键)',
-            trade_no    VARCHAR(32)  DEFAULT '' COMMENT 'HSBC交易编号(如 P741002)',
+            trade_no    VARCHAR(32)  DEFAULT '' COMMENT '券商交易编号（汇丰 P741002 / 致富 98438804）',
             symbol      VARCHAR(16)  DEFAULT '' COMMENT '代码 NVDA/00700',
             name        VARCHAR(64)  DEFAULT '' COMMENT '股票名称',
             market      VARCHAR(8)   DEFAULT '' COMMENT 'US/HK',
@@ -450,10 +451,13 @@ async def init_tables():
             currency    VARCHAR(8)   DEFAULT '' COMMENT 'USD/HKD',
             email_date  DATETIME     NULL COMMENT '邮件 Date 头',
             created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='HSBC成交邮件交易记录'
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='券商成交邮件交易记录'
         """,
         _pool=pool,
     )
+
+    # ---- 提醒模块三表（长桥日K / 规则 / 提醒历史，幂等）----
+    await init_alert_tables()
 
     logger.info("数据库表初始化完成")
 
@@ -1080,6 +1084,24 @@ async def save_market_ticks(symbol: str, points: list[tuple]) -> int:
             return cur.rowcount
 
 
+async def save_market_ticks_batch(rows: list) -> int:
+    """多 symbol 批量写 market_ticks（quotes_hub 降采样攒批用）。
+
+    rows: [(symbol, naive_ts, price)]，INSERT IGNORE 幂等（uk_sym_ts）。
+    调用方须保证同 symbol 的 ts 互不相同，否则重复行会被静默去重。@author yys
+    """
+    if not rows:
+        return 0
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                "INSERT IGNORE INTO market_ticks (symbol, ts, price) VALUES (%s, %s, %s)",
+                [(s, ts, _safe_decimal(p, 6)) for s, ts, p in rows],
+            )
+            return cur.rowcount
+
+
 async def get_market_last_tick(symbol: str) -> tuple | None:
     """取该标的库内最新一条分时 (ts, price)；无数据返回 None。
 
@@ -1134,6 +1156,16 @@ async def get_market_day_spark(symbol: str, max_points: int = 60) -> list[tuple[
     step = (len(pts) - 1) / (max_points - 1)
     idxs = sorted({round(i * step) for i in range(max_points)})
     return [pts[i] for i in idxs]
+
+
+async def get_market_ticks_range(symbol: str, limit: int = 5000) -> list[dict]:
+    """按时间升序取该标的最近 limit 条分时 tick（分时K聚合用）。@author yys"""
+    rows = await execute_dict(
+        "SELECT ts, price FROM (SELECT ts, price FROM market_ticks "
+        "WHERE symbol = %s ORDER BY ts DESC LIMIT %s) t ORDER BY ts ASC",
+        (symbol, int(limit)),
+    )
+    return [{"ts": r["ts"], "price": float(r["price"])} for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -1207,7 +1239,7 @@ async def deduct_cash(currency: str, amount: float) -> float | None:
 
 
 # ---------------------------------------------------------------------------
-# Trade records (HSBC 成交邮件交易记录)
+# Trade records (券商成交邮件交易记录：汇丰/致富)
 # ---------------------------------------------------------------------------
 
 async def trade_message_exists(message_id: str) -> bool:
@@ -1219,7 +1251,7 @@ async def trade_message_exists(message_id: str) -> bool:
 
 
 async def trade_no_exists(trade_no: str) -> bool:
-    """按 HSBC 交易编号判重（防同邮件多收/重复投递）。"""
+    """按券商交易编号判重（防同邮件多收/重复投递）。"""
     rows = await execute_dict(
         "SELECT id FROM trade_records WHERE trade_no = %s", (trade_no,)
     )
@@ -1333,3 +1365,192 @@ async def get_latest_portfolio_value() -> float | None:
     rows = await execute_dict(
         "SELECT total_value_usd FROM portfolio_ticks ORDER BY ts DESC LIMIT 1")
     return float(rows[0]["total_value_usd"]) if rows else None
+
+
+# ---------------------------------------------------------------------------
+# 提醒模块 CRUD（daily_bars 日K / alert_rules 规则 / alerts 历史）
+# ---------------------------------------------------------------------------
+
+def _json_field(value):
+    """JSON 列读取兼容：驱动返回 str 则解析，已解析的 dict 原样透传。@author yys"""
+    return json.loads(value) if isinstance(value, str) else value
+
+
+async def init_alert_tables():
+    """提醒模块三张表（幂等建表 + sys_config 种子键）。@author yys"""
+    await execute("""
+        CREATE TABLE IF NOT EXISTS daily_bars (
+          symbol varchar(20) NOT NULL,
+          date   date NOT NULL,
+          open   decimal(18,6) NOT NULL,
+          high   decimal(18,6) NOT NULL,
+          low    decimal(18,6) NOT NULL,
+          close  decimal(18,6) NOT NULL,
+          volume bigint DEFAULT 0,
+          UNIQUE KEY uk_sym_date (symbol, date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='长桥前复权日K(增量累积)'
+    """)
+    await execute("""
+        CREATE TABLE IF NOT EXISTS alert_rules (
+          symbol      varchar(20) NOT NULL PRIMARY KEY,
+          params      json NOT NULL COMMENT '策略包(四类规则配置)',
+          fired_state json NOT NULL COMMENT '判定状态(已触发档位/冷却到期)',
+          enabled     tinyint(1) DEFAULT 1,
+          updated_at  datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='提醒规则配置'
+    """)
+    await execute("""
+        CREATE TABLE IF NOT EXISTS alerts (
+          id           bigint AUTO_INCREMENT PRIMARY KEY,
+          symbol       varchar(20) NOT NULL,
+          rule         varchar(20) NOT NULL,
+          level        varchar(10) NOT NULL DEFAULT 'info',
+          title        varchar(120) NOT NULL,
+          body         json NOT NULL,
+          triggered_at datetime NOT NULL,
+          is_read      tinyint(1) DEFAULT 0,
+          KEY idx_triggered (triggered_at)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='提醒历史'
+    """)
+    await execute(
+        "INSERT IGNORE INTO sys_config (`key`, value, remark) VALUES "
+        "('ALERT_COOLDOWN_HOURS', '4', '同规则同方向提醒冷却小时数'), "
+        "('LP_PUSH_MODE', 'shadow', '长桥推送模式 shadow/live'), "
+        "('MAIL_ADDRESS', '', '提醒发件QQ邮箱'), "
+        "('MAIL_AUTH_CODE', '', 'QQ邮箱SMTP授权码')")
+
+
+async def save_daily_bars(symbol: str, rows: list) -> int:
+    """批量写入日K（INSERT IGNORE 幂等）。rows: [(date, open, high, low, close, volume)]。@author yys"""
+    if not rows:
+        return 0
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                "INSERT IGNORE INTO daily_bars (symbol, date, open, high, low, close, volume) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                [(symbol, d, _safe_decimal(o, 6), _safe_decimal(h, 6),
+                  _safe_decimal(l, 6), _safe_decimal(c, 6), int(v or 0))
+                 for d, o, h, l, c, v in rows])
+            return cur.rowcount
+
+
+async def replace_daily_bars(symbol: str, rows: list) -> int:
+    """整段重写（除权事件后覆盖旧复权数据；显式事务保证 DELETE+INSERT 原子）。@author yys"""
+    if not rows:
+        return 0
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await conn.begin()
+            try:
+                await cur.execute("DELETE FROM daily_bars WHERE symbol = %s", (symbol,))
+                await cur.executemany(
+                    "INSERT IGNORE INTO daily_bars (symbol, date, open, high, low, close, volume) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                    [(symbol, d, _safe_decimal(o, 6), _safe_decimal(h, 6),
+                      _safe_decimal(l, 6), _safe_decimal(c, 6), int(v or 0))
+                     for d, o, h, l, c, v in rows])
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+            return cur.rowcount
+
+
+async def get_daily_bars(symbol: str, limit: int | None = None) -> list[dict]:
+    """日K升序（旧→新）。@author yys"""
+    sql = ("SELECT date, open, high, low, close, volume FROM daily_bars "
+           "WHERE symbol = %s ORDER BY date")
+    if limit is not None and limit > 0:
+        sql += f" DESC LIMIT {int(limit)}"
+        rows = await execute_dict(sql, (symbol,))
+        return list(reversed(rows))
+    return await execute_dict(sql, (symbol,))
+
+
+async def get_daily_bars_max_date(symbol: str) -> date | None:
+    """库内最新日K日期（增量拉取起点）。@author yys"""
+    rows = await execute_dict(
+        "SELECT MAX(date) AS d FROM daily_bars WHERE symbol = %s", (symbol,))
+    return rows[0]["d"] if rows and rows[0].get("d") else None
+
+
+async def upsert_alert_rule(symbol: str, params: dict, fired_state: dict,
+                            enabled: int = 1) -> int:
+    """保存单票策略包与判定状态。@author yys"""
+    return await execute(
+        "INSERT INTO alert_rules (symbol, params, fired_state, enabled) VALUES (%s, %s, %s, %s) "
+        "ON DUPLICATE KEY UPDATE params = VALUES(params), "
+        "fired_state = VALUES(fired_state), enabled = VALUES(enabled)",
+        (symbol, json.dumps(params, ensure_ascii=False),
+         json.dumps(fired_state, ensure_ascii=False), enabled))
+
+
+async def update_alert_rule_params(symbol: str, params: dict, enabled: int = 1) -> int:
+    """仅更新策略参数与开关；首存自动建行（fired_state 列不在 UPDATE 列，保留旧值，
+    新行初始化 '{}'，消除与求值循环的丢更新竞态）。@author yys"""
+    return await execute(
+        "INSERT INTO alert_rules (symbol, params, fired_state, enabled) VALUES (%s, %s, '{}', %s) "
+        "ON DUPLICATE KEY UPDATE params = VALUES(params), enabled = VALUES(enabled)",
+        (symbol, json.dumps(params, ensure_ascii=False), enabled))
+
+
+async def get_alert_rule(symbol: str) -> dict | None:
+    """读单票规则（None=未配置，调用方用默认值）。@author yys"""
+    rows = await execute_dict(
+        "SELECT symbol, params, fired_state, enabled FROM alert_rules WHERE symbol = %s",
+        (symbol,))
+    if not rows:
+        return None
+    r = rows[0]
+    return {"symbol": r["symbol"], "params": _json_field(r["params"]),
+            "fired_state": _json_field(r["fired_state"]), "enabled": r["enabled"]}
+
+
+async def get_alert_rules() -> list[dict]:
+    """全部已配置规则。@author yys"""
+    rows = await execute_dict(
+        "SELECT symbol, params, fired_state, enabled FROM alert_rules ORDER BY symbol")
+    return [{"symbol": r["symbol"], "params": _json_field(r["params"]),
+             "fired_state": _json_field(r["fired_state"]), "enabled": r["enabled"]}
+            for r in rows]
+
+
+async def save_alert(event: dict) -> int:
+    """提醒落库，返回自增 id（INSERT 与 LAST_INSERT_ID 同连接，避免池跨连接取错会话值）。@author yys"""
+    now = event.get("triggered_at") or datetime.now()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # 同连接同 cursor：INSERT 与 LAST_INSERT_ID 会话一致
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO alerts (symbol, rule, level, title, body, triggered_at) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (event["symbol"], event["rule"], event.get("level", "info"),
+                 event["title"][:120], json.dumps(event.get("body", {}), ensure_ascii=False), now))
+            await cur.execute("SELECT LAST_INSERT_ID() AS id")
+            row = await cur.fetchone()
+            return int(row[0]) if row else 0
+
+
+async def get_alerts(unread_only: bool = False, limit: int = 50) -> list[dict]:
+    """提醒历史（新→旧）。@author yys"""
+    where = "WHERE is_read = 0 " if unread_only else ""
+    rows = await execute_dict(
+        f"SELECT id, symbol, rule, level, title, body, triggered_at, is_read "
+        f"FROM alerts {where}ORDER BY triggered_at DESC LIMIT {int(limit)}")
+    for r in rows:
+        r["body"] = _json_field(r["body"])
+    return rows
+
+
+async def mark_alert_read(alert_id: int) -> int:
+    """标记单条提醒已读。@author yys"""
+    return await execute("UPDATE alerts SET is_read = 1 WHERE id = %s", (alert_id,))
+
+
+async def mark_all_alerts_read() -> int:
+    """全部提醒标记已读。@author yys"""
+    return await execute("UPDATE alerts SET is_read = 1 WHERE is_read = 0")
