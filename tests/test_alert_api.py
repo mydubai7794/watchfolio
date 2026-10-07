@@ -642,3 +642,18 @@ def test_kline_range_truncate(monkeypatch):
     assert len(d2["bars"]) == 2 and d2["bars"][-1]["date"] == "2026-10-01"
     assert len(d2["rsi_series"]) == 2
     assert calls["n"] == 1          # 全程只查库一次（首次回填缓存）
+
+
+def test_rule_params_v3_new_keys_validation():
+    """v3 新键数值规格：band_pct 开区间 >0 上界 20；depth 含 0.3~0.9。@author yys"""
+    # 新键数值规格：band_pct 开区间 >0 上界 20；depth 含 0.3 下界上界 0.9
+    assert server._validate_rule_params(
+        {"ma200_zone": {"bias_low": -12.0, "band_pct": 3.0},
+         "fib_retrace": {"depth": 0.618}}) is None
+    assert "band_pct" in server._validate_rule_params({"ma200_zone": {"band_pct": 0}})
+    assert "band_pct" in server._validate_rule_params({"ma200_zone": {"band_pct": 25}})
+    assert "depth" in server._validate_rule_params({"fib_retrace": {"depth": 0.2}})
+    assert "depth" in server._validate_rule_params({"fib_retrace": {"depth": 0.95}})
+    # 新规则键已进白名单（_RULE_KEYS 从 DEFAULT_PARAMS 自动派生）
+    assert server._validate_rule_params({"ma200_zone": {}}) is None
+    assert server._validate_rule_params({"fib_retrace": {}}) is None

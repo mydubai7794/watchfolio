@@ -2090,6 +2090,8 @@ _NUMERIC_PARAM_SPECS: dict[str, tuple[float | None, float | None, bool]] = {
     "k": (0.0, None, True),                 # ATR 止损倍数 >0
     "rsi_low": (0.0, 100.0, False),         # 超卖阈值 0~100
     "bias_low": (None, None, False),        # 乖离阈值：数值即可，允许负
+    "band_pct": (0.0, 20.0, True),          # 年线贴近带宽 >0 且 ≤20（pct）
+    "depth": (0.3, 0.9, False),             # 斐波那契回撤阈值 0.3~0.9
 }
 
 
