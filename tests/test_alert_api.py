@@ -657,3 +657,39 @@ def test_rule_params_v3_new_keys_validation():
     # 新规则键已进白名单（_RULE_KEYS 从 DEFAULT_PARAMS 自动派生）
     assert server._validate_rule_params({"ma200_zone": {}}) is None
     assert server._validate_rule_params({"fib_retrace": {}}) is None
+
+
+def test_kline_overlays_day_and_truncation(monkeypatch):
+    """day 周期 overlays：MA50/MA200 序列（不足窗口 None 占位）+ fib 档位；
+    range 截尾时均线序列同步截、fib 横线保留；非 day 周期 overlays 为空。@author yys"""
+    import daily_bars as dbar
+    client = _client(monkeypatch)
+    bars = [{"date": date(2026, 9, d), "open": 10, "high": 11, "low": 9,
+             "close": 10.5, "volume": 5} for d in range(1, 11)]
+
+    async def fake_bars(sym, limit=None):
+        return bars
+
+    monkeypatch.setattr(server.db, "get_daily_bars", fake_bars)
+    monkeypatch.setattr(server.db, "get_alert_rule",
+                        lambda s: asyncio.sleep(0, result=None))
+    monkeypatch.setattr(server.db, "get_holdings",
+                        lambda enabled_only=True: asyncio.sleep(0, result=[]))
+    monkeypatch.setitem(dbar.INDICATORS, "QQQ",
+                        {"ma50": 10.4, "ma200": 10.0, "rsi14": 50.0, "stop_level": None,
+                         "hhv22": 11.0, "atr22": 0.2, "enough_history": True,
+                         "asof": "2026-09-10",
+                         "fib": {"high": 11.0, "low": 9.0, "depth": 0.4,
+                                 "levels": {"382": 10.24, "500": 10.0, "618": 9.76}}})
+    server._KLINE_CACHE.clear()          # 防前序用例同 key 缓存污染
+    d = client.get("/api/kline/QQQ?tf=day&range=1000").json()
+    assert len(d["overlays"]["ma50_series"]) == 10
+    assert d["overlays"]["ma50_series"][0] is None          # 10 根不足 50，None 占位
+    assert d["overlays"]["fib"]["levels"]["500"] == 10.0
+    assert d["overlays"]["fib"]["depth"] == 0.4
+    d4 = client.get("/api/kline/QQQ?tf=day&range=4").json()  # 走缓存截尾分支
+    assert len(d4["overlays"]["ma50_series"]) == 4
+    assert d4["overlays"]["fib"]["levels"]["500"] == 10.0    # fib 横线不随截尾切
+    server._KLINE_CACHE.clear()
+    dw = client.get("/api/kline/QQQ?tf=week&range=1000").json()
+    assert dw["overlays"] == {}                               # 非 day 周期为空 dict

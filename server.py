@@ -2255,8 +2255,19 @@ async def kline(symbol: str, request: Request, range: int = 120, tf: str = "day"
             if tf != "day":
                 bars = daily_bars.aggregate_bars(bars, tf)
             volume_mode = "volume"
+        overlays: dict = {}
+        if tf == "day":
+            closes = [float(b["close"]) for b in bars]
+            overlays = {
+                "ma50_series": _round_series(
+                    daily_bars.sma(closes, daily_bars.MA_FAST), 2),
+                "ma200_series": _round_series(
+                    daily_bars.sma(closes, daily_bars.MA_SLOW), 2),
+                "fib": (ind or {}).get("fib") or {},
+            }
         payload = {"ok": True, "symbol": symbol, "tf": tf, "bars": bars,
                    "volume_mode": volume_mode, "marks": marks,
+                   "overlays": overlays,
                    "indicators": {k: ind.get(k) for k in
                                   ("ma50", "ma200", "rsi14", "stop_level",
                                    "enough_history", "asof")} if ind else {}}
@@ -2273,6 +2284,10 @@ async def kline(symbol: str, request: Request, range: int = 120, tf: str = "day"
         out["rsi_series"] = p["rsi_series"][cut:]
         out["macd_series"] = {k: v[cut:] for k, v in p["macd_series"].items()}
         out["kdj_series"] = {k: v[cut:] for k, v in p["kdj_series"].items()}
+        ov = p.get("overlays") or {}
+        out["overlays"] = {**ov,
+                           "ma50_series": (ov.get("ma50_series") or [])[cut:],
+                           "ma200_series": (ov.get("ma200_series") or [])[cut:]}
         return out
     return p
 
