@@ -291,6 +291,15 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
   color: #fff; border-radius: 6px; padding: 8px 10px; font-size: 12px;
   line-height: 1.7; pointer-events: none; max-width: 240px; }
 .kline-tip b { color: #F3D19E; }
+/* ---- 市场估值：2×2 迷你卡（宏观指标日更） ---- */
+.macro-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.macro-cell { border: 1px solid #EBEEF5; border-radius: 8px; padding: 8px 10px; }
+.macro-head { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--txt2); }
+.macro-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex: none; }
+.macro-val { font-size: 20px; font-weight: 600; margin: 4px 0 2px; }
+.macro-asof { font-size: 11px; color: var(--txt3); }
+.macro-spark { width: 100%; height: 30px; display: block; }
+@media (max-width: 768px) { .macro-grid { grid-template-columns: 1fr; } }
 @media (max-width: 768px) {
   .alert-panel { right: 12px; width: calc(100vw - 24px); }
   .rule-params, .bt-result { margin-left: 0; }
@@ -364,6 +373,12 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
       <div class="skel" style="height:78px"></div>
       <div class="skel" style="height:78px"></div>
     </div>
+  </section>
+
+  <!-- 市场估值：宏观四指标（巴菲特/CAPE/利差/恐慌贪婪，日更纯展示） -->
+  <section class="card pad">
+    <div class="card-title">市场估值</div>
+    <div class="macro-grid" id="macroGrid"></div>
   </section>
 
   <!-- 资产走势：tab 胶囊组 + 信息条 + 无轴图表 -->
@@ -484,7 +499,7 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
   </div>
 </div>
 
-<!-- 策略弹层：单票六类规则开关/参数编辑 + 保存 + 回测 -->
+<!-- 策略弹层：单票八类规则开关/参数编辑 + 保存 + 回测 -->
 <div class="modal-mask" id="ruleMask">
   <div class="modal" style="width:640px">
     <h3 id="ruleTitle">策略设置</h3>
@@ -648,6 +663,50 @@ function renderMarket(d) {
     if (hasSpark) drawSpark(card.querySelector('canvas'), m.spark,
       (m.change_pct == null) || m.change_pct >= 0, tip, mktDecimals(m));
   });
+}
+
+// ===== 市场估值（宏观四指标，日更纯展示，不进 alerts）=====
+const MACRO_META = {
+  buffett: ['巴菲特指标', '总市值/GDP %', v => Math.round(v).toString()],
+  cape: ['席勒CAPE', '10年通胀调整PE', v => v.toFixed(1)],
+  yield_2s10s: ['美债2s10s利差', '倒挂=风险 pct', v => v.toFixed(2)],
+  fear_greed: ['恐慌贪婪指数', '低于25极度恐慌(机会)', v => Math.round(v).toString()],
+};
+const MACRO_COLORS = { cheap: '#00A870', neutral: '#909399',
+                       expensive: '#E5484D', risk: '#E5484D' };
+
+/** 拉取 /api/macro 并渲染（失败静默保留旧卡片）。@author yys */
+async function loadMacro() {
+  let d = null;
+  try { d = await (await fetch('/api/macro')).json(); } catch (e) { return; }
+  renderMacro(d);
+}
+
+function renderMacro(d) {
+  const box = document.getElementById('macroGrid');
+  if (!box) return;
+  box.innerHTML = '';
+  ((d && d.indicators) || []).forEach(m => {
+    const meta = MACRO_META[m.name];
+    if (!meta) return;
+    const st = (d.status || {})[m.name] || 'neutral';
+    const cell = document.createElement('div');
+    cell.className = 'macro-cell';
+    cell.innerHTML = `<div class="macro-head">
+        <span class="macro-dot" style="background:${MACRO_COLORS[st] || MACRO_COLORS.neutral}"></span>
+        <span>${esc(meta[0])}</span><span style="margin-left:auto">${esc(meta[1])}</span></div>
+      <div class="macro-val">${meta[2](+m.value)}</div>
+      <div class="macro-asof">截至 ${esc(m.asof || '--')}</div>
+      <canvas class="macro-spark"
+        ${(m.history && m.history.length >= 5) ? '' : 'style="display:none"'}></canvas>`;
+    const tip = document.createElement('div');
+    tip.className = 'mkt-tip';
+    cell.appendChild(tip);
+    box.appendChild(cell);
+    if (m.history && m.history.length >= 5)
+      drawSpark(cell.querySelector('canvas'), m.history, true, tip, 2);
+  });
+  if (!box.children.length) box.innerHTML = '<div class="macro-asof">暂无数据</div>';
 }
 // sparkline：2px 折线 + 15%→0 渐变填充 + 悬浮时间/价格浮层。
 // data 兼容两种格式：库内分时 [ts,price] 对（ts 为 UTC naive 字符串，浮层显示
@@ -905,6 +964,7 @@ function renderOverview(d) {
   document.getElementById('fxInfo').textContent = 'USD/HKD ' + fmt(d.fx_usdhkd, 4) + (d.fx_fallback ? '(默认)' : '');
 
   renderMarket(d);
+  loadMacro();
   renderPositions(d);
   drawAnalysis(d);
   // overview 到达即触发分时重绘：baseTotalCache 已更新，消除最长 30s 轮询空窗的口径偏差
@@ -1629,7 +1689,7 @@ setInterval(() => { if (isIntradayMode()) loadChart(); }, 30000);
 // POST /api/alerts/{id}/read、POST /api/alerts/read_all、
 // GET /api/kline/{symbol}、POST /api/backtest/run、SSE event: alert
 
-// 六类规则元信息（键与 server 白名单同源；默认参数前端兜底，接口 defaults 返回后覆盖）
+// 八类规则元信息（键与 server 白名单同源；默认参数前端兜底，接口 defaults 返回后覆盖）
 const RULE_META = {
   price_plan:    {name: '价格档位计划', desc: '成本价锚定档位%，跌=加仓/涨=止盈提示'},
   atr_stop:      {name: 'ATR 吊灯止损', desc: '价跌破 22日高 − k×ATR22 时提醒'},
@@ -1637,9 +1697,11 @@ const RULE_META = {
   extreme_guard: {name: 'RSI 极值防护', desc: 'rsi_low 超卖阈值 / bias_low 低位偏离%'},
   vix_take_profit: {name: 'VIX 低分位止盈', desc: '浮盈≥阈值% 且 VIX≤2年低分位才提醒（仅QQQ，双条件缺一不可）'},
   deep_dip:      {name: '深跌回投窗口', desc: '距 52 周高回撤≥阈值% 提示（仅QQQ）'},
+  ma200_zone:    {name: '年线区域提醒', desc: 'bias_low 深乖离% / band_pct 贴年线带宽%'},
+  fib_retrace:   {name: '斐波那契回撤', desc: '波段回撤深度≥depth（0.3~0.9）提示'},
 };
 const RULE_ORDER = ['price_plan', 'atr_stop', 'trend_filter', 'extreme_guard',
-                    'vix_take_profit', 'deep_dip'];
+                    'vix_take_profit', 'deep_dip', 'ma200_zone', 'fib_retrace'];
 // 与 alert_engine.DEFAULT_PARAMS 同构的前端兜底（正常时以后端 defaults 为准）
 const DEFAULT_RULE_PARAMS = {
   price_plan: {enabled: true, levels: [-5, -10, 8, 15]},
@@ -1648,11 +1710,15 @@ const DEFAULT_RULE_PARAMS = {
   extreme_guard: {enabled: true, rsi_low: 30, bias_low: -8},
   vix_take_profit: {enabled: true, profit_pct: 20, vix_pctile_max: 20},
   deep_dip: {enabled: true, dip_pct: 15},
+  ma200_zone: {enabled: true, bias_low: -10, band_pct: 2},
+  fib_retrace: {enabled: true, depth: 0.5},
 };
 // 提醒 body 字段中文映射（摘要展示；未收录键原样展示）
 const ALERT_BODY_LABELS = {pct: '档位', target: '档位价', cost: '成本', price: '现价',
   stop_level: '止损位', hhv22: '22日高', atr22: 'ATR22', rsi: 'RSI', bias: '偏离',
-  profit_pct: '浮盈', vix_pctile: 'VIX分位', drawdown_pct: '距52周高', week52_high: '52周高'};
+  profit_pct: '浮盈', vix_pctile: 'VIX分位', drawdown_pct: '距52周高', week52_high: '52周高',
+  bias_pct: '年线乖离', ma200: 'MA200', depth: '回撤深度', swing_high: '波段高',
+  swing_low: '波段低', fib_382: 'Fib38.2', fib_500: 'Fib50', fib_618: 'Fib61.8'};
 
 let alertPanelOpen = false;   // 提醒面板开合态（点击面板外收起用）
 let ruleModalSym = null;      // 策略弹层当前 symbol
@@ -1733,7 +1799,7 @@ document.addEventListener('click', e => {
   document.getElementById('alertPanel').classList.remove('open');
 });
 
-// ---- 策略弹层（单票六类规则：开关 + 参数 + 保存 + 回测）----
+// ---- 策略弹层（单票八类规则：开关 + 参数 + 保存 + 回测）----
 
 /**
  * 打开策略弹层：库内配置缺失的键用默认值合成可编辑草稿。
@@ -1769,7 +1835,7 @@ async function openRuleModal(sym) {
 }
 
 /**
- * 渲染六类规则编辑行（开关/参数输入/回测按钮/结果容器）。
+ * 渲染八类规则编辑行（开关/参数输入/回测按钮/结果容器）。
  * @author yys
  */
 function renderRuleRows() {
@@ -1796,9 +1862,18 @@ function renderRuleRows() {
     } else if (k === 'deep_dip') {
       paramsHtml = '<label>回撤阈值%<input id="rp_dip_pct" type="number" step="any" value="' +
         esc(String(g.dip_pct != null ? g.dip_pct : 15)) + '"></label>';
+    } else if (k === 'ma200_zone') {
+      paramsHtml = '<label>bias_low%<input id="rp_mz_bias_low" type="number" step="any" value="' +
+        esc(String(g.bias_low != null ? g.bias_low : -10)) + '"></label>' +
+        '<label>band_pct%<input id="rp_mz_band_pct" type="number" step="any" value="' +
+        esc(String(g.band_pct != null ? g.band_pct : 2)) + '"></label>';
+    } else if (k === 'fib_retrace') {
+      paramsHtml = '<label>回撤深度(0.3~0.9)<input id="rp_fr_depth" type="number" step="any" min="0.3" max="0.9" value="' +
+        esc(String(g.depth != null ? g.depth : 0.5)) + '"></label>';
     }
-    // V2 双规则（VIX止盈/深跌）不参与回测，隐藏按钮防点击后落「未知规则」死胡同
-    const noBacktest = (k === 'vix_take_profit' || k === 'deep_dip');
+    // V2 四规则（VIX止盈/深跌/年线区域/斐波那契）不参与回测，隐藏按钮防点击后落「未知规则」死胡同
+    const noBacktest = (k === 'vix_take_profit' || k === 'deep_dip' ||
+                        k === 'ma200_zone' || k === 'fib_retrace');
     return '<div class="rule-row"><div class="rule-name">' +
       '<input type="checkbox" id="re_' + k + '"' + (g.enabled === false ? '' : ' checked') + '>' +
       esc(m.name) + '<span class="rule-desc">' + esc(m.desc) + '</span>' +
@@ -1809,7 +1884,7 @@ function renderRuleRows() {
 }
 
 /**
- * 从弹层 DOM 收集编辑值 → 嵌套 params 包（只含六类规则键，形态与库内存储同构）。
+ * 从弹层 DOM 收集编辑值 → 嵌套 params 包（只含八类规则键，形态与库内存储同构）。
  * 非法输入（空/NaN/档位非法项）回落弹层打开时的初值快照 ruleBaseline（已保存值
  * 优先，无保存值才落前端默认），同时红框标记无效输入框并在提示行说明回落事实，
  * 避免后端白名单 400 且用户无感知参数被改。
@@ -1864,6 +1939,14 @@ function collectRuleParams() {
     deep_dip: {enabled: document.getElementById('re_deep_dip').checked,
                dip_pct: num('rp_dip_pct',
                  pick(base.deep_dip, 'dip_pct', DEFAULT_RULE_PARAMS.deep_dip.dip_pct))},
+    ma200_zone: {enabled: document.getElementById('re_ma200_zone').checked,
+                 bias_low: num('rp_mz_bias_low',
+                   pick(base.ma200_zone, 'bias_low', DEFAULT_RULE_PARAMS.ma200_zone.bias_low)),
+                 band_pct: num('rp_mz_band_pct',
+                   pick(base.ma200_zone, 'band_pct', DEFAULT_RULE_PARAMS.ma200_zone.band_pct))},
+    fib_retrace: {enabled: document.getElementById('re_fib_retrace').checked,
+                  depth: num('rp_fr_depth',
+                    pick(base.fib_retrace, 'depth', DEFAULT_RULE_PARAMS.fib_retrace.depth))},
   };
   ruleParamBad = badIds.length > 0;
   document.getElementById('ruleHint').textContent =
@@ -2059,6 +2142,8 @@ function klInfoLine(d) {
   const parts = items.filter(([, v]) => v != null)
     .map(([k, v, nd]) => k + ' ' + (+v).toFixed(nd));
   if (ind.enough_history === false) parts.push('历史不足：趋势/止损类规则未生效');
+  const fib = d && d.overlays && d.overlays.fib;
+  if (fib && fib.depth != null) parts.push('Fib回撤 ' + Math.round(fib.depth * 100) + '%');
   if (ind.asof) parts.push('截至 ' + ind.asof);
   return parts.length ? parts.join(' · ') : '--';
 }
@@ -2083,7 +2168,7 @@ function klRender() {
   const rsi = d.rsi_series.slice(start, end);
   const macd = d.macd_series || { dif: [], dea: [], hist: [] };
   const kdj = d.kdj_series || { k: [], d: [], j: [] };
-  klDrawMain(bars, d.marks || {});
+  klDrawMain(bars, d.marks || {}, (KL.tf === 'day' && d.overlays) || null);
   klDrawVol(bars, d.volume_mode === 'ticks');
   klDrawInd(bars,
     { rsi, dif: macd.dif.slice(start, end), dea: macd.dea.slice(start, end),
@@ -2100,9 +2185,10 @@ function klGeom(W, count) {
 
 /**
  * 主图：蜡烛（红涨绿跌）+ 右侧价格轴 + 底部日期 + 成本/档位/止损/22日高标注虚线
+ * + 日K均线叠加（MA50/MA200）+ 斐波那契回撤档位线（仅 day 周期有 overlays）
  * + 悬浮十字竖线（date：日/周/月=YYYY-MM-DD，分时=北京时间 MM-DD HH:MM）。@author yys
  */
-function klDrawMain(bars, marks) {
+function klDrawMain(bars, marks, ov) {
   const cv = document.getElementById('klMain');
   const ctx = setupCanvas(cv, 300);
   const W = cv._cssW, H = cv._cssH;
@@ -2116,6 +2202,12 @@ function klDrawMain(bars, marks) {
     [(v.pct > 0 ? '+' : '') + v.pct + '%', +v.price, v.pct > 0 ? DOWN_COLOR : TXT2]));
   if (marks.stop_level != null) lines.push(['止损', +marks.stop_level, UP_COLOR]);
   if (marks.hhv22 != null) lines.push(['22日高', +marks.hhv22, '#2A6CF0']);
+  const fib = ov && ov.fib;
+  if (fib && fib.levels) {
+    [['Fib38.2', fib.levels['382']], ['Fib50', fib.levels['500']],
+     ['Fib61.8', fib.levels['618']]]
+      .forEach(([nm, p]) => { if (p != null) lines.push([nm, +p, '#8E9ABF']); });
+  }
   lines.forEach(([, p]) => { lo = Math.min(lo, p); hi = Math.max(hi, p); });
   const span = (hi - lo) || 1;
   lo -= span * 0.04; hi += span * 0.04;
@@ -2139,6 +2231,26 @@ function klDrawMain(bars, marks) {
     const bw = Math.max(cw * 0.7, 1);
     ctx.fillRect(cx - bw / 2, top, bw, Math.max(bot - top, 1));
   });
+  // 均线叠加（仅日K有 overlays）：MA50 紫 / MA200 蓝，None 断段
+  if (ov) {
+    const maLine = (vals, color) => {
+      if (!vals || !vals.length) return;
+      ctx.strokeStyle = color; ctx.lineWidth = 1.2; ctx.lineJoin = 'round';
+      ctx.beginPath();
+      let started = false;
+      vals.forEach((v, i) => {
+        if (v == null) { started = false; return; }
+        const px = x(i), py = y(+v);
+        if (!started) { ctx.moveTo(px, py); started = true; } else ctx.lineTo(px, py);
+      });
+      ctx.stroke();
+    };
+    maLine(ov.ma50_series, '#9B59B6');
+    maLine(ov.ma200_series, '#2A6CF0');
+    ctx.font = F11; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+    ctx.fillStyle = '#9B59B6'; ctx.fillText('MA50', pad.l + 4, pad.t + 4);
+    ctx.fillStyle = '#2A6CF0'; ctx.fillText('MA200', pad.l + 44, pad.t + 4);
+  }
   // 底部日期标签（均匀 5 个）：日/周/月取 MM-DD；分时取 HH:MM（去日期段与空格）
   ctx.textAlign = 'center';
   for (let g = 0; g < 5; g++) {
