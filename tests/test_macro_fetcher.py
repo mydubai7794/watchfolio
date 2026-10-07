@@ -42,8 +42,10 @@ def test_source_urls_and_anti_bot_headers():
 
 
 def test_parse_cnn_fg():
-    t = '{"fear_greed":{"score":38.5,"rating":"Fear","previous":40}}'
+    # CNN 真实顶层键为 fear_and_greed（曾误写 fear_greed 少 _and 导致线上永远 miss）
+    t = '{"fear_and_greed":{"score":38.5,"rating":"Fear","previous":40}}'
     assert mf.parse_cnn_fg(t) == (38.5, "Fear")
+    assert mf.parse_cnn_fg('{"fear_greed":{"score":1}}') is None
     assert mf.parse_cnn_fg("{}") is None
     assert mf.parse_cnn_fg("not json") is None
 
