@@ -268,6 +268,7 @@ def test_compute_indicators_fib_retracement():
     assert fib["depth"] == pytest.approx(0.5)
     assert fib["levels"]["500"] == pytest.approx(15.0)
     assert fib["levels"]["382"] == pytest.approx(21.0 - 0.382 * 12.0)
+    assert fib["levels"]["618"] == pytest.approx(21.0 - 0.618 * 12.0)
 
 
 def test_compute_indicators_fib_none_when_downtrend():
@@ -275,6 +276,22 @@ def test_compute_indicators_fib_none_when_downtrend():
     closes = [20.0] * 105 + [10.0] * 105
     snap = dbar.compute_indicators(_bars(closes))
     assert snap["fib"] is None
+
+
+def test_compute_indicators_fib_none_when_flat():
+    # 全平序列（H==L）：平价段无回撤波段定义，fib 必须为 None
+    bars = [{"date": f"2026-01-{i+1:02d}", "open": 10.0, "high": 10.0,
+             "low": 10.0, "close": 10.0, "volume": 0} for i in range(5)]
+    snap = dbar.compute_indicators(bars)
+    assert snap["fib"] is None
+
+
+def test_compute_indicators_fib_short_window_uses_available_history():
+    # 60 根 < FIB_WINDOW(252)：短窗口退化为全部可得历史，先低后高成立则 fib 照常计算
+    # （与 week52_high 的 None 口径不同，下游规则以 enough_history 门控）
+    closes = [10.0] * 30 + [20.0] * 30
+    snap = dbar.compute_indicators(_bars(closes))
+    assert snap["fib"] is not None
 
 
 def test_compute_indicators_ma200_bias():

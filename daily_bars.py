@@ -21,7 +21,8 @@ WEEK52_WINDOW = 252      # 52 周交易日（deep_dip 回撤基准窗口）
 FIB_WINDOW = 252         # 斐波那契回撤波段窗口（与 WEEK52_WINDOW 同源口径、独立常量）
 VIX_PCTL_WINDOW = 504    # 2 年交易日（VIX 低分位止盈过滤窗口）
 
-# 指标缓存：{symbol: {atr22, ma50, ma200, rsi14, hhv22, stop_level, enough_history, asof}}
+# 指标缓存：{symbol: {atr22, ma50, ma200, ma200_bias, rsi14, hhv22, stop_level,
+#                     week52_high, fib, last_close, enough_history, asof}}
 INDICATORS: dict[str, dict] = {}
 
 # VIX 2 年分位缓存（refresh_symbol("VIX") 成功后重算；报告 V2 止盈过滤条件）
@@ -244,7 +245,9 @@ def compute_indicators(bars: list[dict], k: float = DEFAULT_ATR_K) -> dict:
     week52 = max(closes[-WEEK52_WINDOW:]) \
         if len(closes) >= WEEK52_WINDOW else None
     # 斐波那契回撤：FIB_WINDOW 窗口内先低后高的上涨波段才定义回撤；
-    # L 晚于 H（下跌延续段）或 H==L 时 fib=None，下游规则以 None 静默禁用
+    # L 晚于 H（下跌延续段）或 H==L 时 fib=None，下游规则以 None 静默禁用；
+    # 窗口不足 FIB_WINDOW 时用全部可得历史（与 week52_high 的 None 口径不同，
+    # 下游规则以 enough_history 门控）
     fib = None
     win_h = highs[-FIB_WINDOW:]
     win_l = lows[-FIB_WINDOW:]
@@ -269,7 +272,7 @@ def compute_indicators(bars: list[dict], k: float = DEFAULT_ATR_K) -> dict:
         "week52_high": week52,
         "stop_level": (hh_v - k * atr_v) if (hh_v is not None and atr_v is not None) else None,
         "last_close": closes[i],
-        "ma200_bias": (closes[i] - ma200[i]) / ma200[i] * 100.0 if ma200[i] else None,
+        "ma200_bias": (closes[i] - ma200[i]) / ma200[i] * 100.0 if ma200[i] is not None else None,
         "fib": fib,
     }
 
