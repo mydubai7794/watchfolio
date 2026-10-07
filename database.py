@@ -459,6 +459,9 @@ async def init_tables():
     # ---- 提醒模块三表（长桥日K / 规则 / 提醒历史，幂等）----
     await init_alert_tables()
 
+    # ---- 宏观估值指标（巴菲特/CAPE/利差/恐慌贪婪，日频幂等）----
+    await init_macro_tables()
+
     logger.info("数据库表初始化完成")
 
 # ---------------------------------------------------------------------------
@@ -1420,6 +1423,25 @@ async def init_alert_tables():
         "('MAIL_AUTH_CODE', '', 'QQ邮箱SMTP授权码')")
 
 
+async def init_macro_tables():
+    """宏观估值指标表（幂等）。@author yys"""
+    pool = await get_pool()
+    await execute(
+        """
+        CREATE TABLE IF NOT EXISTS macro_indicators (
+            id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+            name        VARCHAR(32) NOT NULL COMMENT 'buffett/cape/yield_2s10s/fear_greed',
+            asof        DATE NOT NULL,
+            value       DOUBLE NOT NULL,
+            extra       TEXT COMMENT 'JSON 扩展（rating/source/分子分母等）',
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_name_asof (name, asof)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='宏观估值指标日频快照'
+        """,
+        _pool=pool,
+    )
+
+
 async def save_daily_bars(symbol: str, rows: list) -> int:
     """批量写入日K（INSERT IGNORE 幂等）。rows: [(date, open, high, low, close, volume)]。@author yys"""
     if not rows:
@@ -1554,3 +1576,33 @@ async def mark_alert_read(alert_id: int) -> int:
 async def mark_all_alerts_read() -> int:
     """全部提醒标记已读。@author yys"""
     return await execute("UPDATE alerts SET is_read = 1 WHERE is_read = 0")
+
+
+# ---------------------------------------------------------------------------
+# 宏观估值指标 CRUD（巴菲特/CAPE/美债2s10s利差/恐慌贪婪，日频底座）
+# ---------------------------------------------------------------------------
+
+async def upsert_macro_indicator(name: str, asof: str, value: float,
+                                 extra: dict | None = None) -> int:
+    """写入单条宏观指标（name+asof 幂等）。@author yys"""
+    return await execute(
+        "INSERT INTO macro_indicators (name, asof, value, extra) VALUES (%s, %s, %s, %s) "
+        "ON DUPLICATE KEY UPDATE value = VALUES(value), extra = VALUES(extra)",
+        (name, asof, value,
+         json.dumps(extra, ensure_ascii=False) if extra else None))
+
+
+async def get_macro_latest() -> list[dict]:
+    """四项宏观指标各自最新一行。@author yys"""
+    return await execute_dict(
+        "SELECT m.name, m.asof, m.value, m.extra FROM macro_indicators m "
+        "JOIN (SELECT name, MAX(asof) mx FROM macro_indicators GROUP BY name) t "
+        "ON m.name = t.name AND m.asof = t.mx")
+
+
+async def get_macro_history(name: str, days: int = 365) -> list[dict]:
+    """单指标历史（升序，供看板 spark）。@author yys"""
+    return await execute_dict(
+        "SELECT asof, value FROM macro_indicators WHERE name = %s "
+        "AND asof >= DATE_SUB(CURDATE(), INTERVAL %s DAY) ORDER BY asof",
+        (name, days))

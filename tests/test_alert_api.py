@@ -693,3 +693,34 @@ def test_kline_overlays_day_and_truncation(monkeypatch):
     server._KLINE_CACHE.clear()
     dw = client.get("/api/kline/QQQ?tf=week&range=1000").json()
     assert dw["overlays"] == {}                               # 非 day 周期为空 dict
+
+
+# ---------------------------------------------------------------------------
+# 宏观估值指标（macro_indicators 日频底座，市场底部信号 Task 5）
+# ---------------------------------------------------------------------------
+
+def test_macro_indicator_crud(monkeypatch):
+    """写入走 ON DUPLICATE KEY 幂等 upsert；最新行 join MAX(asof) 子查询；
+    历史查询按 name 过滤升序。@author yys"""
+    import database as db
+    captured = []
+
+    async def fake_execute(sql, args=None, _pool=None):
+        captured.append((sql, args))
+
+    async def fake_exec_dict(sql, args=None, _pool=None):
+        if "MAX(asof)" in sql:
+            return [{"name": "cape", "asof": date(2026, 10, 6),
+                     "value": 28.1, "extra": None}]
+        return [{"asof": date(2026, 10, 6), "value": 28.1}]
+
+    monkeypatch.setattr(db, "execute", fake_execute)
+    monkeypatch.setattr(db, "execute_dict", fake_exec_dict)
+    asyncio.run(db.upsert_macro_indicator("cape", "2026-10-06", 28.1, {"rating": "x"}))
+    sql, args = captured[0]
+    assert "ON DUPLICATE KEY" in sql
+    assert args[0] == "cape" and args[1] == "2026-10-06"
+    latest = asyncio.run(db.get_macro_latest())
+    assert latest[0]["name"] == "cape" and latest[0]["value"] == 28.1
+    hist = asyncio.run(db.get_macro_history("cape", days=365))
+    assert hist[0]["value"] == 28.1
