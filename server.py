@@ -28,6 +28,7 @@ import email_trader as et
 import fetcher
 import ledger
 import longport_push as lpp
+import macro_fetcher
 import mailer
 import portfolio_fetcher as pf
 import quotes_hub as qh
@@ -184,6 +185,10 @@ async def lifespan(app: FastAPI):
     global ledger_fx_task
     ledger_fx_task = asyncio.create_task(_ledger_fx_loop())
 
+    # 宏观估值指标日更（22:40，纯看板展示不进 alerts）
+    global macro_task
+    macro_task = asyncio.create_task(macro_fetcher.macro_daily_loop())
+
     # 提醒模块：邮件队列 worker + 日K每日刷新（07:00 拉取+指标重算；
     # 提醒三表建表已并入 db.init_tables 内部，无需单独初始化）
     global alert_mail_task, daily_bars_task
@@ -216,6 +221,8 @@ async def lifespan(app: FastAPI):
         email_task.cancel()
     if ledger_fx_task:
         ledger_fx_task.cancel()
+    if macro_task:
+        macro_task.cancel()
     if candidate_refresh_task:
         candidate_refresh_task.cancel()
     if daily_task:
@@ -317,6 +324,7 @@ daily_bars_task: Optional[asyncio.Task] = None   # 日K每日刷新循环（拉�
 lp_push_task: Optional[asyncio.Task] = None       # 长桥推送守护循环（shadow/live）
 quotes_flush_task: Optional[asyncio.Task] = None  # 内存真相源攒批落库循环
 sse_quote_task: Optional[asyncio.Task] = None     # SSE quote 快照节流广播循环
+macro_task: Optional[asyncio.Task] = None         # 宏观估值指标日更循环
 
 
 # ---------------------------------------------------------------------------
@@ -2194,6 +2202,46 @@ async def indicators(symbol: str, request: Request):
     bars = await db.get_daily_bars(symbol)
     trend = alert_engine.eval_trend(bars, alert_engine._merged_params(rule))
     return {"ok": True, "symbol": symbol, "indicators": ind, "trend": trend}
+
+
+# 宏观估值四指标状态判定规则：返回 cheap/neutral/expensive/risk 四态，
+# 阈值与 macro_fetcher 抓取口径一一对应（buffett=巴菲特指数百分位、cape=席勒市盈率、
+# yield_2s10s=美债 2s10s 利差、fear_greed=恐惧贪婪指数）
+_MACRO_STATUS_RULES = {
+    "buffett": lambda v: "cheap" if v < 80 else ("neutral" if v <= 120 else "expensive"),
+    "cape": lambda v: "cheap" if v < 15 else ("neutral" if v <= 25 else "expensive"),
+    "yield_2s10s": lambda v: "risk" if v < 0 else ("neutral" if v <= 1 else "cheap"),
+    "fear_greed": lambda v: "cheap" if v < 25 else ("neutral" if v <= 55 else "expensive"),
+}
+
+
+@app.get("/api/macro")
+async def macro_view(request: Request):
+    """宏观估值四指标：最新值 + 近一年历史 + 状态判定（纯看板展示，
+    不进 alerts 铃声流）。@author yys"""
+    deny = await _auth_or_401(request)
+    if deny:
+        return deny
+    latest = {r["name"]: r for r in await db.get_macro_latest()}
+    indicators = []
+    status = {}
+    for name in ("buffett", "cape", "yield_2s10s", "fear_greed"):
+        row = latest.get(name)
+        if not row:
+            continue
+        try:
+            extra = json.loads(row.get("extra")) if row.get("extra") else {}
+        except Exception:
+            extra = {}
+        hist = await db.get_macro_history(name, days=365)
+        indicators.append({
+            "name": name, "value": float(row["value"]),
+            "asof": str(row["asof"]), "extra": extra,
+            "history": [[str(h["asof"]), float(h["value"])] for h in hist],
+        })
+        rule = _MACRO_STATUS_RULES.get(name)
+        status[name] = rule(float(row["value"])) if rule else "neutral"
+    return {"ok": True, "indicators": indicators, "status": status}
 
 
 _KLINE_CACHE: dict[str, tuple[float, dict]] = {}    # (symbol, tf) -> (monotonic, 全量 payload)

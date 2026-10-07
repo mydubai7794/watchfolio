@@ -724,3 +724,27 @@ def test_macro_indicator_crud(monkeypatch):
     assert latest[0]["name"] == "cape" and latest[0]["value"] == 28.1
     hist = asyncio.run(db.get_macro_history("cape", days=365))
     assert hist[0]["value"] == 28.1
+
+
+def test_macro_endpoint(monkeypatch):
+    """/api/macro：最新值+近一年历史+状态判定；extra JSON 串解析为对象。@author yys"""
+    client = _client(monkeypatch)
+
+    async def fake_latest():
+        return [{"name": "cape", "asof": date(2026, 10, 6), "value": 28.1,
+                 "extra": None},
+                {"name": "fear_greed", "asof": date(2026, 10, 7), "value": 22.0,
+                 "extra": json.dumps({"source": "cnn"})}]
+
+    async def fake_hist(name, days=365):
+        return [{"asof": date(2026, 10, 6), "value": 28.1},
+                {"asof": date(2026, 10, 7), "value": 28.3}]
+
+    monkeypatch.setattr(server.db, "get_macro_latest", fake_latest)
+    monkeypatch.setattr(server.db, "get_macro_history", fake_hist)
+    d = client.get("/api/macro").json()
+    assert [i["name"] for i in d["indicators"]] == ["cape", "fear_greed"]
+    assert d["status"]["cape"] == "expensive"
+    assert d["status"]["fear_greed"] == "cheap"
+    assert len(d["indicators"][0]["history"]) == 2
+    assert d["indicators"][1]["extra"] == {"source": "cnn"}
