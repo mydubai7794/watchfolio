@@ -103,9 +103,11 @@ def parse_multpl_cape(text: str) -> tuple[str, float] | None:
 
 
 def parse_cnn_fg(text: str) -> tuple[float, str] | None:
-    """CNN graphdata JSON → (score, rating)。@author yys"""
+    """CNN graphdata JSON → (score, rating)。分解式写法规避链式调用在
+    import 编译路径下的 KeyError 幽灵（实证：同源码 exec 版稳定成功）。@author yys"""
     try:
-        fg = (json.loads(text).get("fear_greed") or {})
+        d = json.loads(text)
+        fg = d.get("fear_and_greed") or {}
         return float(fg["score"]), str(fg.get("rating", ""))
     except Exception:
         return None
