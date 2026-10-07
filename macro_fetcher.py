@@ -7,6 +7,7 @@
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 
 import httpx
@@ -16,13 +17,20 @@ import database as db
 logger = logging.getLogger("qdii.macro")
 
 FRED_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id={sid}"
-MULTPL_CAPE_URL = "https://www.multpl.com/shiller-pe/table-json"
+MULTPL_CAPE_URL = "https://www.multpl.com/shiller-pe/table/by-year"
 CNN_FG_URL = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
-UA_HEADERS = {
+# FRED 实测歧视「伪造浏览器 UA 缺配套指纹头」的请求（Chrome UA 挂起 ReadTimeout、
+# 默认 python-httpx UA 直连 200），故 FRED 不配浏览器头、用默认 UA
+FRED_HEADERS: dict = {}
+BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36",
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/126.0.0.0 Safari/537.36",
     "Accept": "application/json,text/csv,text/html,*/*",
 }
+# CNN 短 UA 会得到 200+teapot 反爬文本，需完整 UA 串 + Referer 才返回真 JSON
+CNN_HEADERS = {**BROWSER_HEADERS,
+               "Referer": "https://edition.cnn.com/markets/fear-and-greed"}
 
 
 async def _proxy_candidates() -> list[str | None]:
@@ -35,20 +43,20 @@ async def _proxy_candidates() -> list[str | None]:
     return [None] + urls
 
 
-async def _get_text(url: str) -> str | None:
-    """直连→代理容错取响应文本；全失败返回 None。@author yys"""
+async def _get_text(url: str, headers: dict | None = None) -> str | None:
+    """直连→代理容错取响应文本（headers=None 用 httpx 默认 UA）；全失败返回 None。@author yys"""
     last_err = ""
     for proxy in await _proxy_candidates():
         try:
             async with httpx.AsyncClient(timeout=15, proxy=proxy,
                                          follow_redirects=True,
-                                         headers=UA_HEADERS) as client:
+                                         headers=headers or {}) as client:
                 resp = await client.get(url)
                 if resp.status_code == 200 and resp.text:
                     return resp.text
                 last_err = f"HTTP {resp.status_code}"
         except Exception as e:
-            last_err = str(e)
+            last_err = repr(e)
     logger.warning("macro 抓取失败 %s: %s", url, last_err)
     return None
 
@@ -71,13 +79,19 @@ def parse_fred_csv(text: str) -> tuple[str, float] | None:
 
 
 def parse_multpl_cape(text: str) -> tuple[str, float] | None:
-    """multpl CAPE JSON（[{date,value},...] 最近在前）→ 首条。@author yys"""
-    try:
-        arr = json.loads(text)
-        item = arr[0]
-        return str(item["date"])[:10], float(item["value"])
-    except Exception:
-        return None
+    """multpl by-year 表格 HTML → (最新日期, 值)；首数据行即最新，值列含 &#x2002; 实体。@author yys"""
+    for row in re.findall(r"<tr[^>]*>(.*?)</tr>", text, re.S):
+        cells = [re.sub(r"<[^>]+>|&#x?[0-9a-fA-F]+;|\s+", "", c)
+                 for c in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
+        if len(cells) != 2:
+            continue
+        d, v = cells
+        try:
+            asof = datetime.strptime(d, "%b%d,%Y").strftime("%Y-%m-%d")
+            return asof, float(v)
+        except ValueError:
+            continue
+    return None
 
 
 def parse_cnn_fg(text: str) -> tuple[float, str] | None:
@@ -101,8 +115,8 @@ async def fetch_buffett() -> dict | None:
 
 
 async def fetch_cape() -> dict | None:
-    """席勒 CAPE（multpl 主源）。@author yys"""
-    got = parse_multpl_cape(await _get_text(MULTPL_CAPE_URL) or "")
+    """席勒 CAPE（multpl 主源，by-year HTML 表格）。@author yys"""
+    got = parse_multpl_cape(await _get_text(MULTPL_CAPE_URL, headers=BROWSER_HEADERS) or "")
     if not got:
         return None
     return {"name": "cape", "asof": got[0], "value": round(got[1], 2), "extra": {}}
@@ -122,7 +136,7 @@ async def fetch_yield_spread() -> dict | None:
 async def fetch_fear_greed() -> dict | None:
     """恐慌贪婪：CNN 主源；失败回退 VIX 2 年分位合成（extra.source 标注）。@author yys"""
     asof = datetime.now().strftime("%Y-%m-%d")
-    got = parse_cnn_fg(await _get_text(CNN_FG_URL) or "")
+    got = parse_cnn_fg(await _get_text(CNN_FG_URL, headers=CNN_HEADERS) or "")
     if got:
         return {"name": "fear_greed", "asof": asof, "value": round(got[0], 1),
                 "extra": {"rating": got[1], "source": "cnn"}}

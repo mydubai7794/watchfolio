@@ -13,11 +13,28 @@ def test_parse_fred_csv_header_only():
     assert mf.parse_fred_csv("DATE,WILL5000PRFC\n") is None
 
 
-def test_parse_multpl_cape():
-    t = '[{"date":"2026-10-06","value":"28.14"},{"date":"2026-09-29","value":"27.9"}]'
-    assert mf.parse_multpl_cape(t) == ("2026-10-06", 28.14)
-    assert mf.parse_multpl_cape("[]") is None
+def test_parse_multpl_cape_by_year_html():
+    # 真实端点 /shiller-pe/table/by-year 首数据行即最新（值列含 &#x2002; 实体）
+    t = ('<table><tr><th>Date</th><th>Value</th></tr>'
+         '<tr><td>Oct 6, 2026</td><td>&#x2002;\n41.90</td></tr>'
+         '<tr><td>Jan 1, 2026</td><td>&#x2002;\n39.65</td></tr></table>')
+    assert mf.parse_multpl_cape(t) == ("2026-10-06", 41.9)
+    # 年度行兜底（表首缺日线时）
+    t2 = ('<table><tr><th>Date</th><th>Value</th></tr>'
+          '<tr><td>Jan 1, 2026</td><td>&#x2002;\n39.65</td></tr></table>')
+    assert mf.parse_multpl_cape(t2) == ("2026-01-01", 39.65)
+    assert mf.parse_multpl_cape("<table><tr><td>x</td></tr></table>") is None
     assert mf.parse_multpl_cape("<html>oops") is None
+
+
+def test_source_urls_and_anti_bot_headers():
+    # multpl 真实端点是 by-year HTML 表格（table-json 是 404 臆造端点）
+    assert mf.MULTPL_CAPE_URL == "https://www.multpl.com/shiller-pe/table/by-year"
+    # CNN 需完整浏览器 UA + Referer（短 UA 得 200 但 body 是 teapot 反爬文本）
+    assert mf.CNN_HEADERS["Referer"].startswith("https://edition.cnn.com/")
+    assert "Chrome/" in mf.CNN_HEADERS["User-Agent"] and "Safari" in mf.CNN_HEADERS["User-Agent"]
+    # FRED 歧视伪造浏览器 UA（实测 Chrome UA 挂起超时、默认 UA 200），不配浏览器头
+    assert "User-Agent" not in mf.FRED_HEADERS
 
 
 def test_parse_cnn_fg():
