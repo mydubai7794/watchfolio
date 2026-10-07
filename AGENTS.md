@@ -24,7 +24,8 @@
 
 | 文件 | 职责 |
 |------|------|
-| server.py | FastAPI + 全部后台循环（portfolio/market/monitor/candidate/email/h24-probe/ledger-fx） |
+| server.py | FastAPI + 全部后台循环（portfolio/market/monitor/candidate/email/h24-probe/ledger-fx/macro） |
+| macro_fetcher.py | 宏观四指标日更抓取解析（巴菲特/席勒CAPE/2s10s利差/恐慌贪婪，直连优先代理容错） |
 | portfolio_fetcher.py | 持仓侧全部数据源抓取与解析（腾讯/新浪/Yahoo/FT/twelvedata/24h数据源） |
 | ledger.py | 记账报表纯计算（点差/通道/盈亏恒等式 build_report + ECB 解析） |
 | ledger_seed.py | v3 盘点 68 笔种子事件（幂等 upsert CLI，仅首次/修数跑） |
@@ -49,6 +50,9 @@
 | HSBC/致富邮件 | 成交记录（自动应用持仓/现金，致富同发件人营销邮件靠解析门槛挡） | IMAP 直连 | 30min 双源同轮 |
 | 众安银行邮件 | 换汇/转出/派息/入金通知 | IMAP 直连 | 按需（记账采样辅助，无自动轮询） |
 | ECB frankfurter.dev | 记账汇率日线（CNY/HKD/USD） | 直连 | 每日 22:35（库空回填一次区间） |
+| FRED | 宏观日更：巴菲特指标+美债2s10s利差（CSV API） | 直连（失败走前2代理） | 每日 22:40 macro 循环 |
+| multpl | 宏观日更：席勒CAPE | 直连（失败走前2代理） | 同上 |
+| CNN | 宏观日更：恐慌贪婪指数（失败回退VIX分位） | 直连（失败走前2代理） | 同上 |
 
 ## 关键口径契约（改动前必读）
 
@@ -121,7 +125,9 @@ ORDER BY created_at DESC LIMIT 1`。
 ## 测试
 
 基线：`python3 -m pytest tests/test_portfolio.py tests/test_decision_model.py
-tests/test_server_auth.py tests/test_email_trader.py tests/test_longport.py`（当前 238 passed）。
+tests/test_server_auth.py tests/test_email_trader.py tests/test_longport.py
+tests/test_alert_engine.py tests/test_alert_api.py tests/test_daily_bars.py
+tests/test_longport_push.py tests/test_macro_fetcher.py`（当前 400 passed）。
 tests/test_scorer.py 是存量坏（scorer.normalize 已删），不计入基线。
 pytest 本地跑可以（不起服务）；**服务只能线上起一份**。
 
