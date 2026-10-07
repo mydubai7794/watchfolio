@@ -682,6 +682,7 @@ async function loadMacro() {
   renderMacro(d);
 }
 
+/** 渲染宏观四指标迷你卡（状态点色 + 主值 + 截至 + 历史走势）。@author yys */
 function renderMacro(d) {
   const box = document.getElementById('macroGrid');
   if (!box) return;
@@ -695,7 +696,7 @@ function renderMacro(d) {
     cell.innerHTML = `<div class="macro-head">
         <span class="macro-dot" style="background:${MACRO_COLORS[st] || MACRO_COLORS.neutral}"></span>
         <span>${esc(meta[0])}</span><span style="margin-left:auto">${esc(meta[1])}</span></div>
-      <div class="macro-val">${meta[2](+m.value)}</div>
+      <div class="macro-val">${m.value == null ? '--' : meta[2](+m.value)}</div>
       <div class="macro-asof">截至 ${esc(m.asof || '--')}</div>
       <canvas class="macro-spark"
         ${(m.history && m.history.length >= 5) ? '' : 'style="display:none"'}></canvas>`;
@@ -2168,7 +2169,12 @@ function klRender() {
   const rsi = d.rsi_series.slice(start, end);
   const macd = d.macd_series || { dif: [], dea: [], hist: [] };
   const kdj = d.kdj_series || { k: [], d: [], j: [] };
-  klDrawMain(bars, d.marks || {}, (KL.tf === 'day' && d.overlays) || null);
+  klDrawMain(bars, d.marks || {}, (() => {
+    if (KL.tf !== 'day' || !d.overlays) return null;
+    return {ma50_series: (d.overlays.ma50_series || []).slice(start, end),
+            ma200_series: (d.overlays.ma200_series || []).slice(start, end),
+            fib: d.overlays.fib || {}};
+  })());
   klDrawVol(bars, d.volume_mode === 'ticks');
   klDrawInd(bars,
     { rsi, dif: macd.dif.slice(start, end), dea: macd.dea.slice(start, end),
