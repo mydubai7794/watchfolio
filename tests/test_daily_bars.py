@@ -251,3 +251,39 @@ def test_vix_seed_parse_csv(tmp_path):
     # 排序升序 + open/high/low=close 填充 + volume=0
     assert rows == [("2016-10-03", 13.57, 13.57, 13.57, 13.57, 0),
                     ("2026-10-02", 15.31, 15.31, 15.31, 15.31, 0)]
+
+
+# ---------------- 市场底部信号底座：ma200_bias / fib 回撤 ----------------
+
+def test_compute_indicators_fib_retracement():
+    # 先涨后跌：低点段 close=10 → 高点段 close=20 → 末日回撤到 15；
+    # high=close+1 / low=close-1（_bars 默认）→ H=21, L=9, depth=(21-15)/12=0.5
+    closes = [10.0] * 105 + [20.0] * 105
+    closes[-1] = 15.0
+    snap = dbar.compute_indicators(_bars(closes))
+    fib = snap["fib"]
+    assert fib is not None
+    assert fib["high"] == pytest.approx(21.0)
+    assert fib["low"] == pytest.approx(9.0)
+    assert fib["depth"] == pytest.approx(0.5)
+    assert fib["levels"]["500"] == pytest.approx(15.0)
+    assert fib["levels"]["382"] == pytest.approx(21.0 - 0.382 * 12.0)
+
+
+def test_compute_indicators_fib_none_when_downtrend():
+    # 先高后低（下跌延续段，L 晚于 H）：fib 必须为 None
+    closes = [20.0] * 105 + [10.0] * 105
+    snap = dbar.compute_indicators(_bars(closes))
+    assert snap["fib"] is None
+
+
+def test_compute_indicators_ma200_bias():
+    bars = _bars([10.0 + 0.1 * i for i in range(210)])
+    snap = dbar.compute_indicators(bars)
+    expected = (snap["last_close"] - snap["ma200"]) / snap["ma200"] * 100.0
+    assert snap["ma200_bias"] == pytest.approx(expected)
+
+
+def test_compute_indicators_ma200_bias_none_when_short():
+    snap = dbar.compute_indicators(_bars([1.0] * 60))
+    assert snap["ma200"] is None and snap["ma200_bias"] is None
