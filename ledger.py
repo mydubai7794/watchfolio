@@ -156,8 +156,18 @@ def build_report(events: list[dict], *, total_assets_usd: float | None,
 
 # 现金流事件 → 份额调整方向（金额一律取 usd_equivalent）：
 # fx 为组合内部币种结构变化（inflow 已是换汇后到账值）、reward 为无本金
-# 收益（推高净值）、realized/balance 为备忘对账类——均不调份额
-NAV_CF_SIGNS = {"inflow": 1.0, "transfer": -1.0, "expense": -1.0, "fee": -1.0}
+# 收益（推高净值）、realized/balance 为备忘对账类——均不调份额；
+# transfer 仅计 account=external（转出组合，与 build_report 口径一致），
+# 账户间内部划转即使误填 usd_equivalent 也不调份额（防 NAV 虚增）
+NAV_CF_SIGNS = {"inflow": 1.0, "expense": -1.0, "fee": -1.0}
+
+
+def _nav_cf_sign(e: dict) -> float | None:
+    """单事件的现金流方向：非现金流类型/内部划转 → None（不调份额）。"""
+    etype = e.get("event_type") or ""
+    if etype == "transfer":
+        return -1.0 if e.get("account") == "external" else None
+    return NAV_CF_SIGNS.get(etype)
 
 
 def build_nav_series(daily_rows: list[dict], events: list[dict],
@@ -179,7 +189,7 @@ def build_nav_series(daily_rows: list[dict], events: list[dict],
     """
     cf_by_date: dict[str, float] = {}
     for e in events:
-        sign = NAV_CF_SIGNS.get(e.get("event_type") or "")
+        sign = _nav_cf_sign(e)
         usd = _f(e.get("usd_equivalent"))
         if sign is None or usd is None:
             continue

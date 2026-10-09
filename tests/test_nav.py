@@ -10,8 +10,11 @@ def D(date, value):
     return {"date": date, "total_value": value}
 
 
-def E(date, etype, usd):
-    return {"event_date": date, "event_type": etype, "usd_equivalent": usd}
+def E(date, etype, usd, account=None):
+    e = {"event_date": date, "event_type": etype, "usd_equivalent": usd}
+    if account is not None:
+        e["account"] = account
+    return e
 
 
 class TestBuildNavSeries:
@@ -33,15 +36,25 @@ class TestBuildNavSeries:
         assert out["days"] == 2
 
     def test_withdrawal_reduces_shares_not_nav(self):
-        """转出按当时 NAV 减份额：转出本身不产生收益/亏损。"""
+        """外部转出按当时 NAV 减份额：转出本身不产生收益/亏损。"""
         daily = [D("2026-06-26", 2000), D("2026-06-27", 1500), D("2026-06-28", 1650)]
-        events = [E("2026-06-26", "inflow", 2000), E("2026-06-27", "transfer", 500)]
+        events = [E("2026-06-26", "inflow", 2000),
+                  E("2026-06-27", "transfer", 500, account="external")]
         out = ledger.build_nav_series(daily, events)
         # 06-27: shares=2000-500/1.0=1500, NAV=1500/1500=1.0；06-28: NAV=1650/1500=1.1
         navs = [p["nav"] for p in out["series"]]
         assert abs(navs[0] - 1.0) < 1e-9
         assert abs(navs[1] - 1.0) < 1e-9
         assert abs(navs[2] - 1.1) < 1e-9
+
+    def test_internal_transfer_not_cashflow_even_with_usd(self):
+        """内部账户划转即使误填 usd_equivalent 也不调份额（防 NAV 虚增）。"""
+        daily = [D("2026-06-26", 2000), D("2026-06-27", 2200)]
+        events = [E("2026-06-26", "inflow", 2000),
+                  E("2026-06-27", "transfer", 1000, account="hsbc")]
+        out = ledger.build_nav_series(daily, events)
+        # 内部划转不减份额 → NAV=2200/2000=1.1（若误计负现金流会得 2200/1000=2.2）
+        assert abs(out["series"][1]["nav"] - 1.1) < 1e-9
 
     def test_fee_and_expense_are_negative_cf(self):
         """fee/expense 计负现金流（减份额）。"""
@@ -80,7 +93,8 @@ class TestBuildNavSeries:
     def test_nonpositive_shares_returns_none(self):
         """份额退化非正（数据异常）→ None。"""
         daily = [D("2026-06-26", 100)]
-        events = [E("2026-06-26", "inflow", 100), E("2026-06-26", "transfer", 200)]
+        events = [E("2026-06-26", "inflow", 100),
+                  E("2026-06-26", "transfer", 200, account="external")]
         assert ledger.build_nav_series(daily, events) is None
 
     def test_no_daily_after_base_returns_none(self):

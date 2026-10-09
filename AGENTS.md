@@ -118,7 +118,8 @@
   东财 > 新浪 = 雅虎，腾讯基本不封。全局节拍 10s（TENCENT_BUS_INTERVAL_SEC/
   MONITOR_INTERVAL_SEC/CANDIDATE_REFRESH_SEC，监控数据粒度 5s→10s 用户拍板）。
 - **净值 TWR 口径（2026-10-09）**：`build_nav_series` 以 ledger 现金流事件
-  （inflow +/transfer −/expense −/fee −，金额取 usd_equivalent；fx/reward 不计）
+  （inflow +/expense −/fee −，transfer 仅 account=external 计 −（内部划转
+  不调份额），金额取 usd_equivalent；fx/reward 不计）
   对 portfolio_ticks 日线做份额重放，基期=首笔现金流日；序列自首个市值观测日
   起（首观测点归一 1.0，基期至首观测日间现金流按 NAV=1.0 视同期初投入，
   days 自首观测日起计），尾部现金流按末点原始 NAV 折份额后再实时覆盖；`/api/portfolio/nav` range
@@ -152,7 +153,7 @@ ORDER BY created_at DESC LIMIT 1`。
 tests/test_server_auth.py tests/test_email_trader.py tests/test_longport.py
 tests/test_alert_engine.py tests/test_alert_api.py tests/test_daily_bars.py
 tests/test_longport_push.py tests/test_macro_fetcher.py tests/test_ledger.py
-tests/test_nav.py`（当前 435 passed）。
+tests/test_nav.py`（当前 441 passed）。
 tests/test_scorer.py 是存量坏（scorer.normalize 已删），不计入基线。
 pytest 本地跑可以（不起服务）；**服务只能线上起一份**。
 
