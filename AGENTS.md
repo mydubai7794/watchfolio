@@ -27,7 +27,7 @@
 | server.py | FastAPI + 全部后台循环（portfolio/market/monitor/candidate/email/h24-probe/ledger-fx/macro） |
 | macro_fetcher.py | 宏观四指标日更抓取解析（巴菲特/席勒CAPE/2s10s利差/恐慌贪婪，直连优先代理容错） |
 | portfolio_fetcher.py | 持仓侧全部数据源抓取与解析（腾讯/新浪/Yahoo/FT/twelvedata/24h数据源） |
-| ledger.py | 记账报表纯计算（点差/通道/盈亏恒等式 build_report + ECB 解析） |
+| ledger.py | 记账报表纯计算（点差/通道/盈亏恒等式 build_report + ECB 解析）+ 单位净值 TWR 纯计算（build_nav_series 现金流重放，入金不虚增收益） |
 | ledger_seed.py | v3 盘点 68 笔种子事件（幂等 upsert CLI，仅首次/修数跑） |
 | fetcher.py | A股 ETF 监控抓取（腾讯 ETF + 新浪/东财期指智能路由） |
 | tencent_bus.py | 腾讯行情攒批发送路由（微批合并：监控/候选/持仓/看板共用一个节奏） |
@@ -39,8 +39,9 @@
 
 | 源 | 用途 | 网络 | 频次 |
 |----|------|------|------|
-| 腾讯 qt.gtimg.cn | A股ETF/美股/港股/看板混排（总线合并） | 直连 | 总线 3s 节流（监控 5s 驱动） |
-| 新浪 | 期指/外汇/盘前盘后扩展价 | 直连 403→代理容错 | 随轮 |
+| 腾讯 qt.gtimg.cn | A股ETF/美股/港股/看板混排 + 全球指数 gz 前缀（gzN225/gzKS11，60s 节流）+ **股指期货 fu 前缀（fuNQ/fuES/fuYM/fuNIY=日经，期指主源，搭总线同批零额外请求）** | 直连 | 总线 10s 节流（TENCENT_BUS_INTERVAL_SEC，监控/候选 10s 驱动）；指数刷新 60s |
+| 新浪 | 期指深冷备（腾讯+东财均失败才用）/外汇/盘前盘后扩展价 | 直连 403→代理容错 | 随轮 |
+| 东财 futsseapi | 期指冷备（腾讯失败时接管，2026-10-08 前曾为主源） | 直连 | 仅降级触发 |
 | Yahoo v8 | 基金NAV兜底/美债VIX主价/USDHKD fx_spark | 代理优先→直连 | 三项主价 backfill 节奏（4h 冷却/5min 重试）+ fx_spark 低频 |
 | FT GraphQL | 基金 NAV 主源 | 直连 | 60s |
 | twelvedata | 美股兜底 + USDCNH(离岸) 主价 + 锚点恢复兜底 | 直连 | 8 credits/min，60s 节流 |
@@ -102,6 +103,27 @@
 - **美元人民币口径**：页面值为 twelvedata **离岸** USD/CNH（7×24 交易，周末仍动，
   60s 快照低流动性时段跳动 ±20pips 正常）；与银行 App 在岸 USD/CNY 差数十 pips
   是在岸/离岸价差，非数据错误（勿当 bug 修）。
+- **全球指数供给（2026-10-08 定版）**：N225/KS11 唯一稳定通道 = 腾讯 gz 前缀
+  （qt.gtimg.cn，tencent_bus 搭批零额外请求）；东财 push2 全端点与新浪
+  hq.sinajs 均对腾讯云服务器 IP 风控（直连空响应/Forbidden，带浏览器 UA
+  无效，勿再试）；新浪期指冷备路径的 b_NKY 顺带解析保留为兜底写入点。
+  备用通道备查：proxy.finance.qq.com/ifzqgtimg/appstock/app/rank/
+  indexRankDetail2（腾讯自选股全球指数分组，无鉴权，服务器可达）。
+- **期指主源收敛（2026-10-08 定版）**：腾讯 fu 前缀恒主源（fuNQ/fuES/
+  fuYM/fuNIY，fetch_round 里 fu 代码并入 ETF 同一批总线 get——分批会各等
+  一个 min_interval 串成 20s）；行布局美式 f[3]现价/f[4]昨结/f[32]涨跌幅
+  （缺失时 f[3]/f[4] 自算），f[0]="delay" 是外盘分类标记非延迟（实测实时）。
+  降级链：腾讯失败 → 东财 futsseapi → 新浪 hf_（健康状态机 60s 冷却）。
+  DAX 无腾讯代码（fuDAX 空），三源均缺系存量状态。封禁严厉度参考：
+  东财 > 新浪 = 雅虎，腾讯基本不封。全局节拍 10s（TENCENT_BUS_INTERVAL_SEC/
+  MONITOR_INTERVAL_SEC/CANDIDATE_REFRESH_SEC，监控数据粒度 5s→10s 用户拍板）。
+- **净值 TWR 口径（2026-10-09）**：`build_nav_series` 以 ledger 现金流事件
+  （inflow +/transfer −/expense −/fee −，金额取 usd_equivalent；fx/reward 不计）
+  对 portfolio_ticks 日线做份额重放，基期=首笔现金流日、NAV 归一 1.0，
+  尾部现金流按末点原始 NAV 折份额后再实时覆盖；`/api/portfolio/nav` range
+  仅裁 series 窗口、TWR 恒全历史；overview 顶层 nav 块与 cny 块相互独立降级；
+  60s `_nav_ctx_cache` 缓存日线+事件（补录事件 60s 内 eventual 生效）。
+  前端 CNY 卡片副行 ` · TWR ±x.xx%`、走势图「市值|净值」双模式。
 
 ## 部署
 
@@ -110,6 +132,7 @@ rsync -az --delete --exclude='.git' --exclude='.codegraph' --exclude='venv' \
   --exclude='__pycache__' --exclude='akshare-code' --exclude='akshare-docs' \
   --exclude='juejin' --exclude='StockWatcher' --exclude='*.pyc' --exclude='.pytest_cache' \
   --exclude='.idea' --exclude='uvicorn.log' --exclude='美股夜盘数据源研报.md' \
+  --exclude='static/download' \
   ./ root@***REMOVED***:/opt/qdii/ && ssh root@***REMOVED*** "systemctl restart qdii"
 ```
 
@@ -127,7 +150,8 @@ ORDER BY created_at DESC LIMIT 1`。
 基线：`python3 -m pytest tests/test_portfolio.py tests/test_decision_model.py
 tests/test_server_auth.py tests/test_email_trader.py tests/test_longport.py
 tests/test_alert_engine.py tests/test_alert_api.py tests/test_daily_bars.py
-tests/test_longport_push.py tests/test_macro_fetcher.py`（当前 400 passed）。
+tests/test_longport_push.py tests/test_macro_fetcher.py tests/test_ledger.py
+tests/test_nav.py`（当前 435 passed）。
 tests/test_scorer.py 是存量坏（scorer.normalize 已删），不计入基线。
 pytest 本地跑可以（不起服务）；**服务只能线上起一份**。
 
@@ -137,3 +161,13 @@ pytest 本地跑可以（不起服务）；**服务只能线上起一份**。
   直连；直连失效时境外代理自动接管（探测循环打标）；
 - Yahoo 常态 403 靠代理池 backfill，失败 5min 重试；
 - 新浪 fx_susdhkd/DINIW 白天偶发 403（有 FX_FALLBACK）；
+- **新浪看板批/新浪源直连恒 403，已改代理优先（2026-10-08 两段式处置）**：
+  服务器 IP 对 hq.sinajs.cn 直连**恒 403**（实测 hf_/gb_/fx_/DINIW 全端点），
+  `_get_text_resilient` 对 `_PROXY_FIRST_HOSTS`（新浪域名）有代理池时**跳过
+  直连代理优先**（省注定失败的直连），代理全败回退直连保底。改后看板批
+  （15min 冷备批）正常态**零 WARNING**。判别：若再出现
+  `WARNING ... GET hq.sinajs.cn ... → HTTP 403` 连续多条 +「看板批失败
+  (退避至 Ns)」= 直连+代理双挂真异常（DXY 冷备断供）；零星直连 403 仅
+  出现在无代理池/代理全败回退场景。DXY 无腾讯替代（hf_DINIW/gzDXY/
+  whDXY/usDXY 等 7 变体实测均 none_match），Yahoo 主价 + 新浪经代理冷备
+  是唯一双通道，此批不可退役。
