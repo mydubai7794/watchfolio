@@ -84,3 +84,13 @@ class TestBuildNavSeries:
         assert ledger.build_nav_series([], [E("2026-06-26", "inflow", 1000)]) is None
         assert ledger.build_nav_series(
             [D("2026-06-25", 500)], [E("2026-06-26", "inflow", 1000)]) is None
+
+    def test_tail_cashflow_folded_before_realtime_override(self):
+        """尾部现金流（晚于最后日线）先折份额再实时覆盖：入金不虚增 TWR。"""
+        daily = [D("2026-06-26", 1000), D("2026-06-27", 1150)]
+        events = [E("2026-06-26", "inflow", 1000), E("2026-06-28", "inflow", 1000)]
+        out = ledger.build_nav_series(daily, events, latest_total_value=2150)
+        # 06-27 原始 NAV=1.15；尾部入金折份额 shares=1000+1000/1.15≈1869.57
+        # 实时 2150/1869.57≈1.15 → 与日线末点一致，尾部入金零影响
+        assert abs(out["series"][-1]["nav"] - 1.15) < 1e-6
+        assert out["twr_pct"] == 15.0

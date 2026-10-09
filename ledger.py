@@ -170,7 +170,8 @@ def build_nav_series(daily_rows: list[dict], events: list[dict],
     - 此后同日先按昨日 NAV 调份额、再取当日末 NAV（现金流发生前估值，
       入金/转出不虚增净值）；全序列 NAV 以基期点归一（基期 NAV=1.0，
       份额折算仍用原始 NAV）；
-    - latest_total_value 提供时以实时总资产覆盖末点（实时 TWR）。
+    - latest_total_value 提供时以实时总资产覆盖末点（实时 TWR）；晚于最后
+      日线的尾部现金流先按末点原始 NAV 折份额再覆盖（days 基准亦含尾部日）。
     无现金流事件、或份额退化非正 → None（宁缺毋错）。
     """
     cf_by_date: dict[str, float] = {}
@@ -215,13 +216,21 @@ def build_nav_series(daily_rows: list[dict], events: list[dict],
             series.append({"date": d, "nav": round(nav / base_nav, 6)})  # 基期归一为 1.0
     if not series or shares <= 0:
         return None
+    # 尾部现金流：晚于最后日线日期的事件按末点原始 NAV 折入份额
+    # （latest_total_value 已含这些现金流，不折算会把入金计成收益）
+    for d2 in sorted(cf_by_date):
+        if d2 > series[-1]["date"] and nav > 0:
+            shares += cf_by_date[d2] / nav
+    if shares <= 0:
+        return None
     if latest_total_value:
         nav_now = float(latest_total_value) / shares
         if nav_now > 0:
             series[-1] = dict(series[-1], nav=round(nav_now / base_nav, 6))
     twr = series[-1]["nav"] - 1.0
     from datetime import datetime as _dt
-    days = (_dt.strptime(series[-1]["date"], "%Y-%m-%d")
+    end_date = max(series[-1]["date"], max(cf_by_date))  # 末点被覆盖时 days 仍含尾部现金流日
+    days = (_dt.strptime(end_date, "%Y-%m-%d")
             - _dt.strptime(base_date, "%Y-%m-%d")).days + 1
     ann = ((1.0 + twr) ** (365.0 / days) - 1.0) * 100.0 if days >= 30 else None
     return {"series": series, "twr_pct": round(twr * 100.0, 2),
