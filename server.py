@@ -34,7 +34,7 @@ import portfolio_fetcher as pf
 import quotes_hub as qh
 import scorer
 from config import (
-    MIN_INTERVAL_SEC,
+    MONITOR_INTERVAL_SEC,
     SERVER_PORT,
     TRADING_SESSIONS,
     CANDIDATE_REFRESH_SEC,
@@ -627,7 +627,7 @@ async def _do_monitor_stop() -> bool:
         "running": False,
         "proxy_count": 0,
         "etf_count": 0,
-        "interval_sec": MIN_INTERVAL_SEC,
+        "interval_sec": MONITOR_INTERVAL_SEC,
         "timestamp": datetime.now().isoformat(),
         "in_trading_hours": _is_trading_hours(),
     })
@@ -642,7 +642,7 @@ async def monitor_status():
         "running": monitor_running,
         "proxy_count": len(proxy_list),
         "etf_count": len(etf_list),
-        "interval_sec": MIN_INTERVAL_SEC,
+        "interval_sec": MONITOR_INTERVAL_SEC,
         "overnight": overnight_data,
         "in_trading_hours": _is_trading_hours(),
     }
@@ -1188,11 +1188,11 @@ async def _monitor_loop():
                 await _broadcast("status", {
                     "running": True,
                     "proxy_count": len(proxy_urls),
-                    "interval_sec": MIN_INTERVAL_SEC,
+                    "interval_sec": MONITOR_INTERVAL_SEC,
                     "etf_count": 0,
                     "timestamp": datetime.now().isoformat(),
                 })
-                await asyncio.sleep(MIN_INTERVAL_SEC)
+                await asyncio.sleep(MONITOR_INTERVAL_SEC)
                 continue
 
             # 3. Fetch data
@@ -1298,9 +1298,9 @@ async def _monitor_loop():
                 },
             })
 
-            # 7. Calculate sleep interval (总循环 >= MIN_INTERVAL_SEC，因为数据源本身 ~3s 更新一次)
+            # 7. Calculate sleep interval (总循环 >= MONITOR_INTERVAL_SEC，与总线 10s 节拍对齐)
             elapsed = time.monotonic() - loop_start
-            interval = max(0, MIN_INTERVAL_SEC - elapsed)
+            interval = max(0, MONITOR_INTERVAL_SEC - elapsed)
 
             # 8. Broadcast status event
             await _broadcast("status", {
@@ -1321,7 +1321,7 @@ async def _monitor_loop():
         except Exception as e:
             logger.exception("Monitor loop error: %s", e)
             await _broadcast("error", {"message": str(e)})
-            await asyncio.sleep(MIN_INTERVAL_SEC)
+            await asyncio.sleep(MONITOR_INTERVAL_SEC)
 
     logger.info("Monitor loop stopped")
 
@@ -2414,6 +2414,16 @@ async def portfolio_overview():
                                    _cny_cfg["expense"])
         if cny:
             data["cny"] = cny
+        # 顶层 nav 块（独立于 cny 降级）：实时总资产覆盖末点的 TWR/年化
+        try:
+            daily, events = await _get_nav_ctx()
+            nav = ledger.build_nav_series(
+                daily, events,
+                latest_total_value=(portfolio_cache.get("summary") or {}).get("total_value"))
+            if nav:
+                data["nav"] = {"twr_pct": nav["twr_pct"], "ann_pct": nav["ann_pct"]}
+        except Exception as e:
+            logger.warning("TWR 计算失败（本轮跳过）: %s", e)
     # 最近 HSBC 成交记录（轻量，前端暂不展示只备数据）
     try:
         data["recent_trades"] = await db.get_recent_trades(10)
@@ -2467,6 +2477,39 @@ async def portfolio_daily(days_range: str = Query(default="30", alias="range")):
     return {"ok": True, "days": [
         {"date": str(r["date"]), "v": float(r["total_value"]),
          "p": float(r["day_pnl"]), "pct": float(r["total_pnl_pct"])} for r in rows]}
+
+
+# 净值重放上下文（60s 内存缓存：日线采样 + 事件全量；重放本身纯内存微秒级，
+# 缓存只为省掉 overview 高频轮询下的重复 DB 读——「少请求多数据」）
+_nav_ctx_cache = {"ts": 0.0, "daily": None, "events": None}
+
+
+async def _get_nav_ctx() -> tuple[list[dict], list[dict]]:
+    """净值重放上下文：全量日线 + 全量记账事件（60s 缓存）。@author yys"""
+    now = time.time()
+    if _nav_ctx_cache["daily"] is not None and now - _nav_ctx_cache["ts"] < 60:
+        return _nav_ctx_cache["daily"], _nav_ctx_cache["events"]
+    daily, events = await db.get_portfolio_daily(3650), await db.get_ledger_events()
+    _nav_ctx_cache.update(ts=now, daily=daily, events=events)
+    return daily, events
+
+
+@app.get("/api/portfolio/nav")
+async def portfolio_nav(days_range: str = Query(default="30", alias="range")):
+    """单位净值（TWR）序列：ledger 现金流事件重放，剔除入金影响。
+
+    range 仅裁剪 series 输出窗口（30/90/all）；twr_pct/ann_pct 恒为全历史。
+    @author yys
+    """
+    daily, events = await _get_nav_ctx()
+    nav = ledger.build_nav_series(daily, events)
+    if not nav:
+        return {"ok": True, "series": [], "twr_pct": None, "ann_pct": None, "days": 0}
+    n = len(nav["series"]) if days_range == "all" else (
+        90 if days_range == "90" else 30)
+    series = nav["series"][-n:]
+    return {"ok": True, "series": series, "twr_pct": nav["twr_pct"],
+            "ann_pct": nav["ann_pct"], "days": nav["days"]}
 
 
 async def _require_agent_key(request: Request) -> None:

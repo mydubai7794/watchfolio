@@ -1,5 +1,9 @@
-"""单位净值（TWR）纯函数测试：入金不虚增收益是核心断言。@author yys"""
+"""单位净值（TWR）纯函数 + API 端点测试：入金不虚增收益是核心断言。@author yys"""
 import ledger
+import server
+from fastapi.testclient import TestClient
+
+client = TestClient(server.app)
 
 
 def D(date, value):
@@ -94,3 +98,74 @@ class TestBuildNavSeries:
         # 实时 2150/1869.57≈1.15 → 与日线末点一致，尾部入金零影响
         assert abs(out["series"][-1]["nav"] - 1.15) < 1e-6
         assert out["twr_pct"] == 15.0
+
+
+# ---------------- API 层（TestClient 不用 with，monkeypatch 桩 DB） ----------------
+
+_DAILY = [{"date": "2026-06-26", "total_value": 2000},
+          {"date": "2026-06-27", "total_value": 2200}]
+_EVENTS = [{"event_date": "2026-06-26", "event_type": "inflow", "usd_equivalent": 1000}]
+
+
+class TestNavApi:
+    def setup_method(self):
+        server._nav_ctx_cache.update(ts=0.0, daily=None, events=None)
+
+    def teardown_method(self):
+        server._nav_ctx_cache.update(ts=0.0, daily=None, events=None)
+        server.portfolio_cache = {"ok": False, "positions": [], "summary": {}, "errors": []}
+        client.cookies.delete("session_token")
+
+    def _login(self, monkeypatch):
+        async def fake_get_session(t):
+            import time as _t
+            return {"username": "t", "expires": _t.time() + 3600}
+        monkeypatch.setattr(server.db, "get_session", fake_get_session)
+        client.cookies.set("session_token", "nav-test")
+
+    def _patch_db(self, monkeypatch, daily=_DAILY, events=_EVENTS):
+        async def fake_daily(days):
+            return daily
+        async def fake_events(**kw):
+            return events
+        monkeypatch.setattr(server.db, "get_portfolio_daily", fake_daily)
+        monkeypatch.setattr(server.db, "get_ledger_events", fake_events)
+
+    def test_nav_requires_login(self):
+        """未登录 → 401（auth_middleware 对 /api/* 生效）。"""
+        r = client.get("/api/portfolio/nav")
+        assert r.status_code == 401
+
+    def test_nav_series_shape(self, monkeypatch):
+        """登录后 200：series/twr_pct/ann_pct/days 结构与纯函数一致。"""
+        self._login(monkeypatch)
+        self._patch_db(monkeypatch)
+        r = client.get("/api/portfolio/nav?range=30")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is True
+        assert data["twr_pct"] == 10.0
+        assert data["ann_pct"] is None
+        assert data["days"] == 2
+        assert data["series"][-1] == {"date": "2026-06-27", "nav": 1.1}
+
+    def test_nav_no_cashflow_degrades(self, monkeypatch):
+        """无现金流 → 空序列 + None 指标（前端降级），不报错。"""
+        self._login(monkeypatch)
+        self._patch_db(monkeypatch, daily=_DAILY, events=[])
+        r = client.get("/api/portfolio/nav")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["series"] == [] and data["twr_pct"] is None
+
+    def test_overview_nav_block_realtime(self, monkeypatch):
+        """overview 顶层 nav 块：实时总资产覆盖末点 → twr=20%。"""
+        self._login(monkeypatch)
+        self._patch_db(monkeypatch)
+        server.portfolio_cache = {
+            "ok": True, "summary": {"total_value": 2400},
+            "positions": [], "errors": []}
+        r = client.get("/api/portfolio/overview")
+        assert r.status_code == 200
+        nav = r.json().get("nav")
+        assert nav and nav["twr_pct"] == 20.0
