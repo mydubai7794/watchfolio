@@ -170,8 +170,9 @@ def build_nav_series(daily_rows: list[dict], events: list[dict],
       首观测点 NAV = 当日市值 / 份额₀ 并归一为 1.0——不可观测区间的收益
       不可观测，TWR 自首个可观测市值日起算；
     - 此后同日先按昨日 NAV 调份额、再取当日末 NAV（现金流发生前估值，
-      入金/转出不虚增净值）；全序列 NAV 以首观测点归一（首点 NAV=1.0，
-      份额折算仍用原始 NAV）；
+      入金/转出不虚增净值）；现金流按区间归并 (上一观测日, 当日] 折算，
+      落在两日线之间空洞日的事件按前一观测日 NAV 折份额，不会漏折；
+      全序列 NAV 以首观测点归一（首点 NAV=1.0，份额折算仍用原始 NAV）；
     - latest_total_value 提供时以实时总资产覆盖末点（实时 TWR）；晚于最后
       日线的尾部现金流先按末点原始 NAV 折份额再覆盖（days 基准亦含尾部日）。
     无现金流事件、或份额退化非正 → None（宁缺毋错）。
@@ -199,6 +200,7 @@ def build_nav_series(daily_rows: list[dict], events: list[dict],
     series: list[dict] = []
     nav = 1.0
     base_nav = 0.0
+    prev_d = base_date
     for r in daily_rows:
         d = str(r["date"])
         if d < base_date:
@@ -215,9 +217,14 @@ def build_nav_series(daily_rows: list[dict], events: list[dict],
             if nav <= 0:
                 return None
             base_nav = nav
+            prev_d = d
         else:
-            if d in cf_by_date and nav > 0:
-                shares += cf_by_date[d] / nav        # 现金流按昨日 NAV（原始值）折份额
+            # 区间归并（prev_d, d]：落在两日线之间空洞日的现金流按昨日
+            # 原始 NAV 折份额——下一日线市值已含它，漏折会把入金计成收益
+            for d_cf in cf_by_date:
+                if prev_d < d_cf <= d and nav > 0:
+                    shares += cf_by_date[d_cf] / nav
+            prev_d = d
             nav = float(r["total_value"]) / shares if shares > 0 else 0.0
         if nav > 0 and base_nav > 0:
             series.append({"date": d, "nav": round(nav / base_nav, 6)})  # 首观测点归一为 1.0

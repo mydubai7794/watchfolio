@@ -121,6 +121,31 @@ class TestBuildNavSeries:
         assert out["days"] == 8          # 10-02 → 10-09
         assert out["ann_pct"] is None    # days < 30 不年化（若按基期 06-01 起算会 >30 天）
 
+    def test_gap_day_cashflow_folded_by_range(self):
+        """间隙日现金流（介于两日线之间的空洞日）按前一观测日 NAV 折份额。"""
+        daily = [D("2026-10-02", 11000), D("2026-10-05", 11100)]
+        events = [E("2026-10-02", "inflow", 11000), E("2026-10-04", "inflow", 1000)]
+        out = ledger.build_nav_series(daily, events)
+        # 10-04 入金按 10-02 原始 NAV（=1.0 归一前 11000/11000）折份额：
+        # shares=11000+1000=12000 → 10-05 NAV=11100/12000 ≈ 0.925
+        # 旧实现丢失 10-04 入金 → 10-05 NAV=11100/11000≈1.009 虚增收益
+        assert out is not None and len(out["series"]) == 2
+        nav2 = out["series"][1]["nav"]
+        assert nav2 < 1.0            # 不再虚增为 1.009
+        assert abs(nav2 - 11100 / 12000) < 1e-6
+
+    def test_multiple_gap_cashflows(self):
+        """多笔间隙现金流分布在不同空洞日，全部按各自前一观测日 NAV 折算。"""
+        daily = [D("2026-10-02", 1000), D("2026-10-04", 1100), D("2026-10-08", 1210)]
+        events = [E("2026-10-02", "inflow", 1000),
+                  E("2026-10-03", "inflow", 100), E("2026-10-06", "inflow", 100)]
+        out = ledger.build_nav_series(daily, events)
+        # 10-03 入金按 10-02 NAV(1.0)：shares=1100 → 10-04 NAV=1100/1100=1.0
+        # 10-06 入金按 10-04 原始 NAV(1.0)折：shares=1100+100=1200
+        # → 10-08 NAV=1210/1200 → round(1210/1200,6)
+        assert out["series"][1]["nav"] == 1.0
+        assert out["series"][2]["nav"] == round(1210 / 1200, 6)
+
 
 # ---------------- API 层（TestClient 不用 with，monkeypatch 桩 DB） ----------------
 
