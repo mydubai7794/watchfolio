@@ -42,6 +42,14 @@ async def init():
     # 1. 建表 + 种子配置
     await init_tables()
 
+    # 1.5 种子引导用户（仅本一次性 CLI 写入；pbkdf2 哈希落库，避免明文。
+    #     INSERT IGNORE 幂等不覆盖已有行；上线后请尽快改掉初始口令）
+    from database import execute as db_execute, hash_password
+    await db_execute(
+        "INSERT IGNORE INTO users (username, password) VALUES (%s, %s)",
+        args=("admin", hash_password("hello9987")),
+    )
+
     # 2. 种子 ETF（INSERT IGNORE 等效逻辑 —— add_etf 使用 INSERT，
     #    如果已存在会因 PRIMARY KEY 冲突跳过，这里先查再插入）
     rows_existing = await get_etf_list()

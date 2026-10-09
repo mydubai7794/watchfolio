@@ -21,6 +21,8 @@ import time
 
 import httpx
 
+from config import TENCENT_BUS_INTERVAL_SEC
+
 logger = logging.getLogger("tencent_bus")
 
 TENCENT_QUOTE_URL = "http://qt.gtimg.cn/q={symbols}"
@@ -119,4 +121,4 @@ class TencentBus:
             self._inflight = None
 
 
-tencent_bus = TencentBus()
+tencent_bus = TencentBus(min_interval=TENCENT_BUS_INTERVAL_SEC)

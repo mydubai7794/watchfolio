@@ -81,15 +81,15 @@
 | sz159660 | 1.9709 | 1.9709 | 0.000% |
 | sh513100 | 1.8050 | 1.8050 | 0.000% |
 
-## 腾讯不支持外盘期指
+## 腾讯外盘期指（2026-10-08 修订）
 
-测试了 `usNQ`, `NQmain`, `hf_NQ`, `.IXIC`, `.DJI`, `NDX` 等格式，
-均返回 `v_pv_none_match="1"`。仅港股指数 (如 `hkHSI`) 可查。
-期指必须用新浪接口。
+早期测试 `usNQ`, `NQmain`, `hf_NQ`, `.IXIC`, `.DJI`, `NDX` 等格式均
+`v_pv_none_match`——**那是代码前缀没找对，不是腾讯无此能力**：正确前缀是
+`fu`（`fuNQ`/`fuES`/`fuYM`/`fuNIY`=CME日经，实测实时，f[0]="delay" 为外盘
+分类标记非延迟）。2026-10-08 起期指主源已切腾讯 fu 前缀（搭总线同批），
+新浪 hf_ 降为深冷备。fuDAX 无返回（DAX 三源均缺系存量状态）。
 
-## 最终方案：每轮 2 次 HTTP 请求
+## 最终方案：每轮 1~2 次 HTTP 请求（2026-10-08 修订）
 
-1. `GET http://qt.gtimg.cn/q=...` → 全部 ETF 数据 (含 IOPV、盘口、涨跌幅)
-2. `GET http://hq.sinajs.cn/list=hf_NQ,...` (带 Referer) → 全部期指数据
-
-与原方案请求数相同 (ETF 批量 + 期指批量)，但全部走纯 HTTP，无需 HTTPS。
+1. `GET http://qt.gtimg.cn/q=...` → ETF + 全球指数 gz + 期指 fu 一批全出
+2. （仅腾讯失败时降级）`GET https://futsseapi.eastmoney.com/list/COBOT` → 期指

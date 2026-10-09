@@ -727,14 +727,27 @@ async def _get_text(url: str, headers: dict | None = None, timeout: float = 10.0
     return None
 
 
+# 新浪域名对腾讯云服务器 IP 直连恒 403（2026-10-08 实测 hf_/gb_/fx_/DINIW
+# 全端点），命中且有代理池时代理优先，省一次注定失败的直连；代理全败再
+# 回退直连保底（保留无代理池/风控解封场景能力）
+_PROXY_FIRST_HOSTS = ("hq.sinajs.cn",)
+
+
 async def _get_text_resilient(url: str, headers: dict | None = None,
                               proxy_urls: list[str] | None = None,
                               timeout: float = 10.0) -> str | None:
-    """境内新浪源容错版 GET：先直连，403/网络失败时代理候选依次重试（云服务器 IP 常被新浪拉黑）。"""
-    raw = await _get_text(url, headers=headers, timeout=timeout)
-    if raw is not None:
-        return raw
-    for proxy in list(proxy_urls or [])[:2]:
+    """境内新浪源容错版 GET：先直连，403/网络失败时代理候选依次重试（云服务器 IP 常被新浪拉黑）。
+
+    新浪域名（_PROXY_FIRST_HOSTS）例外：服务器 IP 直连恒 403，有代理池时
+    直接代理优先，代理全部失败后回退直连保底。
+    """
+    proxies = list(proxy_urls or [])[:2]
+    proxy_first = bool(proxies) and any(h in url for h in _PROXY_FIRST_HOSTS)
+    if not proxy_first:
+        raw = await _get_text(url, headers=headers, timeout=timeout)
+        if raw is not None:
+            return raw
+    for proxy in proxies:
         try:
             async with httpx.AsyncClient(timeout=timeout, proxy=proxy) as client:
                 resp = await client.get(url, headers=headers or {})
@@ -743,6 +756,10 @@ async def _get_text_resilient(url: str, headers: dict | None = None,
                 logger.warning("代理 %s GET %s → HTTP %d", proxy, url[:60], resp.status_code)
         except Exception as e:
             logger.warning("代理 %s GET %s 失败: %s", proxy, url[:60], e)
+    if proxy_first:
+        raw = await _get_text(url, headers=headers, timeout=timeout)
+        if raw is not None:
+            return raw
     return None
 
 

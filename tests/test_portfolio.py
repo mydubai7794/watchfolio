@@ -396,6 +396,47 @@ class TestGetTextResilient:
         monkeypatch.setattr(pf, "_get_text", fake_get_text)
         assert asyncio.run(pf._get_text_resilient("http://x")) is None
 
+    def test_sina_host_proxy_first(self, monkeypatch):
+        """新浪域名 + 有代理：跳过注定 403 的直连，代理优先直达。"""
+        calls = {"direct": 0}
+
+        async def fake_get_text(url, headers=None, timeout=10.0):
+            calls["direct"] += 1
+            return None                      # 直连（若被调用）恒失败
+
+        _FakeProxyClient.tried = []
+        monkeypatch.setattr(pf, "_get_text", fake_get_text)
+        monkeypatch.setattr(pf.httpx, "AsyncClient", _FakeProxyClient)
+        got = asyncio.run(pf._get_text_resilient(
+            "https://hq.sinajs.cn/list=DINIW", proxy_urls=["p1", "p2"]))
+        assert got == "美元指数"
+        assert _FakeProxyClient.tried == ["p1"]   # 首个代理成功即止
+        assert calls["direct"] == 0                # 直连零调用（省一次 403）
+
+    def test_sina_host_proxies_fail_fallback_direct(self, monkeypatch):
+        """新浪域名 + 代理全败：回退直连保底（无代理池/解封场景能力保留）。"""
+        calls = {"direct": 0}
+
+        async def fake_get_text(url, headers=None, timeout=10.0):
+            calls["direct"] += 1
+            return "direct-ok"
+
+        class _FailClient(_FakeProxyClient):
+            def __init__(self, *args, proxy=None, **kwargs):
+                _FakeProxyClient.tried.append(proxy)
+
+            async def get(self, url, headers=None):
+                raise OSError("proxy down")
+
+        _FakeProxyClient.tried = []
+        monkeypatch.setattr(pf, "_get_text", fake_get_text)
+        monkeypatch.setattr(pf.httpx, "AsyncClient", _FailClient)
+        got = asyncio.run(pf._get_text_resilient(
+            "https://hq.sinajs.cn/list=hf_OIL", proxy_urls=["p1", "p2"]))
+        assert got == "direct-ok"
+        assert _FakeProxyClient.tried == ["p1", "p2"]
+        assert calls["direct"] == 1                 # 代理全败后才回退直连
+
 
 class TestFetchFxTencentPrimary:
     """fetch_fx_usdhkd：主源腾讯 whUSDHKD（总线攒批，零额外请求）→ TD 冷备 → 静态兜底。"""

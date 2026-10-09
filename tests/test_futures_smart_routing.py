@@ -88,7 +88,7 @@ async def test_eastmoney_source():
 
 @pytest.mark.asyncio
 async def test_smart_routing_roundrobin():
-    """测试智能路由轮询机制。"""
+    """测试智能路由（2026-10-08 起腾讯恒主源，东财→新浪降级链）。"""
     set_proxies(TEST_PROXIES)
 
     # 重置状态
@@ -97,15 +97,14 @@ async def test_smart_routing_roundrobin():
     fetcher._futures_source_health["sina"] = True
     fetcher._futures_source_health["eastmoney"] = True
 
-    print("\n=== 测试轮询：连续获取3次 ===")
+    print("\n=== 测试路由：连续获取3次（腾讯主源应恒命中） ===")
 
     sources_used = []
     for i in range(3):
         result = await fetch_futures_with_routing(TARGET_FUTURES)
 
-        # 判断使用了哪个数据源
-        idx = (fetcher._futures_source_index - 1) % len(_futures_source_roundrobin)
-        source = _futures_source_roundrobin[idx]
+        # 判断使用了哪个数据源（以路由函数实际记录的成功源为准）
+        source = fetcher._futures_last_used_source or "unknown"
         sources_used.append(source)
 
         # 验证结果
@@ -116,7 +115,6 @@ async def test_smart_routing_roundrobin():
         # 避免请求过快
         await asyncio.sleep(3)
 
-    # 验证轮询：应该交替使用两个数据源
     print(f"\n使用的数据源顺序: {sources_used}")
     assert len(set(sources_used)) >= 1, "应该至少使用一个数据源"
 

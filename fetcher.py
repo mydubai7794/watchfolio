@@ -41,7 +41,21 @@ SINA_HEADERS = {"Referer": "http://finance.sina.com.cn"}
 # 东方财富期货接口 - 只请求 COBOT 交易所（美股期指）
 EASTMONEY_FUTURES_URL = "https://futsseapi.eastmoney.com/list/COBOT"
 
-EASTMONEY_GLOBAL_INDEX_URL = "http://push2.eastmoney.com/api/qt/clist/get"
+# 腾讯全球指数（gz 前缀国际指数，走 tencent_bus 攒批与 A 股同请求，零额外 HTTP）
+_TENCENT_GZ_INDEX_MAP = {
+    "N225": "gzN225",
+    "KS11": "gzKS11",
+}
+
+# 腾讯股指期货（fu 前缀外盘期货，走 tencent_bus 攒批零额外 HTTP）
+# 行布局（美式）：f[1]名称 f[2]代码 f[3]现价 f[4]昨结 f[31]涨跌额 f[32]涨跌幅；
+# f[0]="delay" 为外盘品种分类标记（实测价格/时间戳实时跳动，非延迟标记）
+_TENCENT_FUTURES_MAP = {
+    "NQ": "fuNQ",
+    "ES": "fuES",
+    "YM": "fuYM",
+    "NK": "fuNIY",   # CME 日经指数期货（东财/新浪映射本就无 NK，存量缺失项补齐）
+}
 
 _SINA_GLOBAL_INDEX_MAP = {
     "N225": "b_NKY",
@@ -49,6 +63,9 @@ _SINA_GLOBAL_INDEX_MAP = {
 }
 
 _last_global_index_cache: dict[str, dict] = {}
+# 全球指数刷新节流：A股时段候选轮 5s 快刷，指数 60s 一次（与窗口外候选轮同节奏）
+_GLOBAL_INDEX_REFRESH_SEC = 60.0
+_global_index_fetch_at: float = 0.0
 # 东财接口 token 属敏感凭据：优先从环境变量读取，缺省回退现值保持部署零影响
 EASTMONEY_PARAMS = {
     "orderBy": "dm",
@@ -71,9 +88,10 @@ _source_last_used: dict[tuple[str, str], float] = {}
 # 直连也按 source 独立限速
 _direct_last_used: dict[str, float] = {}
 
-# 期指数据源选择状态（2026-10-03 数据源架构升级：主备反转——东财恒为主源，
-# 新浪降为冷备，仅东财失败/健康冷却窗口时使用；新浪 IP 风控 403 频发，
-# 低频冷备可接受）。保留 roundrobin 结构仅为兼容既有状态机语义。
+# 期指数据源选择状态（2026-10-08 腾讯主源收敛：fuNQ/fuES/fuYM 经总线搭批
+# 恒为主源——腾讯基本不封禁，不进健康状态机，失败下轮自然重试；东财/新浪
+# 降为降级链（封禁严厉度：东财 > 新浪 = 雅虎，服务器 IP 风控实测）。保留
+# roundrobin 结构仅为兼容既有降级状态机语义。
 _futures_source_roundrobin: list[str] = ["eastmoney", "sina"]  # 主→备优先序
 _futures_source_index: int = 0
 # 上一轮实际成功使用的期指数据源（主源失败降级备源时如实记录，供 fetch_round 下发）
@@ -575,25 +593,149 @@ def _parse_eastmoney_futures(data: dict, futures_indices: list[str]) -> dict[str
 # ---------------------------------------------------------------------------
 
 async def fetch_global_indices(codes: list[str]) -> list[dict]:
-    """读取全球指数缓存（由 _fetch_futures_sina 写入）。
+    """读取全球指数缓存；缓存缺失或超龄（60s）时经腾讯总线刷新一次。
 
-    纯内存操作，不发起任何 HTTP 请求。
-    缓存更新频率跟随期指路由中的新浪源。
+    主刷新通道为 qt.gtimg.cn gz 前缀国际指数（tencent_bus 攒批，与 A 股
+    ETF 同一次批量请求；东财 push2 与新浪 hq.sinajs 对服务器 IP 均有风控，
+    实测不可达/不稳）。新浪期指路径的顺带解析保留为兜底写入点。刷新无论
+    成败都推进节流时间戳，避免故障时的失败风暴。
     """
-    if not codes:
-        return []
+    global _global_index_fetch_at
+    if codes:
+        stale = time.monotonic() - _global_index_fetch_at >= _GLOBAL_INDEX_REFRESH_SEC
+        missing = any(
+            c in _TENCENT_GZ_INDEX_MAP and c not in _last_global_index_cache
+            for c in codes
+        )
+        if stale or missing:
+            try:
+                gz_codes = [gz for c, gz in _TENCENT_GZ_INDEX_MAP.items() if c in codes]
+                if gz_codes:
+                    raw = await tencent_bus.get(gz_codes)
+                    _parse_and_cache_tencent_global_indices(raw, codes)
+            except Exception as e:
+                logger.warning("腾讯全球指数刷新异常: %s", e)
+            _global_index_fetch_at = time.monotonic()
 
-    results: list[dict] = []
-    for c in codes:
-        if c in _last_global_index_cache:
-            results.append(_last_global_index_cache[c])
+    return [_last_global_index_cache[c] for c in codes if c in _last_global_index_cache]
 
-    return results
+
+def _parse_and_cache_tencent_global_indices(raw: str, codes: list[str] | None) -> None:
+    """解析腾讯 gz 前缀国际指数行，存入 _last_global_index_cache。
+
+    行格式（与 A 股布局不同）：f[0]代码 f[1]名称 f[2]时间 f[3]现价
+    f[4]涨跌额 f[5]涨跌幅；昨收 = 现价 - 涨跌额 推导。
+    """
+    global _last_global_index_cache
+
+    if not codes or not raw:
+        return
+    valid_codes = [c for c in codes if c in _TENCENT_GZ_INDEX_MAP]
+    if not valid_codes:
+        return
+
+    new_cache: dict[str, dict] = {}
+    for line in raw.split(";"):
+        line = line.strip()
+        if not line or '="' not in line:
+            continue
+        var_part, value_part = line.split('="', 1)
+        qt_code = var_part.replace("v_", "", 1)
+        internal_code = None
+        for ic, gz in _TENCENT_GZ_INDEX_MAP.items():
+            if gz == qt_code:
+                internal_code = ic
+                break
+        if not internal_code:
+            continue
+
+        parts = value_part.rstrip('";"\r\n').split("~")
+        if len(parts) < 6:
+            continue
+        price = _safe_float(parts[3])
+        change_amt = _safe_float(parts[4])
+        change_pct = _safe_float(parts[5])
+        if price <= 0:
+            continue
+        new_cache[internal_code] = {
+            "code": internal_code,
+            "name": parts[1] or internal_code,
+            "price": price,
+            "pre_close": round(price - change_amt, 2),
+            "change_pct": change_pct,
+        }
+
+    if new_cache:
+        _last_global_index_cache.update(new_cache)
+        for code, q in new_cache.items():
+            logger.info("腾讯全球指数 %s(%s): price=%.2f, change=%.2f%%",
+                        code, q["name"], q["price"], q["change_pct"])
 
 
 # ---------------------------------------------------------------------------
 # 期指数据获取 - 智能路由
 # ---------------------------------------------------------------------------
+
+async def _fetch_futures_tencent(futures_indices: list[str]) -> dict[str, float | None] | None:
+    """腾讯主源获取期指（qt.gtimg.cn fu 前缀，经 tencent_bus 攒批与 A 股
+    ETF/全球指数同一次 HTTP，零额外请求）。
+
+    腾讯基本不封禁，恒为主源且不进健康状态机——失败时由路由函数降级
+    东财/新浪，下轮自然回切腾讯。
+    """
+    fu_codes = [_TENCENT_FUTURES_MAP[k] for k in futures_indices
+                if k in _TENCENT_FUTURES_MAP]
+    if not fu_codes:
+        return None
+
+    raw = await tencent_bus.get(fu_codes)
+    return _parse_tencent_futures(raw, futures_indices)
+
+
+def _parse_tencent_futures(raw: str, futures_indices: list[str]) -> dict[str, float | None] | None:
+    """解析腾讯 fu 前缀期指行，返回 {NQ: change_pct, ...}（部分失败项为 None）。
+
+    行格式（美式布局）：v_fuNQ="delay~名称~NQ~现价~昨结~开盘~..."
+    涨跌幅优先取 f[32]（与东财口径实测一致），字段缺失时按 f[3]/f[4] 自算。
+    全部解析失败返回 None（触发路由降级）。
+    """
+    if not raw:
+        return None
+
+    code_map: dict[str, float] = {}
+    for line in raw.split(";"):
+        line = line.strip()
+        if not line or '="' not in line:
+            continue
+        var_part, value_part = line.split('="', 1)
+        qt_code = var_part.replace("v_", "", 1)
+        internal = None
+        for ic, fc in _TENCENT_FUTURES_MAP.items():
+            if fc == qt_code:
+                internal = ic
+                break
+        if not internal:
+            continue
+        parts = value_part.rstrip('";"\r\n').split("~")
+        if len(parts) < 5:
+            continue
+        price = _safe_float(parts[3])
+        settle = _safe_float(parts[4])
+        if price <= 0:
+            continue
+        change_pct = _safe_float(parts[32]) if len(parts) > 32 else 0.0
+        if not change_pct and settle > 0:
+            change_pct = round((price - settle) / settle * 100, 2)
+        code_map[internal] = change_pct
+
+    if not code_map:
+        return None
+
+    result: dict[str, float | None] = {k: code_map.get(k) for k in futures_indices}
+    active = sum(1 for v in result.values() if v is not None)
+    logger.info("腾讯期指: %d/%d 成功", active, len(futures_indices))
+    return result
+
 
 async def _fetch_futures_sina(
     futures_indices: list[str],
@@ -637,8 +779,10 @@ async def _fetch_futures_sina(
 
 
 def _parse_and_cache_global_indices(raw: str, codes: list[str] | None) -> None:
-    """从新浪原始响应中解析全球指数，存入 _last_global_index_cache。"""
-    global _last_global_index_cache
+    """从新浪原始响应中解析全球指数，存入 _last_global_index_cache。
+
+    成功写入时同步推进刷新节流时间戳（新浪已供给，推迟东财请求）。"""
+    global _last_global_index_cache, _global_index_fetch_at
 
     if not codes:
         return
@@ -684,6 +828,7 @@ def _parse_and_cache_global_indices(raw: str, codes: list[str] | None) -> None:
 
     if new_cache:
         _last_global_index_cache = new_cache
+        _global_index_fetch_at = time.monotonic()
 
 
 async def _fetch_futures_eastmoney(futures_indices: list[str]) -> dict[str, float | None] | None:
@@ -713,19 +858,29 @@ async def fetch_futures_with_routing(
 ) -> dict[str, float | None]:
     """使用智能路由获取期指数据。
 
-    轮询策略：
-    1. 优先使用轮询选择的数据源
-    2. 失败时降级到备用数据源
-    3. 更新数据源健康状态
+    降级策略（2026-10-08 腾讯主源收敛）：
+    1. 腾讯恒主源（fuNQ/fuES/fuYM 经总线搭批零额外 HTTP；腾讯基本不封禁，
+       不进健康状态机，失败下轮自然重试）
+    2. 腾讯失败时走东财 → 新浪降级链（既有健康状态机 + 冷却恢复）
+    3. 全部失败返回 {NQ: None, ...}
 
-    当 primary_source == "sina" 时，global_index_codes 会合并到同一次
+    当降级到 sina 时，global_index_codes 会合并到同一次
     HTTP 请求中，避免对 hq.sinajs.cn 重复请求。
 
     Returns:
         {NQ: float|None, ES: float|None, YM: float|None}
     """
+    global _futures_last_used_source
+
     if not futures_indices and not global_index_codes:
         return {}
+
+    # 1. 腾讯主源（总线搭批，与 A 股/全球指数同一次请求）
+    tencent_result = await _fetch_futures_tencent(futures_indices)
+    if tencent_result:
+        _futures_last_used_source = "tencent"
+        return tencent_result
+    logger.warning("腾讯期指失败，降级东财/新浪链")
 
     primary_source = _get_next_futures_source()
     backup_source = "eastmoney" if primary_source == "sina" else "sina"
@@ -736,8 +891,6 @@ async def fetch_futures_with_routing(
         result = await _fetch_futures_sina(futures_indices, global_index_codes)
     else:
         result = await _fetch_futures_eastmoney(futures_indices)
-
-    global _futures_last_used_source
 
     if result:
         _futures_source_health[primary_source] = True
@@ -777,11 +930,9 @@ async def fetch_round(
 ) -> dict:
     """执行一轮完整的数据抓取并聚合。
 
-    每轮仅 2 次 HTTP 请求：
-      1. 腾讯 ETF 批量行情（含 IOPV、盘口）
-      2. 期指行情（智能路由：新浪/东方财富轮询）
-
-    严格遵守 MIN_INTERVAL_SEC (3s) 的请求间隔。
+    每轮仅 1~2 次 HTTP 请求：
+      1. 腾讯批量行情（ETF + 全球指数 gz + 期指 fu，经攒批总线一次发出）
+      2. 期指降级请求（仅腾讯失败时：东财 futsseapi → 新浪 hf_）
 
     Args:
         etf_codes: ETF 代码列表
@@ -793,7 +944,7 @@ async def fetch_round(
         {
             "etf_data": [...],
             "futures_data": { "NQ": float|None, ... },
-            "futures_source": "sina" | "eastmoney",
+            "futures_source": "tencent" | "eastmoney" | "sina",
             "errors": [...],
             "fetch_time": "HH:MM:SS"
         }
@@ -811,7 +962,11 @@ async def fetch_round(
     prefixed = [_add_prefix(c) for c in etf_codes]
     etf_data: list[dict] = []
 
-    raw_etf = await tencent_bus.get(prefixed)
+    # 期指 fu 代码并入同一批（10s 节拍下分批 get 会各等一个节拍串成 20s；
+    # 并入后 _fetch_futures_tencent 的 get 命中 TTL 缓存零等待）
+    fu_codes = [_TENCENT_FUTURES_MAP[k] for k in futures_indices
+                if k in _TENCENT_FUTURES_MAP]
+    raw_etf = await tencent_bus.get(prefixed + fu_codes)
     naming: dict[str, str] = {}
     if raw_etf:
         etf_data, errors, naming = _parse_tencent_etf(raw_etf, etf_codes)
