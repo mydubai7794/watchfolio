@@ -392,6 +392,10 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
         <button class="seg-btn" data-r="90" onclick="switchRange('90',this)">3月</button>
         <button class="seg-btn" data-r="all" onclick="switchRange('all',this)">全部</button>
       </div>
+      <div class="seg" style="margin-left:8px">
+        <button class="seg-btn active" id="navOffBtn" onclick="switchNav(false,this)">市值</button>
+        <button class="seg-btn" id="navOnBtn" onclick="switchNav(true,this)">净值</button>
+      </div>
     </div>
     <div class="chart-info" id="chartInfo">加载中…</div>
     <div class="chart-wrap">
@@ -929,24 +933,35 @@ function renderOverview(d) {
   tpp.textContent = sign(s.total_pnl_pct) + fmt(s.total_pnl_pct) + '%';
   tpp.className = 'ov-micro ' + cls(s.total_pnl);
   document.getElementById('cashVal').textContent = usd(s.cash_usd);
-  document.getElementById('cashSub').textContent =
-    (s.cash_usd != null && d.fx_usdhkd) ? '≈ HK$' + fmt(s.cash_usd * d.fx_usdhkd, 0) : '';
+  // 副行分币种拆明：USD/HKD 原始金额 + 折合 HKD（主值即折合 USD）
+  const cashRows = d.cash || [];
+  const cashParts = ['USD', 'HKD']
+    .map(cur => cashRows.find(c => c.currency === cur))
+    .filter(c => c != null && c.amount != null)
+    .map(c => c.currency + ' ' + fmt(c.amount));
+  if (s.cash_usd != null && d.fx_usdhkd) cashParts.push('≈ HK$' + fmt(s.cash_usd * d.fx_usdhkd, 0));
+  document.getElementById('cashSub').textContent = cashParts.join(' · ');
   // 人民币累计口径：总资产 × USDCNH 对比投入本金（本金/汇率未就绪时降级 --）
   const cny = d.cny;
+  const nav = d.nav;   // TWR（时间加权，剔除入金；独立于 cny 降级）
+  const twrTxt = (nav && nav.twr_pct != null)
+    ? ' · TWR ' + sign(nav.twr_pct) + fmt(Math.abs(nav.twr_pct)) + '%' : '';
+  const annTxt = (nav && nav.ann_pct != null)
+    ? ' · TWR年化 ' + sign(nav.ann_pct) + fmt(Math.abs(nav.ann_pct)) + '%' : '';
   const cpEl = document.getElementById('cnyPnl');
   if (cny) {
     cpEl.textContent = (cny.pnl < 0 ? '-¥' : (cny.pnl > 0 ? '+¥' : '¥')) + fmt(Math.abs(cny.pnl));
     cpEl.className = 'ov-value ' + cls(cny.pnl);
     document.getElementById('cnySub').textContent =
-      sign(cny.pnl_pct) + fmt(cny.pnl_pct) + '% · 净投入 ¥' + fmt(cny.invested, 0);
+      sign(cny.pnl_pct) + fmt(cny.pnl_pct) + '% · 净投入 ¥' + fmt(cny.invested, 0) + twrTxt;
     document.getElementById('cnyItem').title =
       '总投入 ¥' + fmt(cny.invested_gross, 0) + ' − 个人消费 ¥' + fmt(cny.expense, 0) +
       ' = 净投入 ¥' + fmt(cny.invested, 0) + ' · 折算总值 ¥' + fmt(cny.value) +
-      ' · USDCNH ' + fmt(cny.rate, 4);
+      ' · USDCNH ' + fmt(cny.rate, 4) + annTxt + ' · 时间加权(剔除入金)';
   } else {
     cpEl.textContent = '--';
     cpEl.className = 'ov-value';
-    document.getElementById('cnySub').textContent = '';
+    document.getElementById('cnySub').textContent = twrTxt ? 'TWR' + twrTxt.slice(9) : '';
     document.getElementById('cnyItem').title = '';
   }
   // session 徽章与提示：非 regular 时段 24h数据源代理价补全（盘后/夜盘/
@@ -975,6 +990,15 @@ function renderOverview(d) {
 // ===== 走势图（无轴 + hover/touch tooltip） =====
 let chartData = null;         // 统一映射 [{x, y, v}]：分时 y=p(当日盈亏)、日线 y=v(总资产)
 let chartMode = 'h24';        // h24(默认)/intraday(当日)/30/90/all
+let navMode = false;          // 市值(默认)/净值：净值模式下日线画单位净值(TWR)
+function switchNav(on, btn) {
+  navMode = on;
+  document.getElementById('navOffBtn').classList.toggle('active', !on);
+  document.getElementById('navOnBtn').classList.toggle('active', on);
+  // 净值仅对日线区间有意义：h24/当日下切净值自动跳 1月
+  if (on && isIntradayMode()) switchRange('30', document.querySelector('.seg-btn[data-r="30"]'));
+  else loadChart();
+}
 let hoverIdx = -1;            // 当前吸附的数据点下标
 let pixPts = [];              // 数据点像素坐标（hover 吸引用）
 function isIntradayMode() { return chartMode === 'h24' || chartMode === 'intraday'; }
@@ -1000,12 +1024,14 @@ async function loadChart() {
   // 24h 跨日窗口 / 当日（hours=0）/ 日线区间
   const url = chartMode === 'h24' ? '/api/portfolio/intraday?hours=24'
             : chartMode === 'intraday' ? '/api/portfolio/intraday'
+            : navMode ? '/api/portfolio/nav?range=' + chartMode
             : '/api/portfolio/daily?range=' + chartMode;
   try {
     const d = await (await fetch(url)).json();
     if (rid !== chartReqId) return;   // 响应期间已有更新的请求发出，丢弃本次过期响应
     chartData = isIntradayMode()
       ? (d.points || []).map(q => ({x: q.ts, y: q.p, v: q.v}))
+      : navMode ? (d.series || []).map(q => ({x: q.date, y: q.nav}))
       : (d.days || []).map(q => ({x: q.date, y: q.v}));
     hoverIdx = -1;
     drawChart();
@@ -1172,6 +1198,11 @@ function showTip(i) {
     const pct = base > 0 ? p.y / base * 100 : 0;
     rows = `<div class="tip-row"><span>盈亏</span><b class="${cls(p.y)}">${sign(p.y)}$${fmt(Math.abs(p.y))} (${sign(pct)}${fmt(Math.abs(pct))}%)</b></div>
       <div class="tip-row"><span>总资产</span><b>$${fmt(p.v != null ? p.v : base + p.y)}</b></div>`;
+  } else if (navMode) {
+    const v0 = pts[0].y;
+    const pct = v0 ? (p.y / v0 - 1) * 100 : 0;
+    rows = `<div class="tip-row"><span>净值</span><b>${fmt(p.y, 4)}</b></div>
+      <div class="tip-row"><span>区间</span><b class="${cls(pct)}">${sign(pct)}${fmt(Math.abs(pct))}%</b></div>`;
   } else {
     const v0 = pts[0].y;
     const diff = p.y - v0, pct = v0 ? diff / v0 * 100 : 0;
@@ -1217,6 +1248,10 @@ function updateChartInfo() {
     const pct = last.y / base * 100;
     el.innerHTML = `昨收 <b>$${fmt(base)}</b> → 现价 <b>$${fmt(v)}</b>
       <span class="${cls(last.y)}">(${sign(last.y)}$${fmt(Math.abs(last.y))} / ${sign(pct)}${fmt(pct)}%)</span>`;
+  } else if (navMode) {
+    const v0 = pts[0].y, pct = v0 ? (last.y / v0 - 1) * 100 : 0;
+    el.innerHTML = `单位净值 <b>${fmt(v0, 4)}</b> → <b>${fmt(last.y, 4)}</b>
+      <span class="${cls(pct)}">(${sign(pct)}${fmt(Math.abs(pct))}%)</span> · 时间加权(剔除入金)`;
   } else {
     const v0 = pts[0].y, diff = last.y - v0, pct = v0 ? diff / v0 * 100 : 0;
     el.innerHTML = `区间首 <b>$${fmt(v0)}</b> → <b>$${fmt(last.y)}</b>
