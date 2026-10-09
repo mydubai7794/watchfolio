@@ -99,6 +99,28 @@ class TestBuildNavSeries:
         assert abs(out["series"][-1]["nav"] - 1.15) < 1e-6
         assert out["twr_pct"] == 15.0
 
+    def test_base_before_all_daily_starts_from_first_observation(self):
+        """线上边界：首笔现金流早于全部日线——不可观测期间现金流视同期初投入，
+        自首个市值观测日起建序列（首点归一 1.0）。"""
+        daily = [D("2026-10-02", 13000), D("2026-10-03", 13650)]
+        events = [E("2026-06-26", "inflow", 1000), E("2026-09-29", "inflow", 12000)]
+        out = ledger.build_nav_series(daily, events)
+        # 份额₀ = 1000+12000=13000（全部按 NAV=1.0 期初投入）
+        # 10-02 首观测点 NAV=13000/13000=1.0；10-03 = 13650/13000 → 1.05
+        assert out["series"] == [
+            {"date": "2026-10-02", "nav": 1.0},
+            {"date": "2026-10-03", "nav": round(13650 / 13000, 6)}]
+        assert out["twr_pct"] == 5.0
+        assert out["days"] == 2          # 自首观测日起计，不含不可观测区间
+
+    def test_observation_start_excludes_unobservable_window_from_ann(self):
+        """days 自首观测日起：基期到首观测日跨 100 天也不放大年化分母。"""
+        daily = [D("2026-10-02", 1000), D("2026-10-09", 1100)]
+        events = [E("2026-06-01", "inflow", 1000)]
+        out = ledger.build_nav_series(daily, events)
+        assert out["days"] == 8          # 10-02 → 10-09
+        assert out["ann_pct"] is None    # days < 30 不年化（若按基期 06-01 起算会 >30 天）
+
 
 # ---------------- API 层（TestClient 不用 with，monkeypatch 桩 DB） ----------------
 

@@ -165,10 +165,12 @@ def build_nav_series(daily_rows: list[dict], events: list[dict],
     """单位净值（TWR 时间加权收益率）纯计算：日线市值 + 现金流事件流重放。
 
     口径（specs/2026-10-09-nav-twr-design.md）：
-    - 基期 = 首笔现金流日，基期点 NAV = 当日市值 / 份额₀，份额₀ =
-      基期前最近日线市值（遗留资产视同期初投入）+ 当日现金流；
+    - 基期 = 首笔现金流日；首个市值观测点（≥基期的第一条日线）之前（含当日）
+      的全部现金流视同期初投入（按 NAV=1.0 折入份额₀，叠加基期前遗留资产），
+      首观测点 NAV = 当日市值 / 份额₀ 并归一为 1.0——不可观测区间的收益
+      不可观测，TWR 自首个可观测市值日起算；
     - 此后同日先按昨日 NAV 调份额、再取当日末 NAV（现金流发生前估值，
-      入金/转出不虚增净值）；全序列 NAV 以基期点归一（基期 NAV=1.0，
+      入金/转出不虚增净值）；全序列 NAV 以首观测点归一（首点 NAV=1.0，
       份额折算仍用原始 NAV）；
     - latest_total_value 提供时以实时总资产覆盖末点（实时 TWR）；晚于最后
       日线的尾部现金流先按末点原始 NAV 折份额再覆盖（days 基准亦含尾部日）。
@@ -193,9 +195,7 @@ def build_nav_series(daily_rows: list[dict], events: list[dict],
             legacy = float(r["total_value"])
         else:
             break
-    shares = legacy + cf_by_date[base_date]
-    if shares <= 0:
-        return None
+    shares = legacy
     series: list[dict] = []
     nav = 1.0
     base_nav = 0.0
@@ -203,8 +203,15 @@ def build_nav_series(daily_rows: list[dict], events: list[dict],
         d = str(r["date"])
         if d < base_date:
             continue
-        if d == base_date:
-            nav = float(r["total_value"]) / shares   # 基期点：含当日入金的市值定格
+        if base_nav <= 0:
+            # 首个市值观测点：其之前（含当日）的全部现金流视同期初投入
+            # （不可观测区间无市值数据，收益不可观测，按 NAV=1.0 折入份额₀）
+            for d0 in cf_by_date:
+                if d0 <= d:
+                    shares += cf_by_date[d0]
+            if shares <= 0:
+                return None
+            nav = float(r["total_value"]) / shares
             if nav <= 0:
                 return None
             base_nav = nav
@@ -213,7 +220,7 @@ def build_nav_series(daily_rows: list[dict], events: list[dict],
                 shares += cf_by_date[d] / nav        # 现金流按昨日 NAV（原始值）折份额
             nav = float(r["total_value"]) / shares if shares > 0 else 0.0
         if nav > 0 and base_nav > 0:
-            series.append({"date": d, "nav": round(nav / base_nav, 6)})  # 基期归一为 1.0
+            series.append({"date": d, "nav": round(nav / base_nav, 6)})  # 首观测点归一为 1.0
     if not series or shares <= 0:
         return None
     # 尾部现金流：晚于最后日线日期的事件按末点原始 NAV 折入份额
@@ -231,7 +238,7 @@ def build_nav_series(daily_rows: list[dict], events: list[dict],
     from datetime import datetime as _dt
     end_date = max(series[-1]["date"], max(cf_by_date))  # 末点被覆盖时 days 仍含尾部现金流日
     days = (_dt.strptime(end_date, "%Y-%m-%d")
-            - _dt.strptime(base_date, "%Y-%m-%d")).days + 1
+            - _dt.strptime(series[0]["date"], "%Y-%m-%d")).days + 1
     ann = ((1.0 + twr) ** (365.0 / days) - 1.0) * 100.0 if days >= 30 else None
     return {"series": series, "twr_pct": round(twr * 100.0, 2),
             "ann_pct": None if ann is None else round(ann, 2), "days": days}
