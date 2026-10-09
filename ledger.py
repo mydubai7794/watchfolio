@@ -151,6 +151,84 @@ def build_report(events: list[dict], *, total_assets_usd: float | None,
 
 
 # ---------------------------------------------------------------------------
+# 单位净值（TWR）纯计算
+# ---------------------------------------------------------------------------
+
+# 现金流事件 → 份额调整方向（金额一律取 usd_equivalent）：
+# fx 为组合内部币种结构变化（inflow 已是换汇后到账值）、reward 为无本金
+# 收益（推高净值）、realized/balance 为备忘对账类——均不调份额
+NAV_CF_SIGNS = {"inflow": 1.0, "transfer": -1.0, "expense": -1.0, "fee": -1.0}
+
+
+def build_nav_series(daily_rows: list[dict], events: list[dict],
+                     latest_total_value: float | None = None) -> dict | None:
+    """单位净值（TWR 时间加权收益率）纯计算：日线市值 + 现金流事件流重放。
+
+    口径（specs/2026-10-09-nav-twr-design.md）：
+    - 基期 = 首笔现金流日，基期点 NAV = 当日市值 / 份额₀，份额₀ =
+      基期前最近日线市值（遗留资产视同期初投入）+ 当日现金流；
+    - 此后同日先按昨日 NAV 调份额、再取当日末 NAV（现金流发生前估值，
+      入金/转出不虚增净值）；全序列 NAV 以基期点归一（基期 NAV=1.0，
+      份额折算仍用原始 NAV）；
+    - latest_total_value 提供时以实时总资产覆盖末点（实时 TWR）。
+    无现金流事件、或份额退化非正 → None（宁缺毋错）。
+    """
+    cf_by_date: dict[str, float] = {}
+    for e in events:
+        sign = NAV_CF_SIGNS.get(e.get("event_type") or "")
+        usd = _f(e.get("usd_equivalent"))
+        if sign is None or usd is None:
+            continue
+        d = str(e["event_date"])
+        cf_by_date[d] = cf_by_date.get(d, 0.0) + sign * usd
+    if not cf_by_date:
+        return None
+    base_date = min(cf_by_date)
+    # 基期前遗留资产：基期日前最近一条日线市值（daily_rows 按日期升序）
+    legacy = 0.0
+    for r in daily_rows:
+        d = str(r["date"])
+        if d < base_date:
+            legacy = float(r["total_value"])
+        else:
+            break
+    shares = legacy + cf_by_date[base_date]
+    if shares <= 0:
+        return None
+    series: list[dict] = []
+    nav = 1.0
+    base_nav = 0.0
+    for r in daily_rows:
+        d = str(r["date"])
+        if d < base_date:
+            continue
+        if d == base_date:
+            nav = float(r["total_value"]) / shares   # 基期点：含当日入金的市值定格
+            if nav <= 0:
+                return None
+            base_nav = nav
+        else:
+            if d in cf_by_date and nav > 0:
+                shares += cf_by_date[d] / nav        # 现金流按昨日 NAV（原始值）折份额
+            nav = float(r["total_value"]) / shares if shares > 0 else 0.0
+        if nav > 0 and base_nav > 0:
+            series.append({"date": d, "nav": round(nav / base_nav, 6)})  # 基期归一为 1.0
+    if not series or shares <= 0:
+        return None
+    if latest_total_value:
+        nav_now = float(latest_total_value) / shares
+        if nav_now > 0:
+            series[-1] = dict(series[-1], nav=round(nav_now / base_nav, 6))
+    twr = series[-1]["nav"] - 1.0
+    from datetime import datetime as _dt
+    days = (_dt.strptime(series[-1]["date"], "%Y-%m-%d")
+            - _dt.strptime(base_date, "%Y-%m-%d")).days + 1
+    ann = ((1.0 + twr) ** (365.0 / days) - 1.0) * 100.0 if days >= 30 else None
+    return {"series": series, "twr_pct": round(twr * 100.0, 2),
+            "ann_pct": None if ann is None else round(ann, 2), "days": days}
+
+
+# ---------------------------------------------------------------------------
 # ECB 参考价拉取（frankfurter.dev，免费无 key；每日一次，严禁短周期重试放大）
 # ---------------------------------------------------------------------------
 
