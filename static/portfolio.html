@@ -1251,7 +1251,7 @@ function updateChartInfo() {
   } else if (navMode) {
     const v0 = pts[0].y, pct = v0 ? (last.y / v0 - 1) * 100 : 0;
     el.innerHTML = `单位净值 <b>${fmt(v0, 4)}</b> → <b>${fmt(last.y, 4)}</b>
-      <span class="${cls(pct)}">(${sign(pct)}${fmt(Math.abs(pct))}%)</span> · 时间加权(剔除入金)`;
+      <span class="${cls(pct)}">(${sign(pct)}${fmt(pct)}%)</span> · 时间加权(剔除入金)`;
   } else {
     const v0 = pts[0].y, diff = last.y - v0, pct = v0 ? diff / v0 * 100 : 0;
     el.innerHTML = `区间首 <b>$${fmt(v0)}</b> → <b>$${fmt(last.y)}</b>
