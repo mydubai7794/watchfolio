@@ -14,7 +14,13 @@ DEFAULT_W_RATIO = 0.7
 DEFAULT_W_PREMIUM = 0.3
 DEFAULT_FUTURES_KILL_THRESHOLD = -1.5
 DEFAULT_SAFE_REQ_PER_MIN = 20
-MIN_INTERVAL_SEC = 3.0  # 每 IP 每 3 秒最多一次请求
+MIN_INTERVAL_SEC = 3.0  # 每 IP 每 3 秒最多一次请求（代理轮转限速语义）
+
+# 攒批总线真实拉取节拍（对 qt.gtimg.cn 的最高请求频率；腾讯基本不封禁，
+# 10s 兼顾监控时效与保源，2026-10-08 腾讯主源收敛定版）
+TENCENT_BUS_INTERVAL_SEC = 10.0
+# 监控循环驱动间隔（数据粒度 10s，与总线节拍对齐；竞价窗口捕捉从 5s 放宽）
+MONITOR_INTERVAL_SEC = 10.0
 
 # 服务端口
 SERVER_PORT = 8888
@@ -33,4 +39,4 @@ FUTURES_NAME_MAP = {
     "YM": "道琼斯",
 }
 
-CANDIDATE_REFRESH_SEC = 5.0  # 候选池缓存刷新间隔(秒)
+CANDIDATE_REFRESH_SEC = 10.0  # 候选池缓存刷新间隔(秒)，与总线节拍对齐
