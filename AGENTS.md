@@ -119,8 +119,9 @@
   MONITOR_INTERVAL_SEC/CANDIDATE_REFRESH_SEC，监控数据粒度 5s→10s 用户拍板）。
 - **净值 TWR 口径（2026-10-09）**：`build_nav_series` 以 ledger 现金流事件
   （inflow +/transfer −/expense −/fee −，金额取 usd_equivalent；fx/reward 不计）
-  对 portfolio_ticks 日线做份额重放，基期=首笔现金流日、NAV 归一 1.0，
-  尾部现金流按末点原始 NAV 折份额后再实时覆盖；`/api/portfolio/nav` range
+  对 portfolio_ticks 日线做份额重放，基期=首笔现金流日；序列自首个市值观测日
+  起（首观测点归一 1.0，基期至首观测日间现金流按 NAV=1.0 视同期初投入，
+  days 自首观测日起计），尾部现金流按末点原始 NAV 折份额后再实时覆盖；`/api/portfolio/nav` range
   仅裁 series 窗口、TWR 恒全历史；overview 顶层 nav 块与 cny 块相互独立降级；
   60s `_nav_ctx_cache` 缓存日线+事件（补录事件 60s 内 eventual 生效）。
   前端 CNY 卡片副行 ` · TWR ±x.xx%`、走势图「市值|净值」双模式。
