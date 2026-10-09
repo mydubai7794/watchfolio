@@ -146,6 +146,17 @@ class TestBuildNavSeries:
         assert out["series"][1]["nav"] == 1.0
         assert out["series"][2]["nav"] == round(1210 / 1200, 6)
 
+    def test_gap_cashflow_folded_at_nonunit_nav(self):
+        """间隙入金按前一观测日 NAV（非 1.0）折份额：锁住 cf/nav 折算路径。"""
+        daily = [D("2026-10-02", 2000), D("2026-10-05", 2200)]
+        events = [E("2026-10-02", "inflow", 1000), E("2026-10-04", "inflow", 1000)]
+        out = ledger.build_nav_series(daily, events)
+        # 首观测点原始 NAV=2000/1000=2.0（归一后首点 1.0）；10-04 入金按
+        # 原始 NAV 2.0 折份额：shares=1000+1000/2.0=1500
+        # → 10-05 原始 NAV=2200/1500，归一 /2.0 → round(2200/3000,6)≈0.733333
+        # （若误按面值折 shares=2000 → 2200/2000/2.0=0.55，断言可区分）
+        assert out["series"][1]["nav"] == round(2200 / 3000, 6)
+
 
 # ---------------- API 层（TestClient 不用 with，monkeypatch 桩 DB） ----------------
 
