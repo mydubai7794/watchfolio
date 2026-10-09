@@ -33,15 +33,18 @@ class FakeCtx:
     def __init__(self, fail_depth: bool = False, fail_unsubscribe: bool = False):
         self.quotes_cb = None
         self.depth_cb = None
+        self.cb_calls: list[str] = []            # 回调注册调用序（死锁回归观测）
         self.sub_calls: list[tuple[list, list]] = []
         self.unsub_calls: list[tuple[list, list]] = []
         self.fail_depth = fail_depth
         self.fail_unsubscribe = fail_unsubscribe
 
     def set_on_quote(self, cb):
+        self.cb_calls.append("quote")
         self.quotes_cb = cb
 
     def set_on_depth(self, cb):
+        self.cb_calls.append("depth")
         self.depth_cb = cb
 
     def subscribe(self, symbols, sub_types):
@@ -178,6 +181,28 @@ def test_callback_decimal_and_exception_safe(monkeypatch):
     assert seen == [("MU", 101.5, 101.4, 101.6)]
 
 
+def test_callback_longbridge_symbol_first_signature(monkeypatch):
+    """longbridge 签名回归（2026-10-09 live 首切事故）：回调为 (symbol, event)、
+    event 无 symbol 属性——旧实现 getattr(event,"symbol","") 恒空静默丢弃。"""
+    calls = []
+    monkeypatch.setattr(lpp, "_mode", lambda: "live")
+    monkeypatch.setattr(lpp.quotes_hub, "push_tick",
+                        lambda s, p, **kw: calls.append((s, p)))
+
+    class Ev:   # longbridge PushQuote：无 symbol 属性（dir 实测）
+        last_done = Decimal("749.67")
+
+    lpp._handle_quote("QQQ.US", Ev())    # longbridge: (symbol, event)
+    assert calls == [("QQQ", 749.67)]
+
+    class EvLp:                          # longport: (ctx, event) 带 symbol
+        symbol = "MU.US"
+        last_done = Decimal("101.5")
+
+    lpp._handle_quote(None, EvLp())
+    assert calls[-1] == ("MU", 101.5)
+
+
 def test_callback_depth_counts_only():
     """depth 回调只计数（LV1 深度不喂价，价格真相源仅 quote）。"""
     class Ev:
@@ -215,6 +240,22 @@ def test_arm_same_ctx_idempotent():
     asyncio.run(lpp._arm(ctx, ["MU", "QQQ"]))    # 顺序无关（内部 sorted 比较）
     assert len(ctx.sub_calls) == 1
     assert ctx.unsub_calls == []
+
+
+def test_arm_drift_no_recallback():
+    """死锁回归（2026-10-09 线上事故）：同 ctx 漂移只做差集退订/订阅。
+
+    set_on_quote 在活跃连接上重挂会与 SDK 推送线程构成 GIL×mutex
+    死锁环（冻结整个事件循环）；回调注册是 ctx 级，仅全新 ctx 允许。
+    """
+    ctx = FakeCtx()
+    asyncio.run(lpp._arm(ctx, ["QQQ", "MU"]))
+    assert ctx.cb_calls == ["quote", "depth"]    # 首次武装注册一次
+    asyncio.run(lpp._arm(ctx, ["QQQ", "MU", "GEV"]))   # 漂移：扩张
+    asyncio.run(lpp._arm(ctx, ["QQQ"]))                # 漂移：收缩
+    assert ctx.cb_calls == ["quote", "depth"]    # 漂移路径绝不重挂回调
+    assert ctx.quotes_cb is not None            # 首次注册的回调仍在线
+    assert sorted(lpp._armed_symbols) == ["QQQ"]
 
 
 def test_arm_drift_expand():

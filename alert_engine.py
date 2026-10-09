@@ -32,6 +32,12 @@ DEFAULT_PARAMS = {
 _positions: dict[str, dict[str, float]] = {}   # symbol → {"cost": 成本价, "qty": 数量}
 _positions_at = 0.0
 
+# 同 (symbol, rule) 自然日封顶：与冷却状态机正交（冷却管带内不重复、离开
+# 触发带重置可再触发，此处管全天封顶——当日已发过即不再发）。键集当日
+# 首次求值从 alerts 预载（重启不重发）；预载失败沿用旧键集宁可少挡。
+_daily_fired: set[tuple[str, str]] = set()
+_daily_date: str = ""
+
 # 全局锁串行化求值：读-改-写含 await 点，轮询/push 多入口并发会丢更新
 _EVAL_LOCK = asyncio.Lock()
 
@@ -329,6 +335,26 @@ def eval_trend(bars: list[dict], params: dict) -> dict | None:
             "close": closes[-1]}
 
 
+async def _daily_dedupe(events: list[dict]) -> list[dict]:
+    """自然日去重：同 (symbol, rule) 当日只放行首条（含跨日重置预载）。"""
+    global _daily_fired, _daily_date
+    today = time.strftime("%Y-%m-%d")
+    if _daily_date != today:
+        try:
+            _daily_fired = await db.get_today_alert_keys()
+        except Exception as e:
+            logger.warning("当日提醒键集预载失败（沿用旧键集）: %s", e)
+        _daily_date = today
+    out = []
+    for ev in events:
+        key = (ev["symbol"], ev["rule"])
+        if key in _daily_fired:
+            continue
+        _daily_fired.add(key)
+        out.append(ev)
+    return out
+
+
 async def evaluate(symbol: str, price: float) -> list[dict]:
     """单标的求值：规则评估 → fired_state/提醒双落库。
 
@@ -350,6 +376,7 @@ async def evaluate(symbol: str, price: float) -> list[dict]:
         events += eval_deep_dip(symbol, price, params, state, ind)
         events += eval_ma200_zone(symbol, price, params, state, ind)
         events += eval_fib_retrace(symbol, price, params, state, ind)
+        events = await _daily_dedupe(events)
         state_changed = json.dumps(state, sort_keys=True, default=str) != snapshot
         if events or state_changed:
             # 写回库内原始配置（非合并快照），避免固化默认值、

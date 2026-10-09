@@ -231,11 +231,9 @@ async def init_tables():
         _pool=pool,
     )
 
-    # ---- 种子用户 admin / hello9987 (幂等) ----
-    await execute(
-        "INSERT IGNORE INTO users (username, password) VALUES ('admin', 'hello9987')",
-        _pool=pool,
-    )
+    # 种子用户不在此种入：init_tables 在每次服务启动时执行，此处种默认账户
+    # 会在账户被删除后随重启自动重建（弱口令复活）。新库初始化的引导账户
+    # 仅由 init_db.py 一次性 CLI 写入，且以 pbkdf2 哈希落库。
 
     # ---- sessions (登录会话，支持服务重启后会话不丢) ----
     await execute(
@@ -1555,6 +1553,15 @@ async def save_alert(event: dict) -> int:
             await cur.execute("SELECT LAST_INSERT_ID() AS id")
             row = await cur.fetchone()
             return int(row[0]) if row else 0
+
+
+async def get_today_alert_keys() -> set[tuple[str, str]]:
+    """当日已触发提醒 (symbol, rule) 键集（自然日去重预载）。@author yys
+
+    triggered_at 由 save_alert 写服务器本地时间，CURDATE() 同口径。"""
+    rows = await execute_dict(
+        "SELECT DISTINCT symbol, rule FROM alerts WHERE triggered_at >= CURDATE()")
+    return {(r["symbol"], r["rule"]) for r in rows}
 
 
 async def get_alerts(unread_only: bool = False, limit: int = 50) -> list[dict]:

@@ -118,19 +118,31 @@ def _to_f(v) -> float | None:
     return f if f > 0 else None
 
 
-def _handle_quote(ctx, event):
-    """SDK quote 回调壳（SDK 线程）：全捕获，异常绝不上抛炸 SDK 线程。"""
+def _handle_quote(a, b):
+    """SDK quote 回调壳（SDK 线程）：全捕获，异常绝不上抛炸 SDK 线程。
+
+    双 SDK 签名自适配（2026-10-09 live 切换实测）：longbridge 回调为
+    (symbol: str, event: PushQuote)——event 无 symbol 属性；longport 为
+    (ctx, event)。按第二参是否带 symbol 分流，符号取错即静默丢弃（shadow
+    期只计数未暴露该问题，live 首切实测 35 条/秒全被丢）。
+    """
     try:
-        on_price(str(getattr(event, "symbol", "") or ""),
-                 _to_f(getattr(event, "last_done", None)),
-                 _to_f(getattr(event, "bid", None)),
-                 _to_f(getattr(event, "ask", None)))
+        if hasattr(b, "symbol"):          # longport: (ctx, event)
+            sym, ev = str(getattr(b, "symbol", "") or ""), b
+        else:                              # longbridge: (symbol, event)
+            sym, ev = str(a or ""), b
+        on_price(sym,
+                 _to_f(getattr(ev, "last_done", None)),
+                 _to_f(getattr(ev, "bid", None)),
+                 _to_f(getattr(ev, "ask", None)))
     except Exception as e:
         logger.warning("长桥推送 quote 回调异常: %s", e)
 
 
-def _handle_depth(ctx, event):
-    """SDK depth 回调壳：LV1 深度只计数（价格真相源仅 quote，深度不喂价）。"""
+def _handle_depth(a, b):
+    """SDK depth 回调壳：LV1 深度只计数（价格真相源仅 quote，深度不喂价）。
+
+    双 SDK 签名兼容：仅计数不取字段，两种参数形态均安全。"""
     try:
         _stats["depths"] += 1
     except Exception:
@@ -207,6 +219,13 @@ async def _arm(ctx, syms: list[str]):
     新集合。Depth 订阅失败（如无权限 301604 同类）降级仅 Quote；仅
     Quote 也失败则上抛交外层退避重试。退订失败仅 warning 且把 gone
     保留在 _armed_symbols（下轮差集非空自然重试），不阻断订阅。
+
+    死锁防护（2026-10-09 线上事故）：set_on_quote/set_on_depth 仅在
+    全新 ctx 上注册——回调注册是 ctx 级而非标的级，同 ctx 重订阅无需
+    重挂；且 SDK（pyo3/Rust）的 set_on_quote 持 GIL 等内部 mutex，与
+    正在派发回调、持 mutex 等 GIL 的 SDK 推送线程构成 AB 死锁环，
+    冻结整个事件循环（asyncio.wait_for 护栅同因 GIL 饥饿失效）。全新
+    ctx 注册时本侧尚无订阅、无回调流量，竞争窗口不存在。
     """
     global _armed_ctx, _armed_symbols
     prev = sorted(_armed_symbols or [])
@@ -214,6 +233,12 @@ async def _arm(ctx, syms: list[str]):
     same_ctx = ctx is _armed_ctx
     if same_ctx and want == prev:
         return
+    if not same_ctx:
+        await _call(ctx.set_on_quote, _handle_quote)
+        try:
+            await _call(ctx.set_on_depth, _handle_depth)
+        except Exception as e:
+            logger.warning("长桥 set_on_depth 注册失败（深度计数降级）: %s", e)
     pending_gone: list[str] = []
     if same_ctx:
         gone = sorted(set(prev) - set(want))
@@ -224,11 +249,6 @@ async def _arm(ctx, syms: list[str]):
             except Exception as e:
                 pending_gone = gone
                 logger.warning("长桥退订失败 %s（下轮差集重试）: %s", gone, e)
-    await _call(ctx.set_on_quote, _handle_quote)
-    try:
-        await _call(ctx.set_on_depth, _handle_depth)
-    except Exception as e:
-        logger.warning("长桥 set_on_depth 注册失败（深度计数降级）: %s", e)
     sub = [f"{s}.US" for s in syms]     # 长桥铁律：订阅符号必须带 .US 后缀
     types = _sub_types()
     try:

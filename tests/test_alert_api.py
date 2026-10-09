@@ -442,6 +442,133 @@ def test_sse_quote_loop_skips_when_no_clients(monkeypatch):
     qh.quotes_live.clear()
 
 
+# ---------------- SSE overview 推送价重建（_live_overview_payload） ----------------
+
+def _setup_pf_ctx(monkeypatch, quotes):
+    """注入 _pf_ctx/portfolio_cache/market 假快照（_live_overview_payload 消费）。"""
+    holdings = [{"symbol": "QQQ", "market": "US", "quantity": 10.0,
+                 "cost_price": 100.0, "currency": "USD", "name": "", "enabled": 1}]
+    monkeypatch.setattr(server, "_pf_ctx", {
+        "holdings": holdings, "quotes": quotes, "cash_usd": 1000.0,
+        "fx": 7.8, "base": {"QQQ": 100.0}, "close": {"QQQ": 101.0}, "at": 1.0})
+    monkeypatch.setattr(server, "portfolio_cache", {
+        "ok": True, "session": "regular", "positions": [], "summary": {},
+        "cash": [], "errors": []})
+    monkeypatch.setattr(server, "fund_nav_cache", None)
+    monkeypatch.setattr(server, "market_cache",
+                        [{"key": "USDCNH", "price": 7.2}])
+    monkeypatch.setattr(server, "fx_spark", [])
+    monkeypatch.setattr(server, "_cny_cfg", {"invested": 84850.0, "expense": 0.0})
+
+
+def test_live_overview_overrides_with_fresh_lp_price(monkeypatch):
+    """新鲜 lp_push 价覆盖美股现价并重算汇总（总资产含现金、pct 分母含现金）。"""
+    _setup_pf_ctx(monkeypatch, {"QQQ": {"price": 100.5, "pre_close": 100.0,
+                                        "name": "QQQ"}})
+    monkeypatch.setattr(server, "_fresh_lp_price", lambda s: 103.0 if s == "QQQ" else None)
+    data = server._live_overview_payload()
+    assert data is not None
+    pos = data["positions"][0]
+    assert pos["price"] == 103.0                     # 推送价生效
+    assert pos["today_pnl"] == pytest.approx(30.0)   # (103-100场基准)×10
+    s = data["summary"]
+    assert s["total_value"] == pytest.approx(1030.0 + 1000.0)   # 含现金
+    # cny：value=总资产×USDCNH，pnl=value−净投入（84850）
+    assert data["cny"]["value"] == pytest.approx(2030.0 * 7.2, rel=1e-6)
+    assert data["cny"]["pnl"] == pytest.approx(2030.0 * 7.2 - 84850.0, rel=1e-6)
+
+
+def test_live_overview_skips_stale_and_non_lp(monkeypatch):
+    """陈旧/非 lp_push 价不覆盖（_fresh_lp_price 返回 None 走轮询价）。"""
+    _setup_pf_ctx(monkeypatch, {"QQQ": {"price": 100.5, "pre_close": 100.0,
+                                        "name": "QQQ"}})
+    monkeypatch.setattr(server, "_fresh_lp_price", lambda s: None)
+    data = server._live_overview_payload()
+    assert data["positions"][0]["price"] == 100.5    # 轮询价原样
+
+
+def test_live_overview_empty_ctx_returns_none(monkeypatch):
+    """上轮快照缺失（冷启动/行情源不可用）→ None 不广播。"""
+    monkeypatch.setattr(server, "_pf_ctx", {"holdings": [], "quotes": {},
+                                            "cash_usd": 0.0, "fx": 0.0,
+                                            "base": {}, "close": {}, "at": 0.0})
+    monkeypatch.setattr(server, "portfolio_cache", {"ok": False})
+    assert server._live_overview_payload() is None
+
+
+def test_fresh_lp_price_window(monkeypatch):
+    """新鲜度窗口：lp_push 价 90s 内有效、超窗/非 lp_push/坏 ts 均为 None。"""
+    from datetime import datetime as dt, timezone as tz, timedelta
+    qh.quotes_live.clear()
+    fresh = dt.now(tz.utc).isoformat()
+    stale = dt.now(tz.utc) - timedelta(seconds=120)
+    qh.quotes_live["A"] = {"price": 10.0, "ts": fresh, "source": "lp_push"}
+    qh.quotes_live["B"] = {"price": 10.0, "ts": stale.isoformat(), "source": "lp_push"}
+    qh.quotes_live["C"] = {"price": 10.0, "ts": fresh, "source": "poll"}
+    qh.quotes_live["D"] = {"price": 10.0, "ts": "garbage", "source": "lp_push"}
+    assert server._fresh_lp_price("A") == 10.0
+    assert server._fresh_lp_price("B") is None
+    assert server._fresh_lp_price("C") is None
+    assert server._fresh_lp_price("D") is None
+    qh.quotes_live.clear()
+
+
+def test_sse_overview_loop_broadcast_and_skip(monkeypatch):
+    """_sse_overview_loop：有客户端广播推送价重建载荷；无客户端空转零广播。"""
+    sent = []
+
+    async def fake_broadcast(event, data):
+        sent.append((event, data))
+
+    monkeypatch.setattr(server, "_broadcast", fake_broadcast)
+    _setup_pf_ctx(monkeypatch, {"QQQ": {"price": 100.5, "pre_close": 100.0,
+                                        "name": "QQQ"}})
+    monkeypatch.setattr(server, "_fresh_lp_price", lambda s: 101.0 if s == "QQQ" else None)
+    sleeps = []
+    fake_clients = [object()]
+    monkeypatch.setattr(server, "clients", fake_clients)
+
+    async def fake_sleep(_sec):
+        sleeps.append(1)
+        if len(sleeps) == 2:
+            fake_clients.clear()             # 第二拍起无观者（同一对象清空）
+        if len(sleeps) >= 3:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(server._sse_overview_loop(interval=2.0))
+    assert len(sent) == 1                    # 第一拍有观者有载荷 → 广播一次
+    assert sent[0][0] == "overview"
+    assert sent[0][1]["positions"][0]["price"] == 101.0
+
+
+def test_sse_overview_loop_swallows_payload_error(monkeypatch):
+    """载荷构建异常仅告警不炸循环（下一节拍继续）。
+
+    _live_overview_payload 为同步函数，打桩须同步签名——async 桩会返回
+    coroutine（恒真值）直接进广播 JSON 序列化，且计数器永不递增导致
+    循环无法退出（曾致本用例无限空转刷日志）。
+    """
+    calls = {"n": 0}
+
+    def bad_payload():
+        calls["n"] += 1
+        raise RuntimeError("ctx gone")
+
+    monkeypatch.setattr(server, "_live_overview_payload", bad_payload)
+    monkeypatch.setattr(server, "clients", [object()])
+
+    async def fake_sleep(_sec):
+        if calls["n"] >= 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(server._sse_overview_loop(interval=2.0))
+    assert calls["n"] == 2                   # 首拍失败后第二拍继续
+
+
 def test_lp_on_events_same_shape_as_poll_side(monkeypatch):
     """live 推送事件接线：邮件入队（完整事件含 body）+ SSE 广播剥离 body，
     payload 与 _portfolio_loop 轮询侧同款 {id,symbol,rule,level,title}。"""

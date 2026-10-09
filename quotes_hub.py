@@ -1,7 +1,8 @@
-"""内存实时真相源：quotes_live + tick 环形缓冲 + 1s 降采样攒批。
+"""内存实时真相源：quotes_live + tick 环形缓冲 + 窗口降采样攒批。
 
-push 高频 tick 不逐条落库：同秒取末值、价变才写、批量 flush market_ticks
-（uk_sym_ts 幂等，flush 时同 symbol 多条错开 ts 防 INSERT IGNORE 丢点）。
+push 高频 tick 不逐条落库：每 symbol 每窗口（默认 60s）至多一条、
+跨窗口价变才定格出队，批量 flush market_ticks（uk_sym_ts 幂等，flush
+时同 symbol 多条错开 ts 防 INSERT IGNORE 丢点）。
 
 线程契约：push_tick 线程安全，可在长桥 SDK 回调线程直调——Sampler 内部
 全程持 threading.Lock；quotes_live 单键赋值原子（CPython GIL）、ring 的
@@ -20,6 +21,9 @@ import database as db
 logger = logging.getLogger("qdii.quotes_hub")
 
 RING_MAX = 1800                     # 每 symbol 保留最近 30 分钟（1s 粒度）
+SAMPLE_WINDOW_SEC = 60.0            # 落库降采样窗口：60s 取末值（前端刷新走
+                                    # 内存 quotes_live + SSE 1s 广播，不受影响；
+                                    # market_ticks 日增量与轮询时代同量级）
 quotes_live: dict[str, dict] = {}   # {symbol: {price, bid, ask, ts, source}}
 ring: dict[str, deque] = {}
 
@@ -44,32 +48,36 @@ def snapshot() -> list[dict]:
 
 
 class Sampler:
-    """1s 窗口降采样：同秒取末值、价变才保留；线程安全（全程持锁）。
+    """降采样窗口取末值、价变才保留；线程安全（全程持锁）。
 
-    _win 值为 (sec, price, flushed)：flushed 标记该价已随 drain 出队落库——
-    价格停滞后不再重复出队同价点（防 market_ticks 行数放大）；同秒来新价时
-    重置 flushed（新价未落库，待下次 drain 带出，兜住「最后一个价变」）。
+    窗口默认 60s（SAMPLE_WINDOW_SEC）：**每 symbol 每窗口至多落一条**——
+    同窗口新价只更新末值、不重置 flushed（窗口内已落过库则不再出队，
+    未落库则等 drain 带出末值）；跨窗口价变时上一窗口末值出队定格。
+    _win 值为 (win_id, price, flushed)。
 
     锁的必要性：push 在 SDK 回调线程被直调，drain/requeue 在事件循环线程
     flush 中被调——不持锁时 drain 迭代 _win 期间 push 改 dict 会触发
     RuntimeError（整批丢失），drain 写回还会覆盖 push 刚写入的新价。
     """
 
-    def __init__(self):
+    def __init__(self, window: float | None = None):
         self._lock = threading.Lock()
-        self._win: dict[str, tuple[int, float, bool]] = {}   # sym -> (sec, price, flushed)
+        self._win: dict[str, tuple[int, float, bool]] = {}   # sym -> (win, price, flushed)
         self._out: list[tuple[str, float]] = []
+        self._window = window if window is not None else SAMPLE_WINDOW_SEC
 
     def push(self, symbol: str, price: float, now: float | None = None):
-        sec = int(now if now is not None else time.time())
+        sec = int((now if now is not None else time.time()) // self._window)
         with self._lock:
             prev = self._win.get(symbol)
             if prev and prev[0] == sec:
-                self._win[symbol] = (sec, price, False)  # 同秒取末值：新价待落库
+                # 同窗口取末值：flushed 继承（已落库不重复出队，未落库
+                # 待 drain 带出——窗口内新价不放大落库行数）
+                self._win[symbol] = (sec, price, prev[2])
                 return
             if prev and prev[1] != price and not prev[2]:
-                self._out.append((symbol, prev[1]))      # 上一秒定格价未落库且已价变 → 出队
-            # 换秒：价未变继承 flushed（同价不重复出队）；价变则新价待落库
+                self._out.append((symbol, prev[1]))      # 上一窗口定格价未落库且已价变 → 出队
+            # 换窗口：价未变继承 flushed（同价不重复出队）；价变则新价待落库
             flushed = bool(prev and prev[1] == price and prev[2])
             self._win[symbol] = (sec, price, flushed)
 
@@ -104,7 +112,8 @@ _sampler = Sampler()
 def push_tick(symbol: str, price: float, source: str = "",
               bid: float | None = None, ask: float | None = None,
               now: float | None = None):
-    """push 回调统一入口：内存 + 环形缓冲 + 降采样（now 仅测试注入用）。"""
+    """push 回调统一入口：内存 + 环形缓冲 + 降采样（内存即时生效，落库
+    侧按 SAMPLE_WINDOW_SEC 窗口取末值；now 仅测试注入用）。"""
     update(symbol, price, source=source, bid=bid, ask=ask)
     _sampler.push(symbol, price, now=now)
 

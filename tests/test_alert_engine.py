@@ -34,6 +34,10 @@ def engine_env(monkeypatch):
     monkeypatch.setattr(ae.db, "get_config", fake_config)
 
     monkeypatch.setattr(ae, "COOLDOWN_SECONDS", 0.0)     # 测试即时过期
+    # 自然日去重：直填当日空键集（跳过预载连库；状态机用例保持直通语义，
+    # 日去重行为由专门用例覆盖）
+    monkeypatch.setattr(ae, "_daily_fired", set())
+    monkeypatch.setattr(ae, "_daily_date", time.strftime("%Y-%m-%d"))
     # 同步直调 eval_* 时模块级持仓缓存为空 → 直接预写缓存绕过异步加载
     monkeypatch.setattr(ae, "_positions", {"NVDA": {"cost": 200.0, "qty": 100.0}})
     monkeypatch.setattr(ae, "_positions_at", time.monotonic())
@@ -168,6 +172,7 @@ def test_persistence_reset_survives_reload(engine_env, monkeypatch):
     asyncio.run(ae.evaluate("NVDA", 189.0))     # T1：触及 -5% 档 → 触发
     asyncio.run(ae.evaluate("NVDA", 191.5))     # T2：回上带 → 重置（本轮无事件）
     assert "-5" not in store["NVDA"]["fired_state"]["price_plan"]["fired"]
+    monkeypatch.setattr(ae, "_daily_fired", set())   # 模拟跨日：本用例聚焦重置持久化
     evs = asyncio.run(ae.evaluate("NVDA", 189.0))   # T3：重置已持久化 → 应能再次触发
     assert any(e["rule"] == "price_plan" and "-5" in e["title"] for e in evs)
 
@@ -184,6 +189,7 @@ def test_atr_stop_cooldown_reset_persists(engine_env, monkeypatch):
     evs2 = asyncio.run(ae.evaluate("NVDA", 151.0))   # T2：站回上方 → 冷却重置（无事件轮）
     assert not any(e["rule"] == "atr_stop" for e in evs2)
     assert "main" not in store["NVDA"]["fired_state"]["atr_stop"]   # 重置已落库
+    monkeypatch.setattr(ae, "_daily_fired", set())   # 模拟跨日：本用例聚焦重置持久化
     evs3 = asyncio.run(ae.evaluate("NVDA", 149.0))   # T3：再跌破 → 应再次触发
     assert any(e["rule"] == "atr_stop" and e["level"] == "critical" for e in evs3)
 
@@ -202,6 +208,7 @@ def test_extreme_guard_reset_persists(engine_env, monkeypatch):
     assert not any(e["rule"] == "extreme_guard" for e in evs2)
     assert "main" not in store["NVDA"]["fired_state"]["extreme_guard"]   # 重置已落库
     monkeypatch.setattr(ae.daily_bars, "get_indicators", oversold)
+    monkeypatch.setattr(ae, "_daily_fired", set())   # 模拟跨日：本用例聚焦重置持久化
     evs3 = asyncio.run(ae.evaluate("NVDA", 175.0))   # T3：再超卖 → 应再次触发
     assert any(e["rule"] == "extreme_guard" for e in evs3)
 
@@ -313,6 +320,7 @@ def test_deep_dip_reset_persists(engine_env, monkeypatch):
     evs2 = asyncio.run(ae.evaluate("QQQ", 195.0))   # T2：回撤收窄 -2.5% → 重置
     assert not any(e["rule"] == "deep_dip" for e in evs2)
     assert "main" not in store["QQQ"]["fired_state"]["deep_dip"]   # 重置已落库
+    monkeypatch.setattr(ae, "_daily_fired", set())   # 模拟跨日：本用例聚焦重置持久化
     evs3 = asyncio.run(ae.evaluate("QQQ", 160.0))   # T3：再深跌 → 应再次触发
     assert any(e["rule"] == "deep_dip" for e in evs3)
 
@@ -527,3 +535,61 @@ def test_evaluate_dispatches_v3_rules(engine_env, monkeypatch):
     rules2 = {e["rule"] for e in asyncio.run(ae.evaluate("QQQ", 85.0))}
     # 第二轮同价：冷却内不再触发（接线后冷却状态机同样生效）
     assert "ma200_zone" not in rules2
+
+
+# ---------------- 自然日去重（同 symbol+rule 当日封顶一条） ----------------
+
+def test_daily_dedupe_blocks_same_day(engine_env, monkeypatch):
+    """冷却重置后再触发（状态机允许）当日也被日去重挡下：只发首条。"""
+    saved = engine_env
+    _rule_store(monkeypatch)                            # state 跨轮持久化（重置可测）
+    monkeypatch.setattr(ae, "COOLDOWN_SECONDS", 0.0)     # 冷却即时过期：凸显日去重
+    # 指标收敛到仅 atr_stop 可触发（rsi/ma200 乖离均在带外；成本 156.8 使
+    # -5% 档目标 148.96 也不触及，price_plan 静默）
+    ind = _ind(stop=150.0, rsi=50.0, ma50=150.0, ma200=140.0)
+    monkeypatch.setattr(ae.daily_bars, "get_indicators", lambda s: ind)
+    monkeypatch.setattr(ae, "_positions", {"NVDA": {"cost": 156.8, "qty": 100.0}})
+    monkeypatch.setattr(ae, "_positions_at", time.monotonic())
+    asyncio.run(ae.evaluate("NVDA", 149.0))              # T1 首次触发 → 落库+放行
+    assert saved["last_event"]["rule"] == "atr_stop"
+    # T2 站回上方 → 冷却重置（无事件轮）；T3 再跌破：状态机允许，但当日已发
+    asyncio.run(ae.evaluate("NVDA", 151.0))
+    evs3 = asyncio.run(ae.evaluate("NVDA", 149.0))
+    assert evs3 == []                                    # 日去重挡下
+
+
+def test_daily_dedupe_next_day_allows(engine_env, monkeypatch):
+    """跨日（_daily_date 过期 → 重预载）后同键恢复触发资格。"""
+    saved = engine_env
+
+    async def fake_keys():
+        return set()
+
+    monkeypatch.setattr(ae.db, "get_today_alert_keys", fake_keys)
+    monkeypatch.setattr(ae, "_daily_date", "2000-01-01")  # 过期 → 下轮重预载
+    ind = _ind(stop=150.0, rsi=50.0, ma50=150.0, ma200=140.0)
+    monkeypatch.setattr(ae.daily_bars, "get_indicators", lambda s: ind)
+    monkeypatch.setattr(ae, "_positions", {"NVDA": {"cost": 156.8, "qty": 100.0}})
+    monkeypatch.setattr(ae, "_positions_at", time.monotonic())
+    monkeypatch.setattr(ae, "COOLDOWN_SECONDS", 0.0)
+    assert len(asyncio.run(ae.evaluate("NVDA", 149.0))) == 1
+    monkeypatch.setattr(ae, "_daily_date", "2000-01-01")  # 模拟次日（预载空集）
+    assert len(asyncio.run(ae.evaluate("NVDA", 149.0))) == 1   # 新日放行
+
+
+def test_daily_dedupe_preloads_from_db(engine_env, monkeypatch):
+    """启动/跨日首求值从 alerts 表预载当日键集：同键事件不落库不通知。"""
+    saved = engine_env
+
+    async def fake_keys():
+        return {("NVDA", "atr_stop")}          # 当日库内已触发
+
+    monkeypatch.setattr(ae.db, "get_today_alert_keys", fake_keys)
+    monkeypatch.setattr(ae, "_daily_date", "2000-01-01")  # 强制走预载
+    ind = _ind(stop=150.0, rsi=50.0, ma50=150.0, ma200=140.0)
+    monkeypatch.setattr(ae.daily_bars, "get_indicators", lambda s: ind)
+    monkeypatch.setattr(ae, "_positions", {"NVDA": {"cost": 156.8, "qty": 100.0}})
+    monkeypatch.setattr(ae, "_positions_at", time.monotonic())
+    evs = asyncio.run(ae.evaluate("NVDA", 149.0))
+    assert evs == []                            # 已在当日键集 → 挡下
+    assert "last_event" not in saved            # 未落库（save_alert 未被调）

@@ -198,10 +198,11 @@ async def lifespan(app: FastAPI):
     # 二期实时链路：长桥推送守护循环（shadow/live 由 sys_config.LP_PUSH_MODE
     # 热切换，shadow 不写 quotes_hub 不动线上展示）+ 内存真相源攒批落库
     # + SSE quote 快照节流广播；live 提醒事件接线与轮询侧同款处理
-    global lp_push_task, quotes_flush_task, sse_quote_task
+    global lp_push_task, quotes_flush_task, sse_quote_task, sse_overview_task
     lp_push_task = asyncio.create_task(lpp.push_loop())
     quotes_flush_task = asyncio.create_task(qh.flush_loop())
     sse_quote_task = asyncio.create_task(_sse_quote_loop())
+    sse_overview_task = asyncio.create_task(_sse_overview_loop())
     lpp.on_events = _lp_on_events
 
     yield
@@ -239,6 +240,8 @@ async def lifespan(app: FastAPI):
         quotes_flush_task.cancel()
     if sse_quote_task:
         sse_quote_task.cancel()
+    if sse_overview_task:
+        sse_overview_task.cancel()
     await db.close_pool()
     logger.info("Server shutdown complete")
 
@@ -324,6 +327,7 @@ daily_bars_task: Optional[asyncio.Task] = None   # 日K每日刷新循环（拉�
 lp_push_task: Optional[asyncio.Task] = None       # 长桥推送守护循环（shadow/live）
 quotes_flush_task: Optional[asyncio.Task] = None  # 内存真相源攒批落库循环
 sse_quote_task: Optional[asyncio.Task] = None     # SSE quote 快照节流广播循环
+sse_overview_task: Optional[asyncio.Task] = None  # SSE overview 推送价重建广播循环
 macro_task: Optional[asyncio.Task] = None         # 宏观估值指标日更循环
 
 
@@ -338,7 +342,9 @@ async def _broadcast(event: str, data: dict):
     event_stream 的 is_disconnected 检测后自行出队清理（此处旧 try/except
     死代码已移除，避免误导）。
     """
-    payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+    # default=str：date/datetime 等（fund nav_date）兜底转 ISO 串，与
+    # HTTP 端点 FastAPI jsonable_encoder 行为一致
+    payload = f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
     for queue in clients:
         queue.put_nowait(payload)
 
@@ -364,6 +370,90 @@ async def _sse_quote_loop(interval: float = 1.0):
             raise
         except Exception as e:
             logger.warning("SSE quote 广播失败: %s", e)
+
+
+# 推送价重建 overview 的上轮计算上下文（_portfolio_loop 每轮刷新引用；
+# SSE 循环只读 + 浅拷贝合并，纯内存零请求）
+_pf_ctx: dict = {"holdings": [], "quotes": {}, "cash_usd": 0.0,
+                 "fx": 0.0, "base": {}, "close": {}, "at": 0.0}
+
+_LIVE_FRESH_SEC = 90.0   # lp_push 价新鲜度窗口：收盘后 SDK 停推的陈旧价
+                         # 不得覆盖夜盘 24h 活价（防口径倒退）
+
+
+def _fresh_lp_price(sym: str) -> float | None:
+    """quotes_live 中该标的的新鲜 lp_push 价（过期/缺失返回 None）。"""
+    lv = qh.quotes_live.get(sym)
+    if not lv or lv.get("source") != "lp_push":
+        return None
+    try:
+        ts = datetime.fromisoformat(str(lv.get("ts")))
+        if (datetime.now(timezone.utc) - ts).total_seconds() > _LIVE_FRESH_SEC:
+            return None
+    except Exception:
+        return None
+    p = lv.get("price")
+    return p if p and p > 0 else None
+
+
+def _live_overview_payload() -> dict | None:
+    """推送价重建 overview（纯内存）：lp_push 新鲜价覆盖美股 quotes 现价，
+    复用 build_positions + 现金/cny 组装——与 _portfolio_loop 计算尾段
+    同一口径函数，零漂移；港股/基金不受推送覆盖。"""
+    ctx = _pf_ctx
+    if not ctx["holdings"] or not ctx["quotes"] or not portfolio_cache.get("ok"):
+        return None
+    quotes = {s: dict(q) for s, q in ctx["quotes"].items()}
+    for s, q in quotes.items():
+        p = _fresh_lp_price(s)
+        if p:
+            q["price"] = p
+            q["ext_price"] = 0.0    # 推送价即当下最新价，清掉盘前盘后
+            q["ext_time"] = "lp_push"   # 扩展价定格优先级（与夜盘 24h 合并同款）
+    positions, summary = pf.build_positions(
+        ctx["holdings"], quotes, fund_nav_cache, ctx["fx"],
+        base_overrides=ctx["base"], close_overrides=ctx["close"])
+    summary["holdings_value"] = summary["total_value"]
+    summary["cash_usd"] = round(ctx["cash_usd"], 2)
+    summary["total_value"] = round(summary["holdings_value"] + ctx["cash_usd"], 2)
+    denom = summary["base_value"] + ctx["cash_usd"]
+    if denom > 0:
+        summary["day_pnl_pct"] = summary["day_pnl"] / denom * 100
+    data = dict(portfolio_cache)
+    data["positions"] = positions
+    data["summary"] = summary
+    data["fetch_time"] = datetime.now().strftime("%H:%M:%S")
+    data["fund"] = fund_nav_cache
+    data["market"] = market_cache
+    data["fx_spark"] = fx_spark
+    usdcnh = next((m.get("price") for m in (market_cache or [])
+                   if m.get("key") == "USDCNH" and m.get("price")), None)
+    cny = pf.build_cny_summary(summary["total_value"], usdcnh,
+                               _cny_cfg["invested"], _cny_cfg["expense"])
+    if cny:
+        data["cny"] = cny
+    return data
+
+
+async def _sse_overview_loop(interval: float = 2.0):
+    """SSE overview 推送：lp_push 价驱动的持仓总览秒级重建广播。
+
+    纯内存（_pf_ctx 快照 + quotes_hub 实时价），零外部请求；无客户端
+    空转短路。nav/recent_trades 不在推送载荷（日级 TWR 与留痕数据秒级
+    无意义），前端用上次轮询值兜底合并。
+    """
+    while True:
+        await asyncio.sleep(interval)
+        if not clients:
+            continue
+        try:
+            data = _live_overview_payload()
+            if data:
+                await _broadcast("overview", data)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning("SSE overview 广播失败: %s", e)
 
 
 async def _lp_on_events(events: list[dict]):
@@ -1579,6 +1669,11 @@ async def _portfolio_loop():
                 "cash": cash_rows,
                 "errors": [] if quotes else ["行情源暂不可用"],
             }
+            # 推送价重建上下文（SSE overview 循环消费）：引用快照不复制，
+            # 浅拷贝合并发生在消费侧（_live_overview_payload）
+            _pf_ctx.update(holdings=holdings, quotes=quotes, cash_usd=cash_usd,
+                           fx=fx_state["rate"], base=base_overrides,
+                           close=close_overrides, at=time.time())
             # 常规时段写 tick；夜盘/周末（closed）在 24h数据源代理价生效时
             # 同样写 tick，24h 曲线跨夜盘/周末连续累积（日线聚合取每场最后一条不受影响）
             if quotes and (session != "closed" or overnight_used > 0):

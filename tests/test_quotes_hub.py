@@ -9,19 +9,31 @@ import quotes_hub as qh
 
 
 def test_sampler_one_second_last_value():
-    """同秒高频 tick 只保留末值，换秒价变才出队。"""
-    s = qh.Sampler()
+    """同窗口高频 tick 只保留末值，跨窗口价变才出队（window=1 验证窗口语义）。"""
+    s = qh.Sampler(window=1.0)
     t0 = 1000.0
     s.push("QQQ", 100.0, t0)
-    s.push("QQQ", 100.2, t0 + 0.4)     # 同秒 → 取末值
-    s.push("QQQ", 100.5, t0 + 1.2)     # 新秒 + 价变
+    s.push("QQQ", 100.2, t0 + 0.4)     # 同窗口 → 取末值
+    s.push("QQQ", 100.5, t0 + 1.2)     # 新窗口 + 价变
     rows = s.drain()
     assert rows == [("QQQ", 100.2), ("QQQ", 100.5)]
 
 
+def test_sampler_default_window_60s():
+    """生产默认 60s 窗口：窗口内高频 tick 只留末值（落库不放大）。"""
+    s = qh.Sampler()                   # 默认 SAMPLE_WINDOW_SEC
+    assert s._window == 60.0
+    t0 = 1200.0                        # 窗口边界对齐（1200//60=20 整）
+    for i in range(30):                # 30 条秒级 tick 全落同一 60s 窗口
+        s.push("QQQ", 100.0 + i * 0.1, t0 + i)
+    s.push("QQQ", 103.5, t0 + 61.0)    # 跨窗口 + 价变
+    rows = s.drain()
+    assert rows == [("QQQ", 102.9), ("QQQ", 103.5)]   # 首窗口末值 + 新窗口价
+
+
 def test_sampler_price_change_only():
     """价未变不产生出队点；drain 带出当前窗口末值（首次落库）。"""
-    s = qh.Sampler()
+    s = qh.Sampler(window=1.0)
     t0 = 2000.0
     s.push("QQQ", 100.0, t0)
     s.push("QQQ", 100.0, t0 + 2.0)     # 价未变 → 不落
@@ -30,7 +42,7 @@ def test_sampler_price_change_only():
 
 def test_sampler_drain_no_repeat_after_flush():
     """已 flush 的窗口值不重复出队：价格停滞后连续 drain 不放大行数。"""
-    s = qh.Sampler()
+    s = qh.Sampler(window=1.0)
     t0 = 3000.0
     s.push("QQQ", 100.0, t0)
     s.push("QQQ", 101.0, t0 + 1.0)
@@ -69,10 +81,10 @@ def test_flush_once_batches_and_staggers_same_symbol(monkeypatch):
         return len(rows)
 
     monkeypatch.setattr(db, "save_market_ticks_batch", fake_batch)
-    monkeypatch.setattr(qh, "_sampler", qh.Sampler())  # 隔离模块级采样器
+    monkeypatch.setattr(qh, "_sampler", qh.Sampler(window=1.0))  # 隔离模块级采样器
     qh.push_tick("QQQ", 100.0, now=4000.0)
-    qh.push_tick("QQQ", 100.5, now=4000.4)             # 同秒取末值
-    qh.push_tick("QQQ", 101.0, now=4001.2)             # 换秒价变
+    qh.push_tick("QQQ", 100.5, now=4000.4)             # 同窗口取末值
+    qh.push_tick("QQQ", 101.0, now=4001.2)             # 跨窗口价变
     n = asyncio.run(qh.flush_once())
     assert n == 2
     rows = captured["rows"]
@@ -82,13 +94,16 @@ def test_flush_once_batches_and_staggers_same_symbol(monkeypatch):
 
 
 def test_drain_then_new_price_same_second():
-    """drain 后同秒来新价：flushed 重置，再 drain 带出新价（兜住最后一个价变）。"""
-    s = qh.Sampler()
+    """窗口内已落库后同窗口来新价：不重复出队（每窗口至多一条）；
+    窗口内瞬时中间价可丢（下个窗口 drain 带出新末值，spark 无感）。"""
+    s = qh.Sampler(window=1.0)
     t0 = 7000.0
     s.push("QQQ", 100.0, t0)
     assert s.drain() == [("QQQ", 100.0)]   # 首次落库，窗口置 flushed
-    s.push("QQQ", 100.7, t0 + 0.3)         # 同秒新价 → flushed 重置
-    assert s.drain() == [("QQQ", 100.7)]
+    s.push("QQQ", 100.7, t0 + 0.3)         # 同窗口新价 → flushed 继承
+    assert s.drain() == []                 # 窗口内不重复落库（100.7 为瞬时价可丢）
+    s.push("QQQ", 101.0, t0 + 1.2)         # 跨窗口
+    assert s.drain() == [("QQQ", 101.0)]   # 新窗口末值正常出队
 
 
 def test_flush_failure_requeue(monkeypatch):
@@ -99,7 +114,7 @@ def test_flush_failure_requeue(monkeypatch):
         raise RuntimeError("db down")
 
     monkeypatch.setattr(db, "save_market_ticks_batch", failing_batch)
-    monkeypatch.setattr(qh, "_sampler", qh.Sampler())
+    monkeypatch.setattr(qh, "_sampler", qh.Sampler(window=1.0))
     qh.push_tick("QQQ", 100.0, now=5000.0)
     qh.push_tick("QQQ", 101.0, now=5001.0)
     try:
@@ -134,7 +149,7 @@ def test_max_queue_truncate(monkeypatch):
         return len(rows)
 
     monkeypatch.setattr(db, "save_market_ticks_batch", fake_batch)
-    s = qh.Sampler()
+    s = qh.Sampler(window=1.0)
     t0 = 6000.0
     s.push("QQQ", 1.0, t0)
     s.push("MU", 2.0, t0)

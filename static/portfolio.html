@@ -980,7 +980,6 @@ function renderOverview(d) {
   document.getElementById('fxInfo').textContent = 'USD/HKD ' + fmt(d.fx_usdhkd, 4) + (d.fx_fallback ? '(默认)' : '');
 
   renderMarket(d);
-  loadMacro();
   renderPositions(d);
   drawAnalysis(d);
   // overview 到达即触发分时重绘：baseTotalCache 已更新，消除最长 30s 轮询空窗的口径偏差
@@ -1691,6 +1690,9 @@ window.addEventListener('resize', () => {
   }, 120);
 });
 refresh(); loadChart();
+// 宏观四指标日更数据：独立 10min 低频拉取（曾挂在 renderOverview 里随
+// overview 每 10s 请求一次日更数据，纯浪费）；SSE overview 推送不再触发
+loadMacro(); setInterval(loadMacro, 600000);
 
 // ===== 数据源健康提醒（长桥主源状态，60s 轮询；异常时页首橙色横幅）=====
 async function checkDatasource() {
@@ -1716,7 +1718,9 @@ async function checkDatasource() {
   } catch (e) { /* 拉取失败静默，下轮再查 */ }
 }
 setInterval(checkDatasource, 60000); checkDatasource();
-setInterval(refresh, 10000);
+// overview 轮询降为 60s 兜底：常态走 SSE overview 推送（2s 级推送价重建），
+// SSE 断连/降级时仍有分钟级数据（页面不空转）@author yys
+setInterval(refresh, 60000);
 // 分时（24h/当日）30s 轮询；日线区间不轮询
 setInterval(() => { if (isIntradayMode()) loadChart(); }, 30000);
 
@@ -2629,7 +2633,7 @@ esAlert.addEventListener('alert', ev => {
     }
   } catch (e) { /* 通知失败不影响面板刷新 */ }
 });
-// SSE 断连保护：连续 3 次错误关闭长连接，回退现有 10s 轮询（页面不炸）；
+// SSE 断连保护：连续 3 次错误关闭长连接，回退 60s 轮询兜底（页面不炸）；
 // onopen 复位计数——EventSource 原生自动重连成功后清零，防长跑页面跨多次
 // 偶发断连累计到 3 后永久放弃 SSE（实时价静默降级且无自愈）@author yys
 let sseFails = 0;
@@ -2652,6 +2656,19 @@ esAlert.addEventListener('quote', ev => {
       if (pv) pv.textContent = fmt(q.price, 2);
     });
   } catch (e) { /* quote 事件解析失败不影响主流程 */ }
+});
+// SSE overview 事件（推送价重建的持仓总览，2s 级）：全量重渲染（含汇总卡/
+// 持仓行/看板）；nav 块与 recent_trades 不在推送载荷（日级 TWR 秒级无意义），
+// 用上次轮询值兜底合并；macro 已摘出独立 10min 低频（日更数据不随总览刷）
+esAlert.addEventListener('overview', ev => {
+  try {
+    const d = JSON.parse(ev.data);
+    if (d.nav === undefined && lastOverview && lastOverview.nav) d.nav = lastOverview.nav;
+    if (d.recent_trades === undefined && lastOverview && lastOverview.recent_trades)
+      d.recent_trades = lastOverview.recent_trades;
+    cashData = d.cash || cashData;
+    renderOverview(d);
+  } catch (e) { /* overview 事件解析失败不影响主流程 */ }
 });
 
 loadAlerts();   // 首次进入初始化未读 badge
