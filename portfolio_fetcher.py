@@ -59,7 +59,8 @@ H24_ALIAS = {"QQQM": "QQQ"}
 # 交易的美股标的（如 AMKR/PCG/F，F 为既有射频识别业务代号、严禁误配到其它
 # 同名符号）夜盘活价补齐；
 # 仅支持单 symbol 逐只请求（weight=1/只），网关域名境内直连可达（免代理），
-# 双层鉴权：X-Auth-Token（网关）+ X-H24-APIKEY（业务），两值相同
+# 双层鉴权：X-Auth-Token（网关）+ X-MBX-APIKEY（上游线协议 header 名，
+# 接口契约原样保留，2026-10-10 命名统一误改 X-H24-APIKEY 致上游 -2014 回归），两值相同
 # 网关地址与业务 key 全部经环境变量注入（QDII_EQUITY_QUOTE_URL /
 # QDII_EQUITY_API_KEY）；任一缺失时股票行情补齐请求安全跳过，标的自然
 # 回退新浪扩展价定格口径
@@ -1062,7 +1063,7 @@ async def fetch_equity_overnight_quotes(symbols: list[str]) -> dict[str, dict]:
         return {}
     if not EQUITY_QUOTE_URL or not EQUITY_API_KEY:
         return {}   # 网关地址/key 未配置：跳过补齐，标的维持盘后价定格口径
-    headers = {"X-Auth-Token": EQUITY_API_KEY, "X-H24-APIKEY": EQUITY_API_KEY}
+    headers = {"X-Auth-Token": EQUITY_API_KEY, "X-MBX-APIKEY": EQUITY_API_KEY}
 
     async def _one(client: httpx.AsyncClient, sym: str) -> tuple[str, dict | None]:
         try:

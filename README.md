@@ -103,7 +103,7 @@
 
 ## 自建行情网关（可选）
 
-**背景**：加密数据源对部分服务器 IP 有访问限制，直连不可达时可部署一个 Cloudflare Worker 反向代理作中转——「股票行情网关」即由此而来。无交易标的（AMKR/PCG/F 等）的夜盘活价补齐同样经该网关：业务侧 `X-Auth-Token` 与 `X-H24-APIKEY` 双头同值鉴权，消费逻辑见 `portfolio_fetcher.py`。
+**背景**：加密数据源对部分服务器 IP 有访问限制，直连不可达时可部署一个 Cloudflare Worker 反向代理作中转——「股票行情网关」即由此而来。无交易标的（AMKR/PCG/F 等）的夜盘活价补齐同样经该网关：业务侧 `X-Auth-Token`（网关鉴权）与 `X-MBX-APIKEY`（上游线协议 header，Worker 校验后原样透传）双头同值鉴权，消费逻辑见 `portfolio_fetcher.py`。
 
 部署步骤：
 

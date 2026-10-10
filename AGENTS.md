@@ -47,7 +47,7 @@
 | twelvedata | 美股兜底 + USDCNH(离岸) 主价 + 锚点恢复兜底 | 直连 | 8 credits/min，60s 节流 |
 | 长桥 LongPort | 冷启动锚点恢复主源（日K收盘价）+ pre/post 扩展价 | 直连 | 扩展价随轮 30/60s；锚点后台逐只 4s |
 | 24h数据源 | 收盘→开盘全段美股活价 | **直连可用**（公开行情镜像域名） | 闭市 60s（bookTicker 批量 weight 1） |
-| 24h数据源·股票行情 | 无交易标的（AMKR/PCG/F）夜盘活价 | 直连（<h24-gateway-host> 网关，X-Auth-Token+X-H24-APIKEY 双鉴权同值） | 闭市 60s 逐只并发（weight 1/只）；日均 ~4.7K 次 ≈ 200K events/天套餐的 2.4% |
+| 24h数据源·股票行情 | 无交易标的（AMKR/PCG/F）夜盘活价 | 直连（<h24-gateway-host> 网关，X-Auth-Token 网关鉴权 + X-MBX-APIKEY 上游线协议 header 双鉴权同值，2026-10-10 修复 X-H24-APIKEY 误改回归） | 闭市 60s 逐只并发（weight 1/只）；日均 ~4.7K 次 ≈ 200K events/天套餐的 2.4% |
 | HSBC/致富邮件 | 成交记录（自动应用持仓/现金，致富同发件人营销邮件靠解析门槛挡） | IMAP 直连 | 30min 双源同轮 |
 | 众安银行邮件 | 换汇/转出/派息/入金通知 | IMAP 直连 | 按需（记账采样辅助，无自动轮询） |
 | ECB frankfurter.dev | 记账汇率日线（CNY/HKD/USD） | 直连 | 每日 22:35（库空回填一次区间） |
