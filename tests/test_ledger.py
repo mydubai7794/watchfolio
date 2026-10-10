@@ -324,6 +324,7 @@ class TestLedgerApi:
         monkeypatch.setattr(server.db, "upsert_ledger_event", fake_upsert)
         monkeypatch.setattr(server.db, "sync_ledger_cny_invested", fake_sync)
         monkeypatch.setattr(server.db, "get_session", _fake_valid_session())
+        monkeypatch.setattr(server, "_cny_cfg", {"invested": 0.0, "expense": 0.0})
         client.cookies.set("session_token", "t-ledger-1")
         try:
             r = client.post("/api/ledger/events", json={"events": [
