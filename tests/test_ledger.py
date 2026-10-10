@@ -318,7 +318,11 @@ class TestLedgerApi:
             upserted.append(ev)
             return 1
 
+        async def fake_sync():
+            return {"before": 0.0, "after": 0.0}
+
         monkeypatch.setattr(server.db, "upsert_ledger_event", fake_upsert)
+        monkeypatch.setattr(server.db, "sync_ledger_cny_invested", fake_sync)
         monkeypatch.setattr(server.db, "get_session", _fake_valid_session())
         client.cookies.set("session_token", "t-ledger-1")
         try:
@@ -375,6 +379,32 @@ class TestLedgerApi:
         finally:
             client.cookies.clear()
 
+    def test_post_events_derived_sync(self, monkeypatch):
+        async def fake_upsert(**ev):
+            return 1
+
+        async def fake_sync():
+            return {"before": 500.0, "after": 1180.0}
+
+        monkeypatch.setattr(server.db, "upsert_ledger_event", fake_upsert)
+        monkeypatch.setattr(server.db, "sync_ledger_cny_invested", fake_sync)
+        monkeypatch.setattr(server.db, "get_session", _fake_valid_session())
+        monkeypatch.setattr(server, "_cny_cfg", {"invested": 500.0, "expense": 0.0})
+        client.cookies.set("session_token", "t-ledger-4")
+        try:
+            r = client.post("/api/ledger/events", json={"events": [
+                {"event_date": "2026-10-08", "event_type": "inflow",
+                 "account": "za_bank", "direction": "+", "amount_ccy": "CNY",
+                 "amount": 10000, "ref_no": "TEST-SYNC-1",
+                 "usd_equivalent": 1491.48, "cny_amount": 10000}]})
+            assert r.status_code == 200
+            data = r.json()
+            assert data["ok"] is True and data["applied"] == 1
+            assert data["derived_sync"]["cny_invested"] == {"before": 500.0, "after": 1180.0}
+            assert server._cny_cfg["invested"] == 1180.0
+        finally:
+            client.cookies.clear()
+
 
 # ---------------------------------------------------------------------------
 # sync_ledger_cny_invested（cny_invested 服务端重算同步）
@@ -428,3 +458,10 @@ class TestSyncCnyInvested:
         out = run(db.sync_ledger_cny_invested())
         assert out == {"before": 500.0, "after": 1180.0}
         assert calls["value"] == "1180.00"
+
+    def test_sync_zero_sum_decimal_falsy(self, monkeypatch):
+        # Σ 恰为 Decimal("0.00"）时 or 0 短路 → after=0.0（负向冲正完全抵减场景）
+        calls = self._patch(monkeypatch, Decimal("0.00"), "500")
+        out = run(db.sync_ledger_cny_invested())
+        assert out == {"before": 500.0, "after": 0.0}
+        assert calls["value"] == "0.00"

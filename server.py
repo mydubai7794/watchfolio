@@ -2823,7 +2823,12 @@ async def ledger_events_post(data: dict):
             recv_amount=ev.get("recv_amount"), usd_equivalent=ev.get("usd_equivalent"),
             cny_amount=ev.get("cny_amount"), mid_rate=ev.get("mid_rate"),
             note=ev.get("note"), ref_no=ev["ref_no"])
-    return {"ok": True, "applied": len(events)}
+    # 派生值同步：重算 cny_invested=Σ inflow.cny_amount 覆盖写（幂等），
+    # 直写 _cny_cfg 令持仓页 CNY 卡片零延迟生效（不等下一持仓轮低频刷新）
+    sync = await db.sync_ledger_cny_invested()
+    _cny_cfg["invested"] = sync["after"]
+    return {"ok": True, "applied": len(events),
+            "derived_sync": {"cny_invested": sync}}
 
 
 @app.get("/api/ledger/events")
