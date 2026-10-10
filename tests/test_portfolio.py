@@ -983,27 +983,27 @@ class TestBuildCnySummary:
 
     def test_cny_summary_math(self):
         """value=总资产×汇率；pnl=value-本金；pct 以本金为分母。"""
-        out = pf.build_cny_summary(12000.0, 7.0, 84850.0)
-        assert out == {"rate": 7.0, "invested": 84850.0,
-                       "invested_gross": 84850.0, "expense": 0.0,
-                       "value": 84000.0, "pnl": -850.0,
-                       "pnl_pct": pytest.approx(-1.0, abs=0.01)}
+        out = pf.build_cny_summary(12000.0, 7.0, 100000.0)
+        assert out == {"rate": 7.0, "invested": 100000.0,
+                       "invested_gross": 100000.0, "expense": 0.0,
+                       "value": 84000.0, "pnl": -16000.0,
+                       "pnl_pct": pytest.approx(-16.0, abs=0.01)}
 
     def test_cny_summary_net_invested(self):
         """净投入口径：消费从本金扣除，pnl/pct 以净投入为分母（与记账页一致）。"""
-        out = pf.build_cny_summary(12000.0, 7.0, 84850.0, 246.32)
-        assert out["invested"] == 84603.68
-        assert out["invested_gross"] == 84850.0
-        assert out["expense"] == 246.32
-        assert out["pnl"] == pytest.approx(84000.0 - 84603.68, abs=0.01)
-        assert out["pnl_pct"] == pytest.approx(-603.68 / 84603.68 * 100, abs=0.02)
+        out = pf.build_cny_summary(12000.0, 7.0, 100000.0, 300.0)
+        assert out["invested"] == 99700.0
+        assert out["invested_gross"] == 100000.0
+        assert out["expense"] == 300.0
+        assert out["pnl"] == pytest.approx(84000.0 - 99700.0, abs=0.01)
+        assert out["pnl_pct"] == pytest.approx(-15700.0 / 99700.0 * 100, abs=0.02)
 
     def test_cny_summary_missing_inputs(self):
         """汇率未就绪/本金未配置/总资产为空/净投入非正 → None（前端降级 --）。"""
-        assert pf.build_cny_summary(12000.0, None, 84850.0) is None
+        assert pf.build_cny_summary(12000.0, None, 100000.0) is None
         assert pf.build_cny_summary(12000.0, 7.0, None) is None
         assert pf.build_cny_summary(12000.0, 7.0, 0.0) is None
-        assert pf.build_cny_summary(None, 7.0, 84850.0) is None
+        assert pf.build_cny_summary(None, 7.0, 100000.0) is None
         assert pf.build_cny_summary(12000.0, 7.0, 100.0, 100.0) is None
 
 

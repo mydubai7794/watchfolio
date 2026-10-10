@@ -458,7 +458,7 @@ def _setup_pf_ctx(monkeypatch, quotes):
     monkeypatch.setattr(server, "market_cache",
                         [{"key": "USDCNH", "price": 7.2}])
     monkeypatch.setattr(server, "fx_spark", [])
-    monkeypatch.setattr(server, "_cny_cfg", {"invested": 84850.0, "expense": 0.0})
+    monkeypatch.setattr(server, "_cny_cfg", {"invested": 100000.0, "expense": 0.0})
 
 
 def test_live_overview_overrides_with_fresh_lp_price(monkeypatch):
@@ -475,7 +475,7 @@ def test_live_overview_overrides_with_fresh_lp_price(monkeypatch):
     assert s["total_value"] == pytest.approx(1030.0 + 1000.0)   # 含现金
     # cny：value=总资产×USDCNH，pnl=value−净投入
     assert data["cny"]["value"] == pytest.approx(2030.0 * 7.2, rel=1e-6)
-    assert data["cny"]["pnl"] == pytest.approx(2030.0 * 7.2 - 84850.0, rel=1e-6)
+    assert data["cny"]["pnl"] == pytest.approx(2030.0 * 7.2 - 100000.0, rel=1e-6)
 
 
 def test_live_overview_skips_stale_and_non_lp(monkeypatch):

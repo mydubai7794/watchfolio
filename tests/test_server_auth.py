@@ -600,7 +600,7 @@ class TestAgentPortfolioApi:
         self._patch_key(monkeypatch, "right-key")
         server.portfolio_cache = dict(self._base_cache)
         server.market_cache = [{"key": "USDCNH", "price": 7.1}]
-        server._cny_cfg["invested"] = 84850.0
+        server._cny_cfg["invested"] = 100000.0
         server._cny_cfg["expense"] = 0.0
         try:
             r = client.get("/api/agent/portfolio", headers={"X-API-Key": "right-key"})

@@ -1,4 +1,9 @@
-"""测试 AKShare 中可用的全球股指期货数据源。
+"""开发期调研探测脚本，非回归测试（移出 tests/：akshare 不在 requirements，且需真实网络）。
+
+原路径 tests/test_akshare_futures_sources.py，pytest 收集期即触发模块级
+真实网络请求，不属于本地回归基线；仅在开发期手动运行做数据源调研。
+
+调研内容：AKShare 中可用的全球股指期货数据源。
 
 目的：
 1. 验证东方财富数据源能获取哪些股指期货

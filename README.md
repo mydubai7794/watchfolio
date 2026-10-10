@@ -124,7 +124,8 @@ python3 -m pytest tests/test_portfolio.py tests/test_decision_model.py \
 ```
 
 - 测试为纯本地运行（不起服务）；
-- `tests/test_ledger.py` 依赖本地 `ledger_seed.py`（真实记账流水，**隐私不入库**、已被 gitignore）：文件缺失时 `pytest.importorskip` 自动跳过实算测试（见 `tests/test_ledger.py:15-17`）；格式参考 `ledger_seed.example.py`，复制为 `ledger_seed.py` 即可跑全量。
+- `tests/test_ledger.py` 依赖本地 `ledger_seed.py`（真实记账流水，**隐私不入库**、已被 gitignore）：文件缺失时 `pytest.importorskip` 自动跳过实算测试（见 `tests/test_ledger.py:15-18`）；格式参考 `ledger_seed.example.py`，复制为 `ledger_seed.py` 即可跑全量。
+- 其余 `tests/` 下文件为存量/探索性脚本，不在基线内（含已知存量坏 `test_scorer.py`）。
 
 ## 已知局限与未实现
 

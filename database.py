@@ -405,15 +405,15 @@ async def init_tables():
         _pool=pool,
     )
 
-    # ---- 种子持仓 (示例数据，幂等) ----
+    # ---- 种子持仓 (示例数据，幂等；数量/成本为演示值，非真实持仓) ----
     seed_holdings = [
-        ("MU", "美光科技", "US", 100, 900.0, "USD", 1),
-        ("SKHY", "SK海力士 ADR", "US", 100, 150.0, "USD", 2),
-        ("QQQM", "纳斯达克100ETF-Invesco", "US", 200, 250.0, "USD", 3),
-        ("SPYM", "标普500ETF-SPDR", "US", 300, 75.0, "USD", 4),
-        ("DRAM", "存储芯片ETF-Roundhill", "US", 200, 45.0, "USD", 5),
-        ("DISK", "存储芯片ETF-Tema", "US", 200, 30.0, "USD", 6),
-        ("HK0000740297", "邓普顿智选亚太股票入息基金 A(Mdis) HKD", "HKFUND", 5000, 13.0, "HKD", 7),
+        ("MU", "美光科技", "US", 10, 100.0, "USD", 1),
+        ("SKHY", "SK海力士 ADR", "US", 20, 50.0, "USD", 2),
+        ("QQQM", "纳斯达克100ETF-Invesco", "US", 30, 80.0, "USD", 3),
+        ("SPYM", "标普500ETF-SPDR", "US", 40, 25.0, "USD", 4),
+        ("DRAM", "存储芯片ETF-Roundhill", "US", 50, 15.0, "USD", 5),
+        ("DISK", "存储芯片ETF-Tema", "US", 50, 10.0, "USD", 6),
+        ("HK0000740297", "邓普顿智选亚太股票入息基金 A(Mdis) HKD", "HKFUND", 1000, 5.0, "HKD", 7),
     ]
     for symbol, name, market, qty, cost, curr, sort in seed_holdings:
         await execute(

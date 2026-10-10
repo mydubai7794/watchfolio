@@ -23,6 +23,48 @@ def run(coro):
     return asyncio.run(coro)
 
 
+# ---------------------------------------------------------------------------
+# 期望值独立重算辅助：从 SEED_EVENTS 自带字段独立累加，与 build_report
+# 内部实现各自书写（期望不绑死任何具体种子数值，对任意种子数据成立）。
+# 口径常数：HKD→USD 静态折算 7.846（系统口径契约，字面量保持独立性）。
+# ---------------------------------------------------------------------------
+
+HKD2USD = 7.846
+
+
+def _seed_usd_sum(etype):
+    """按事件类型独立累加 usd_equivalent。"""
+    return sum(float(e.get("usd_equivalent") or 0)
+               for e in SEED_EVENTS if e["event_type"] == etype)
+
+
+def _seed_inflow_totals():
+    """入金事件独立累加 → (总投入CNY, 美元入金USD)。"""
+    inflows = [e for e in SEED_EVENTS if e["event_type"] == "inflow"]
+    return (sum(float(e["cny_amount"] or 0) for e in inflows),
+            sum(float(e.get("usd_equivalent") or 0) for e in inflows))
+
+
+def _seed_fx_rows():
+    """fx 事件逐笔独立重算 → {ref_no: (理论应得, 点差%, 损失USD)}。
+
+    点差 = 理论应得(mid×付出金额) − 实际到账（正=少得）；
+    收币为 HKD 时损失按 7.846 折 USD。
+    """
+    rows = {}
+    for e in SEED_EVENTS:
+        if e["event_type"] != "fx" or not e.get("mid_rate"):
+            continue
+        theo = float(e["amount"]) * float(e["mid_rate"])
+        actual = e.get("recv_amount")
+        if actual is None or theo <= 0:
+            continue
+        diff = theo - float(actual)
+        loss = diff / HKD2USD if (e.get("recv_ccy") or "") == "HKD" else diff
+        rows[e["ref_no"]] = (theo, diff / theo * 100, loss)
+    return rows
+
+
 class TestLedgerCrud:
     def test_upsert_ledger_event_sql(self, monkeypatch):
         captured = {}
@@ -92,31 +134,53 @@ class TestBuildReport:
         return ledger.build_report(SEED_EVENTS, **ctx)
 
     def test_v3_baselines(self):
+        """summary 各分项 == 从 SEED_EVENTS 独立累加的期望值（不绑死种子数值）。"""
         r = self._report()
         s = r["summary"]
-        assert s["total_cny_invested"] == 84850.0
-        assert abs(s["usd_in"] - 12478.27) < 0.05
-        assert abs(s["avg_cost"] - 6.7998) < 0.0005          # 总投入/美元入金折算
-        assert abs(s["fx_loss_usd"] - 43.32) < 0.15           # v3: 43.32(购汇30.19+账户内13.13)
-        assert abs(s["fee_usd"] - 13.14) < 0.05
-        assert abs(s["reward_usd"] - 163.01) < 0.5            # v3估算161,种子实算163.01
-        assert abs(s["realized_usd"] - (-36.68)) < 0.05
-        assert abs(s["expense_usd"] - 36.73) < 0.05
-        assert abs(s["external_transfer_usd"] - 2.26) < 0.05
-        assert s["pending_count"] == 0
+        gross_cny, usd_in = _seed_inflow_totals()
+        fx_rows = _seed_fx_rows()
+        assert s["total_cny_invested"] == pytest.approx(gross_cny, abs=0.01)
+        assert s["usd_in"] == pytest.approx(usd_in, abs=0.01)
+        assert s["avg_cost"] == pytest.approx(gross_cny / usd_in, abs=0.0005)  # 总投入/美元入金
+        assert s["fx_loss_usd"] == pytest.approx(
+            sum(v[2] for v in fx_rows.values()), abs=0.01)
+        assert s["fee_usd"] == pytest.approx(_seed_usd_sum("fee"), abs=0.01)
+        assert s["reward_usd"] == pytest.approx(_seed_usd_sum("reward"), abs=0.01)
+        assert s["realized_usd"] == pytest.approx(_seed_usd_sum("realized"), abs=0.01)
+        assert s["expense_usd"] == pytest.approx(_seed_usd_sum("expense"), abs=0.01)
+        expected_ext = sum(float(e["usd_equivalent"]) for e in SEED_EVENTS
+                           if e["event_type"] == "transfer"
+                           and e.get("account") == "external"
+                           and e.get("usd_equivalent") is not None)
+        assert s["external_transfer_usd"] == pytest.approx(expected_ext, abs=0.01)
+        pending = sum(1 for e in SEED_EVENTS
+                      if e["event_type"] == "inflow" and e.get("cny_amount") is None)
+        assert s["pending_count"] == pending
 
     def test_v3_identity(self):
+        """恒等式分项 == 从 SEED_EVENTS+报表上下文独立重算（净投入口径）。"""
         r = self._report()
         i = r["identity"]
-        assert abs(i["gain_usd"] - 1210.44) < 0.5             # 增值(消耗回流口径)
-        assert abs(i["gain_pct"] - 9.73) < 0.05
-        assert abs(i["fx_loss_cny"] - (-1169.5)) < 1.5        # 勘误后(v3的-589基于错误avg)
-        assert abs(i["expense_cny"] - 246.4) < 0.5
-        assert abs(i["invest_net_cny"] - 84603.68) < 0.5      # 净投入=总投入-消耗
-        assert abs(i["net_cny"] - 6947.86) < 0.5              # 净投入口径(消耗从本金扣除)
-        assert abs(i["net_pct"] - 8.21) < 0.05
-        assert abs(i["gain_cny"] - 8117.33) < 0.5             # 增值CNY=两项分解之一
-        assert abs(i["identity_check_cny"] - i["net_cny"]) < 1.0  # 净=增值+汇损闭环±1
+        total_assets, usdcnh = 13651.98, 6.7061
+        gross_cny, usd_in = _seed_inflow_totals()
+        expense_usd = _seed_usd_sum("expense")
+        # 独立重算：净投入 = 总投入 − 消耗折CNY；net = 总资产×USDCNH − 净投入
+        expense_cny = expense_usd * usdcnh
+        invest_net = gross_cny - expense_cny
+        gain_usd = total_assets + expense_usd - usd_in
+        fx_loss_cny = usd_in * (usdcnh - gross_cny / usd_in)
+        net_cny = total_assets * usdcnh - invest_net
+        assert i["gain_usd"] == pytest.approx(gain_usd, abs=0.01)
+        assert i["gain_pct"] == pytest.approx(
+            gain_usd / (usd_in - expense_usd) * 100, abs=0.01)
+        assert i["fx_loss_cny"] == pytest.approx(fx_loss_cny, abs=0.5)
+        assert i["expense_cny"] == pytest.approx(expense_cny, abs=0.01)
+        assert i["invest_net_cny"] == pytest.approx(invest_net, abs=0.01)
+        assert i["net_cny"] == pytest.approx(net_cny, abs=0.01)
+        assert i["net_pct"] == pytest.approx(net_cny / invest_net * 100, abs=0.01)
+        assert i["gain_cny"] == pytest.approx(gain_usd * usdcnh, abs=0.01)
+        # 结构断言（恒等式闭环，保留）：净 = 增值 + 汇损 闭环 ±1
+        assert abs(i["identity_check_cny"] - i["net_cny"]) < 1.0
 
     def test_no_usdcnh_degrades(self):
         r = self._report(usdcnh=None)
@@ -124,30 +188,54 @@ class TestBuildReport:
         assert r["identity"]["net_cny"] is None               # 缺汇率时CNY恒等式置空不报错
 
     def test_channel_ranking(self):
-        ch = {c["channel"]: c for c in self._report()["channels"]}
-        assert abs(ch["汇丰柜台"]["wavg_spread_pct"] - 0.428) < 0.02   # v3: 0.41~0.43%最贵
-        assert abs(ch["众安App换U"]["wavg_spread_pct"] - 0.117) < 0.01  # v3: 0.117%最优
-        assert abs(ch["同事代换"]["wavg_spread_pct"] - (-1.80)) < 0.05  # 收益
-        ranked = [c["channel"] for c in self._report()["channels"]]
-        assert ranked[0] == "汇丰柜台"                          # 最贵排第一
+        """通道加权点差 == 按 fx 事件自带字段独立重算；报表按点差降序排列。"""
+        report = self._report()
+        ch = {c["channel"]: c for c in report["channels"]}
+        expect: dict[str, dict] = {}
+        for ref, (theo, _pct, loss) in _seed_fx_rows().items():
+            ev = next(e for e in SEED_EVENTS if e["ref_no"] == ref)
+            theo_usd = theo / HKD2USD if (ev.get("recv_ccy") or "") == "HKD" else theo
+            c = expect.setdefault(ev.get("channel") or "", {"wsum": 0.0, "loss": 0.0})
+            c["wsum"] += theo_usd
+            c["loss"] += loss
+        assert set(ch) == set(expect)             # 有可推导换汇的通道全部入报表
+        for name, agg in expect.items():
+            assert ch[name]["wavg_spread_pct"] == pytest.approx(
+                agg["loss"] / agg["wsum"] * 100, abs=0.01)
+        spreads = [c["wavg_spread_pct"] for c in report["channels"]]
+        assert spreads == sorted(spreads, reverse=True)       # 最贵排第一
 
     def test_balance_reconciliation(self):
-        cash = [{"currency": "HKD", "amount": 52.72}, {"currency": "USD", "amount": 371.79}]
+        """对账：ledger 侧=每「账户×币种」最新 balance 快照独立合计；system 侧回显传入。"""
+        latest: dict[tuple, dict] = {}
+        for e in SEED_EVENTS:
+            if e["event_type"] == "balance":
+                key = (e.get("account"), e["amount_ccy"])
+                if key not in latest or e["event_date"] >= latest[key]["event_date"]:
+                    latest[key] = e
+        expect: dict[str, float] = {}
+        for (_acct, ccy), e in latest.items():
+            expect[ccy] = round(expect.get(ccy, 0.0) + float(e["amount"]), 2)
+        # system 侧传入值取独立合计（对账闭环）；无 balance 事件的种子给演示值
+        cash = ([{"currency": c, "amount": v} for c, v in expect.items()]
+                or [{"currency": "USD", "amount": 100.0}])
         r = self._report(cash_accounts=cash)
         b = r["balances"]
-        assert abs(b["ledger"]["HKD"] - 52.72) < 0.01          # 众安32.52+汇丰20.20(各自最新快照合计)
-        assert abs(b["ledger"]["USD"] - 371.79) < 0.01         # 汇丰10-02最新+致富9-30最新
-        assert b["system"]["HKD"] == 52.72
-        assert abs(b["diff"]["HKD"]) < 0.01 and abs(b["diff"]["USD"]) < 0.01
+        for ccy, val in expect.items():
+            assert b["ledger"][ccy] == pytest.approx(val, abs=0.01)
+            assert b["system"][ccy] == val          # system 回显传入值
+            assert abs(b["diff"][ccy]) < 0.01       # 对账闭环：差异为 0
 
     def test_fx_row_derivation(self):
+        """fx 明细行 == 逐笔按事件自带 mid_rate+双边金额独立重算。"""
         rows = {row["ref_no"]: row for row in self._report()["fx_detail"]}
-        f01 = rows["V3-F01"]
-        assert abs(f01["theoretical"] - 11535.55) < 1          # 10000×1.153555
-        assert abs(f01["spread_pct"] - 0.274) < 0.02           # v3 §三
-        assert abs(f01["loss_usd"] - 4.04) < 0.05
-        f11 = rows["V3-F11"]
-        assert f11["loss_usd"] < 0                              # 同事代换=收益-2.25
+        expect = _seed_fx_rows()
+        assert set(rows) == set(expect)           # 可推导的 fx 事件全部入明细
+        for ref, (theo, spread_pct, loss) in expect.items():
+            row = rows[ref]
+            assert row["theoretical"] == pytest.approx(theo, abs=0.01)
+            assert row["spread_pct"] == pytest.approx(spread_pct, abs=0.01)
+            assert row["loss_usd"] == pytest.approx(loss, abs=0.01)
 
 
 class TestEcb:
@@ -263,7 +351,7 @@ class TestLedgerApi:
             return 13651.98
 
         async def fake_cash():
-            return [{"currency": "HKD", "amount": 52.72}, {"currency": "USD", "amount": 371.79}]
+            return [{"currency": "HKD", "amount": 100.0}, {"currency": "USD", "amount": 200.0}]
 
         monkeypatch.setattr(server.db, "get_ledger_events", fake_events)
         monkeypatch.setattr(server.db, "get_latest_portfolio_value", fake_value)
@@ -277,7 +365,12 @@ class TestLedgerApi:
             assert r.status_code == 200
             data = r.json()
             assert data["ok"] is True
-            assert abs(data["summary"]["total_cny_invested"] - 84850) < 0.01
-            assert abs(data["identity"]["net_cny"] - 6947.86) < 0.5
+            # 期望值从 SEED_EVENTS 独立重算（同 TestBuildReport 口径）
+            gross_cny, _usd_in = _seed_inflow_totals()
+            usdcnh = 6.7061
+            invest_net = gross_cny - _seed_usd_sum("expense") * usdcnh
+            expected_net = 13651.98 * usdcnh - invest_net
+            assert data["summary"]["total_cny_invested"] == pytest.approx(gross_cny, abs=0.01)
+            assert data["identity"]["net_cny"] == pytest.approx(expected_net, abs=0.5)
         finally:
             client.cookies.clear()
