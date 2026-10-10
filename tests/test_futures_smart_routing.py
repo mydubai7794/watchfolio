@@ -30,7 +30,8 @@ logging.basicConfig(level=logging.INFO)
 # ---------------------------------------------------------------------------
 
 TEST_PROXIES = [
-    "http://*REMOVED**REMOVED*:7779",
+    # RFC 2606 保留测试域假凭证，非真实代理
+    "http://proxyuser:proxypass@proxy.test:7779",
 ]
 
 TARGET_FUTURES = ["NQ", "ES", "YM"]

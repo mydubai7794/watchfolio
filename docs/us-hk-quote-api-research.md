@@ -153,17 +153,17 @@ Body:    GraphQL query + variables
 
 ## 五、代理池实测（用户新增三节点）
 
-测试方式：`curl -x http://*REMOVED*:***@host:7779 https://ipinfo.io/json`
+测试方式：`curl -x http://proxyuser:***@proxy.test:7779 https://ipinfo.io/json`
 
 | 入口 | 位置 | 实际出口 IP | 延迟 | 说明 |
 |---|---|---|---|---|
-| *REMOVED*:7779 | 春川（NLB 前置，主力） | ***REMOVED*（东京，Oracle AS31898）** | 0.56-0.79s | NLB 后端出口固定为东京（复测 3 次一致）；本机链路最优、**最快入口** |
-| *REMOVED*:7779 | 东京直连（备用） | *REMOVED*（同上） | 0.97-1.89s | 与春川入口**共享出口 IP** |
-| *REMOVED*:7779 | 洛杉矶 RackNerd | *REMOVED*（Santa Clara，AS36352） | ~0.97s | 独立美国出口 |
+| <proxy-ip-1>:7779 | 春川（NLB 前置，主力） | **<proxy-ip-2>（东京，Oracle AS31898）** | 0.56-0.79s | NLB 后端出口固定为东京（复测 3 次一致）；本机链路最优、**最快入口** |
+| <proxy-ip-2>:7779 | 东京直连（备用） | <proxy-ip-2>（同上） | 0.97-1.89s | 与春川入口**共享出口 IP** |
+| <proxy-ip-3>:7779 | 洛杉矶 RackNerd | <proxy-ip-3>（Santa Clara，AS36352） | ~0.97s | 独立美国出口 |
 
 **关键结论**：
-1. 三入口全部可用，认证方式 HTTP Basic（`*REMOVED*` / `*REMOVED*`），https 隧道正常
-2. **对目标站点而言独立出口 IP 只有 2 个**（东京 *REMOVED* + 美西 *REMOVED*）——限流按出口 IP 计时，春川/东京两入口应视为**同一个 (proxy,source) 限流单元**，勿当作两个 IP 轮换
+1. 三入口全部可用，认证方式 HTTP Basic（`<proxy-user>` / `<proxy-pass>`），https 隧道正常
+2. **对目标站点而言独立出口 IP 只有 2 个**（东京 <proxy-ip-2> + 美西 <proxy-ip-3>）——限流按出口 IP 计时，春川/东京两入口应视为**同一个 (proxy,source) 限流单元**，勿当作两个 IP 轮换
 3. 实测通过能力：Yahoo v7/v8（东京出口 ✅）、ipinfo（✅）；Google/DDG html 对两个数据中心出口均 connection reset（正常，搜索引擎反爬）；FT 官网 API（东京出口 ✅）
 4. 境内源（腾讯/新浪/东财）**不走这些代理**（境外出口访问境内源徒增延迟；东财封禁时换代理池里的境内代理或等待解封）
 5. 建议入库 `proxy_pool`：两个独立出口 + 本地 `127.0.0.1:7680` 共同组成海外源代理池，`/api/proxy` 现有 CRUD/检测直接复用

@@ -4,12 +4,16 @@
 扫描范围：
 - 默认：git 已跟踪文件 + 未跟踪且未被 .gitignore 忽略的文件（即将进入提交的全部内容）；
 - --cached：仅暂存区（git diff --cached --name-only）；
-- --history：对指纹逐条 `git log --all -S<串>` 回溯全历史提交（慢，仅供历史清洗复核）。
+- --history：对指纹逐条回溯全历史提交（慢，仅供历史清洗复核）——字面量指纹用
+  `git log --all -S<串>`，正则规则用 `git log --all -G<ERE>`（pickaxe 正则版，
+  规则须提供 ERE 兼容的历史版正则）。
 
-指纹来源（双保险）：
+指纹来源（三保险）：
 - 内置分段指纹：已知敏感串离线拆段硬编码——任何单行、任何单一常量都不含完整
   敏感串，运行时以 "".join(parts) 还原参与匹配，保证在没有 qdii.env 的环境
   （CI / 他人 clone）里仍能检出残留；
+- 通用形态正则：对「长桥 access_token」这类已被历史清洗波及、无法拆段保存的
+  指纹，以及 JWT / URL 内嵌凭证等自描述形态，用正则逐行匹配；
 - 动态加载：项目根 qdii.env 存在时叠加注册全部 value（长度 ≥8 才注册，防
   qdii / 3914 之类短通用值造成海量误报）。
 
@@ -120,21 +124,10 @@ _S08 = (  # QDII_LP_APP_SECRET，join 后按规则「长桥app_secret」参与�
     "6264260",
 )
 
-_S09 = (  # QDII_LP_ACCESS_TOKEN，join 后按规则「长桥access_token」参与匹配
-    "***REMOVED***iOiJKV1QifQ.eyJpc3",
-    "MiOiJsb25nYnJpZGdlIiwic3ViIjoiYWNjZXNzX3Rva2VuIiwiZXhwIjoxNzk4NzkxODcwLCJpYXQiOjE3",
-    "OTEwMTU4NzEsImFrIjoiaGtfMjhmNzgwZTNlYmQ5NTAyMmU4ZDNmZDdmN2E5MTM3MzgiLCJhYWlkIjowLC",
-    "JhYyI6IiIs***REMOVED***IiwiYmwi",
-    "OjAsInVsIjowLCJpayI6Il8wIiwicmVnaW9uX2hvbWUiOiJISyJ9.JIFkOljYd5v_QmnFnQFFfumKsNHTj",
-    "7NplijjjieVHXwgv1HIcDSvJ0v88AK_jVhejYA2uNVyvbtmJxrLM5t_L4Ghuur1vWycYkf6XG6WC9gfqb1",
-    "MKaKrmCbkIh7qVxr3wM2qxY8KnsN-S9JuHfOys3FtwE8xjl7UrZcDhrEtID405lgG3eXZbKowySlJgDNMw",
-    "eI***REMOVED***PVccuL9os2J6-wzK",
-    "PRAE-Fb_ddwcRt3mPP5mnGCNboqPNqj1Zd2Kxbpc6jo4sDdaDNmvi1Xt7_Y_BJY9uPZm7d3gh_4Q3K6UM6",
-    "QisaCUqHjSy2YPzxCDdWEs6hURjSxo2vGJbT296Uu6fmh5wcv5VwX93x_nLZR76W1HC6YD2DD0mVmSgt0z",
-    "ndcWPEjMJ1FX***REMOVED***Nx7tnB",
-    "QnCw6OEmx1y9ZcYiGbri1kwGNQoyfTq33dJ0bUZyX18VT0XeNztDKtBOo-mXlycdDSrqoxfn9QmoFCMem",
-    "0yEP7_wg1pcdWMfdrCnN678SV_Deq1K0Sq0MT0qT6***REMOVED***",
-)
+_S09 = ()  # 已废弃：长桥 access_token 分段指纹因历史清洗被 *REMOVED* 占位污染，
+           # join 后非真实 token（指纹失效）。检测改由通用形态正则
+           # 「长桥access_token」（hk_m_eyJ 前缀 + 长 JWT 体）承担，见
+           # _register_default_patterns；历史回溯走 git -G（ERE 兼容）。
 
 _S10 = (  # AGENTS.local.md 服务器地址，join 后按规则「服务器IP」参与匹配
     "43.142",
@@ -168,7 +161,6 @@ _BUILTIN_PARTS = [
     ("邮箱授权码", _S06),
     ("长桥app_key", _S07),
     ("长桥app_secret", _S08),
-    ("长桥access_token", _S09),
     ("服务器IP", _S10),
     ("主站域名", _S11),
     ("网关域名", _S12),
@@ -181,37 +173,70 @@ class SecretDetector:
 
     def __init__(self):
         self._literals = []   # [(规则名, 完整串)]
-        self._patterns = []   # [(规则名, 编译后正则)]
+        self._patterns = []   # [(规则名, 编译后正则, ERE历史版)]
         self._register_default_patterns()
 
     def _register_default_patterns(self):
-        """通用检测模式（每个实例自带；孤立 JWT 头片段等自描述文本不误报）。"""
+        """通用检测模式（每个实例自带；孤立 JWT 头片段等自描述文本不误报）。
+
+        每条规则附带 ERE 兼容的「历史版」正则供 git log -G 全历史回溯使用：
+        git pickaxe 正则只支持 POSIX ERE（无 (?i)/(?:(?!…) 等 PCRE 特性，
+        字符类内 \\s 语义也不同于 Python re），Python 与 ERE 语法不一致时
+        必须显式给 history_ere（近似版宁可多报不可漏报）。
+        """
+        # 长桥 app_key 形态（ERE 兼容，历史版同体）
         self.register_pattern("长桥key形态", r"hk_[0-9a-f]{16,}")
-        # 完整三段式 JWT（header.payload.signature）
+        # 长桥 access_token 特有形态：hk_m_ 前缀 + 长 JWT 体（ERE 兼容）。
+        # 原 _S09 分段指纹因历史清洗被 *REMOVED* 占位污染已报废，改由本规则承担
+        self.register_pattern("长桥access_token", r"hk_m_eyJ[A-Za-z0-9_.-]{100,}")
+        # 完整三段式 JWT（header.payload.signature；ERE 兼容）
         self.register_pattern(
             "裸JWT",
             r"eyJhbGciOi[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{20,}")
-        # 明文密码进命令行（引号内 ≥4 字符密码实体；`-p'明文'`/`-p'…'` 等占位符写法不报）
+        # 明文密码进命令行（引号内 ≥4 字符密码实体；`-p'明文'`/`-p'…'` 等占位符写法不报；
+        # ERE 兼容）
         self.register_pattern("命令行明文密码", r"mysql -p'[^']{4,}'")
         # 疑似硬编码密钥赋值；负向断言排除「值为全大写蛇形环境变量键名」的伪硬编码
-        # （如 CFG_KEY_APP_SECRET = "LONGPORT_APP_SECRET" 这类配置键名常量）
+        # （如 CFG_KEY_APP_SECRET = "LONGPORT_APP_SECRET" 这类配置键名常量）。
+        # ERE 无 (?i)/负向前视 → 历史版为大小写枚举近似（无键名排除，宁可多报）
         self.register_pattern(
             "疑似硬编码密钥赋值",
             r"(?i)(?:password|passwd|secret|api_key|apikey)\s*[=:]\s*['\"]"
-            r"(?-i:(?![A-Z0-9_]{12,}['\"]))[^'\"]{12,}['\"]")
+            r"(?-i:(?![A-Z0-9_]{12,}['\"]))[^'\"]{12,}['\"]",
+            history_ere="(password|passwd|secret|api_key|apikey"
+                        "|Password|Passwd|Secret|API_KEY|ApiKey|APIKEY)"
+                        "[[:space:]]*[=:][[:space:]]*['\"][^'\"]{12,}")
+        # URL 内嵌凭证（user:pass@host 形态）。豁免保留测试域主机：
+        # *.test / *.example / *.invalid / localhost / 127.0.0.1。
+        # ERE 无负向前视 → 历史版为无豁免近似（多报测试域假凭证，复核时人工识别）
+        self.register_pattern(
+            "URL内嵌凭证",
+            r"https?://[^/\s:'\"]+:[^/\s'\"]+@"
+            r"(?!(?:[0-9A-Za-z-]+\.)*(?i:test|example|invalid)\b"
+            r"|localhost\b|127\.0\.0\.1\b)"
+            r"[0-9A-Za-z.-]+",
+            history_ere=r"https?://[^[:space:]@/]+:[^[:space:]@]+@")
 
     def register_secret(self, value, rule="运行时注册"):
         """运行时注册敏感串指纹；短于 8 字符的值忽略（防通用短值误报）。"""
         if value and len(value) >= 8:
             self._literals.append((rule, value))
 
-    def register_pattern(self, rule, regex):
-        """注册通用检测正则（逐行 search）。"""
-        self._patterns.append((rule, re.compile(regex)))
+    def register_pattern(self, rule, regex, history_ere=None):
+        """注册通用检测正则（逐行 search）。
+
+        history_ere：git log -G 用的 POSIX ERE 历史版；None 表示 regex 本身
+        ERE 兼容可直接复用。
+        """
+        self._patterns.append((rule, re.compile(regex), history_ere or regex))
 
     def iter_literals(self):
-        """返回全部已注册字面量指纹的副本（--history 回溯用）。"""
+        """返回全部已注册字面量指纹的副本（--history -S 回溯用）。"""
         return list(self._literals)
+
+    def iter_history_patterns(self):
+        """返回全部正则规则的 ERE 历史版副本（--history -G 回溯用）。"""
+        return [(rule, ere) for rule, _pat, ere in self._patterns]
 
     def scan_line(self, line):
         """扫描单行，返回 [(规则名, 匹配串)]；同串去重，互为子串的命中只保留最长。"""
@@ -219,7 +244,7 @@ class SecretDetector:
         for rule, val in self._literals:
             if val in line:
                 raw.append((rule, val))
-        for rule, pat in self._patterns:
+        for rule, pat, _ere in self._patterns:
             m = pat.search(line)
             if m:
                 raw.append((rule, m.group(0)))
@@ -396,16 +421,21 @@ def scan_worktree(root, cached=False, quiet=False):
 
 
 def scan_history(root, quiet=False):
-    """全历史回溯：对每条字面量指纹执行 git log --all -S<串>，汇总命中提交数。"""
+    """全历史回溯：字面量指纹 `git log --all -S<串>`、正则规则 ERE 版
+    `git log --all -G<ERE>`，汇总命中提交数。"""
+    jobs = [("字面", rule, val, "-S")
+            for rule, val in detector.iter_literals()]
+    jobs += [("模式", rule, ere, "-G")
+             for rule, ere in detector.iter_history_patterns()]
     total = 0
-    for rule, val in detector.iter_literals():
+    for _kind, rule, needle, flag in jobs:
         proc = subprocess.run(
             ["git", "-C", str(root), "-c", "core.quotepath=off",
-             "log", "--all", "-S", val, "--oneline"],
+             "log", "--all", flag, needle, "--oneline"],
             capture_output=True, text=True)
         if proc.returncode != 0:
             # git 异常不得静默判净（fail-open 会把真泄露放行）：退出码 2 阻断
-            # （错误信息只带规则名，不带指纹明文）
+            # （错误信息只带规则名，不带指纹明文/-G 正则本身）
             print(f"git log 历史回溯失败（规则[{rule}]）：{proc.stderr.strip()}",
                   file=sys.stderr)
             raise SystemExit(2)

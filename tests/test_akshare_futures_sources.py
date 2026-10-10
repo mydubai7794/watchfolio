@@ -27,8 +27,8 @@ import requests
 # 常量
 # ===========================================================================
 
-# 代理配置
-PROXY_URL = "http://*REMOVED**REMOVED*:7779"
+# 代理配置（RFC 2606 保留测试域假凭证，非真实代理）
+PROXY_URL = "http://proxyuser:proxypass@proxy.test:7779"
 
 # 3秒间隔（与项目 MIN_INTERVAL_SEC 一致）
 MIN_INTERVAL = 3.0
@@ -164,7 +164,7 @@ class TestEastmoneyGlobalFutures:
     def test_eastmoney_with_proxy(self):
         """测试通过代理请求东方财富数据。"""
         print(f"\n--- 测试通过代理请求东方财富 ---")
-        print(f"代理: {PROXY_URL.replace('*REMOVED*@', '***@')}")
+        print(f"代理: {PROXY_URL.replace('proxypass@', '***@')}")
 
         url = "http://push2.eastmoney.com/api/qt/clist/get"
         params = {
@@ -255,7 +255,7 @@ class TestSinaGlobalFutures:
     def test_sina_with_proxy(self):
         """测试通过代理请求新浪数据。"""
         print(f"\n--- 测试通过代理请求新浪 ---")
-        print(f"代理: {PROXY_URL.replace('*REMOVED*@', '***@')}")
+        print(f"代理: {PROXY_URL.replace('proxypass@', '***@')}")
 
         symbols_to_test = ["hf_NQ", "hf_ES", "hf_YM", "hf_DAX"]
         url = "http://hq.sinajs.cn/list=" + ",".join(symbols_to_test)

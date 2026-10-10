@@ -1486,9 +1486,9 @@ WantedBy=multi-user.target
 ```bash
 ssh root@<server-ip> "mysql -h127.0.0.1 -P3914 -u<db-user> -p"$QDII_DB_PASS" qdii -e \"
 INSERT IGNORE INTO proxy_pool (url, latency_ms, alive) VALUES
-('http://*REMOVED**REMOVED*:7779', 800, 1),
-('http://*REMOVED**REMOVED*:7779', 900, 1),
-('http://*REMOVED**REMOVED*:7779', 950, 1);\""
+('http://proxyuser:proxypass@proxy.test:7779', 800, 1),
+('http://proxyuser:proxypass@proxy.test:7779', 900, 1),
+('http://proxyuser:proxypass@proxy.test:7779', 950, 1);\""
 ```
 - [ ] **Step 6: 连通性检测目标改造**（本任务前置小改，主Agent完成）：server.py `proxy_check` 的 `https://www.baidu.com` 改为 `https://ipinfo.io/ip`（海外代理用 baidu 会误判）
 - [ ] **Step 7: 上线验证**：

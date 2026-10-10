@@ -48,6 +48,25 @@ def test_builtin_fingerprints_valid():
         assert len("".join(parts)) >= 8, rule
 
 
+def test_builtin_fingerprints_not_cleaned():
+    """防清洗波及：每个分段指纹 join 后不得含历史清洗占位 *REMOVED* 字样
+    （清洗替换会令指纹失效成「永远检不出」的摆设，此处断言防复发；
+    `***REMOVED***` 含 `*REMOVED*` 子串，单断言即覆盖两种占位形态）。"""
+    assert check_secrets._BUILTIN_PARTS, "内置指纹集为空"
+    for rule, parts in check_secrets._BUILTIN_PARTS:
+        joined = "".join(parts)
+        assert "*REMOVED*" not in joined, f"指纹规则[{rule}]被清洗占位污染"
+
+
+def test_history_patterns_ere_ready():
+    """每条正则规则都必须携带非空 ERE 历史版（git -G 回溯不可缺位，
+    缺位等于该规则对历史泄露失明）。"""
+    hist = check_secrets.SecretDetector().iter_history_patterns()
+    assert hist, "正则规则历史版列表为空"
+    for rule, ere in hist:
+        assert ere and ere.strip(), f"规则[{rule}]缺 ERE 历史版"
+
+
 def test_generic_patterns(tmp_path):
     """通用模式：长桥 key 形态 / 裸 JWT / 命令行明文密码各自命中。"""
     d = _fresh_detector()
@@ -153,3 +172,51 @@ def test_pattern_hardcoded_assignment_plain_value_hit(tmp_path):
     hits = check_secrets.scan_file(f, detector=d)
     rules = {rule for _, rule, _ in hits}
     assert "疑似硬编码密钥赋值" in rules
+
+
+def test_longport_access_token_pattern(tmp_path):
+    """长桥 access_token 形态正则（_S09 分段指纹报废后的替代检测）：
+    hk_m_ 前缀 + ≥100 字符 JWT 体命中；仅不应误伤 hk_ app_key 与裸 JWT。"""
+    d = _fresh_detector()
+    body = "A1b2C3d4E5" * 12   # 120 字符伪体（非真实凭证）
+    f = tmp_path / "lp_token.txt"
+    f.write_text(
+        f'access_token = "hk_m_eyJ{body}"\n'
+        'app_key = "hk_abcdef0123456789ab"\n',
+        encoding="utf-8")
+    hits = check_secrets.scan_file(f, detector=d)
+    rules = {rule for _, rule, _ in hits}
+    assert "长桥access_token" in rules
+    assert "裸JWT" not in rules   # 无 eyJhbGciOi 三段式头，不误伤
+
+
+def test_url_embedded_credential_pattern(tmp_path):
+    """URL内嵌凭证正则：非豁免主机命中；*.test / *.example / *.invalid /
+    localhost / 127.0.0.1 保留测试域豁免；无凭证 URL 不报。"""
+    d = _fresh_detector()
+    f = tmp_path / "urls.txt"
+    f.write_text(
+        'a = "http://u:p@10.99.99.99:7779"\n'                    # 正例：非豁免 IP
+        'b = "http://proxyuser:proxypass@proxy.test:7779"\n'     # 豁免：保留测试域
+        'c = "http://u:p@db.invalid:5432"\n'                     # 豁免：.invalid
+        'd = "http://u:p@localhost:8080"\n'                      # 豁免：localhost
+        'e = "http://u:p@127.0.0.1:8080"\n'                      # 豁免：127.0.0.1
+        'f = "https://example.com/api/path"\n'                   # 无凭证 URL 不报
+        'g = "https://api.example.com/v1?k=1"\n',                # 无凭证不报
+        encoding="utf-8")
+    hits = check_secrets.scan_file(f, detector=d)
+    assert len(hits) == 1, f"应仅 1 处命中，实际: {hits}"
+    lineno, rule, matched = hits[0]
+    assert lineno == 1
+    assert rule == "URL内嵌凭证"
+    assert matched == "http://u:p@10.99.99.99"
+
+
+def test_url_embedded_credential_line_whitelist(tmp_path):
+    """URL内嵌凭证命中行尾加 `# secret-ok` 亦按行级白名单跳过。"""
+    d = _fresh_detector()
+    f = tmp_path / "urls_ok.txt"
+    f.write_text(
+        'a = "http://u:p@10.99.99.99:7779"  # secret-ok\n',
+        encoding="utf-8")
+    assert check_secrets.scan_file(f, detector=d) == []
