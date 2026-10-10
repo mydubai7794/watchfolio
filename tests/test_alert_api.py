@@ -473,7 +473,7 @@ def test_live_overview_overrides_with_fresh_lp_price(monkeypatch):
     assert pos["today_pnl"] == pytest.approx(30.0)   # (103-100场基准)×10
     s = data["summary"]
     assert s["total_value"] == pytest.approx(1030.0 + 1000.0)   # 含现金
-    # cny：value=总资产×USDCNH，pnl=value−净投入（84850）
+    # cny：value=总资产×USDCNH，pnl=value−净投入
     assert data["cny"]["value"] == pytest.approx(2030.0 * 7.2, rel=1e-6)
     assert data["cny"]["pnl"] == pytest.approx(2030.0 * 7.2 - 84850.0, rel=1e-6)
 

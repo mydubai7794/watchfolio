@@ -288,8 +288,8 @@ async def init_tables():
         ("scenario_a_overshot",    "1.0",   "剧本A错杀阈值:跳空需低于期指+此值(%)"),
         ("scenario_b_lag",         "0.3",   "剧本B落后阈值:跳空落后超此值(%)"),
         ("buysell_ratio_threshold","2.0",   "盘口否决:买卖比阈值"),
-        ("cny_invested",            "84560", "人民币累计投入本金(29000+30000+25000+850换汇-290电费)"),
-        ("expense_cny",             "0",     "个人消费折CNY累计(从cny_invested扣除得净投入,与ledger expense事件同步)"),
+        ("cny_invested",            "",      "人民币累计投入本金（可选，按需在 sys_config 配置）"),
+        ("expense_cny",             "0",     "生活消耗折CNY累计(从cny_invested扣除得净投入,与ledger expense事件同步)"),
     ]
     for key, value, remark in seed_configs:
         await execute(

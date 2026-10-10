@@ -91,12 +91,12 @@ curl -H "X-API-Key: <key>" http://<your-domain>/api/agent/portfolio
   },
   "cny": {
     "rate": 7.12,
-    "invested": 84850.0,
-    "invested_gross": 84850.0,
+    "invested": 14000.0,
+    "invested_gross": 14000.0,
     "expense": 0.0,
-    "value": 87901.17,
-    "pnl": 3051.17,
-    "pnl_pct": 3.6
+    "value": 14596.0,
+    "pnl": 596.0,
+    "pnl_pct": 4.26
   }
 }
 ```

@@ -192,7 +192,7 @@ async function loadReport() {
       net.textContent = (i.net_cny >= 0 ? '+' : '') + fmt(i.net_cny, 0);
       net.className = 'hero-display ' + (i.net_cny >= 0 ? 'num-up' : 'num-down');
       document.getElementById('netSub').textContent =
-        `+${fmt(i.net_pct)}% · 净投入 ¥${fmt(i.invest_net_cny, 0)}（¥${fmt(s.total_cny_invested, 0)} − 电费 ¥${fmt(i.expense_cny, 0)}） · 恒等式校验 ${Math.abs(i.identity_check_cny - i.net_cny) < 1 ? '通过 ✓' : '偏差 ' + fmt(i.identity_check_cny - i.net_cny)}`;
+        `+${fmt(i.net_pct)}% · 净投入 ¥${fmt(i.invest_net_cny, 0)}（¥${fmt(s.total_cny_invested, 0)} − 消耗 ¥${fmt(i.expense_cny, 0)}） · 恒等式校验 ${Math.abs(i.identity_check_cny - i.net_cny) < 1 ? '通过 ✓' : '偏差 ' + fmt(i.identity_check_cny - i.net_cny)}`;
       const g = document.getElementById('gainCny');
       g.textContent = '+' + fmt(i.gain_cny, 0);
       g.className = 'hero-display num-up';
@@ -208,7 +208,7 @@ async function loadReport() {
     }
     const kvs = [
       ['总投入 (CNY)', fmt(s.total_cny_invested, 0), '逐笔 inflow 合计'],
-      ['净投入 (CNY)', fmt(i.invest_net_cny, 0), `扣电费消耗 ¥${fmt(i.expense_cny, 0)}`],
+      ['净投入 (CNY)', fmt(i.invest_net_cny, 0), `扣消耗 ¥${fmt(i.expense_cny, 0)}`],
       ['USD 化入账', fmt(s.usd_in), '实到手口径（含点差拖累）'],
       ['加权购汇成本', fmt(s.avg_cost, 4), 'CNY/USD'],
       ['点差损失', '−$' + fmt(s.fx_loss_usd), 'vs ECB 中间价'],

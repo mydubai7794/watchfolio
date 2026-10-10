@@ -28,7 +28,7 @@
 | macro_fetcher.py | 宏观四指标日更抓取解析（巴菲特/席勒CAPE/2s10s利差/恐慌贪婪，直连优先代理容错） |
 | portfolio_fetcher.py | 持仓侧全部数据源抓取与解析（腾讯/新浪/Yahoo/FT/twelvedata/24h数据源） |
 | ledger.py | 记账报表纯计算（点差/通道/盈亏恒等式 build_report + ECB 解析）+ 单位净值 TWR 纯计算（build_nav_series 现金流重放，入金不虚增收益） |
-| ledger_seed.py | v3 盘点 68 笔种子事件（幂等 upsert CLI，仅首次/修数跑） |
+| ledger_seed.py | 记账种子事件示例（真实流水不入库，本地 ledger_seed.py 已 gitignore，格式参考 ledger_seed.example.py） |
 | fetcher.py | A股 ETF 监控抓取（腾讯 ETF + 新浪/东财期指智能路由） |
 | tencent_bus.py | 腾讯行情攒批发送路由（微批合并：监控/候选/持仓/看板共用一个节奏） |
 | email_trader.py | 券商成交邮件 → trade_records 幂等入库 → **自动应用持仓与现金**（汇丰「全部執行」/致富「待成交=0 终态」两类门控；apply_trade 先插表再动 holdings/cash，可安全重放；QQ IMAP，30min 双源同轮，任一源失败水位不推进按水位回溯）；fetch_za_notice_emails 众安通知（换汇/转出/派息/入金）仅供记账对账采样，**不进自动轮询** |
@@ -79,7 +79,7 @@
   tick≥5 的「有效分时日」（杂点日自动回退上一完整时段）并以 [ts,price] 对
   下发（前端悬浮显示北京时间+价格）；组合 tick 写入条件
   `session != "closed" or overnight_used > 0`；写入口毛刺延迟确认（hold/discard/confirm）。
-- **记账口径（ledger）**：总投入 84,850 CNY（全额口径，v3 勘误版）；恒等式
+- **记账口径（ledger）**：总投入以 sys_config 全额口径为准（本地基线，数值不入库）；恒等式
   `net_cny = 总资产×USDCNH − 总投入 = 增值 + 汇损 − 消耗`；fx 事件带双边金额 +
   ECB mid_rate（点差实时推导不落库）；balance 快照按「账户×币种」取最新对账
   cash_accounts；HKD→USD 静态 7.846。录入走 POST /api/ledger/events
@@ -105,7 +105,7 @@
   是在岸/离岸价差，非数据错误（勿当 bug 修）。
 - **全球指数供给（2026-10-08 定版）**：N225/KS11 唯一稳定通道 = 腾讯 gz 前缀
   （qt.gtimg.cn，tencent_bus 搭批零额外请求）；东财 push2 全端点与新浪
-  hq.sinajs 均对腾讯云服务器 IP 风控（直连空响应/Forbidden，带浏览器 UA
+  hq.sinajs 均对云服务器 IP 风控（直连空响应/Forbidden，带浏览器 UA
   无效，勿再试）；新浪期指冷备路径的 b_NKY 顺带解析保留为兜底写入点。
   备用通道备查：proxy.finance.qq.com/ifzqgtimg/appstock/app/rank/
   indexRankDetail2（腾讯自选股全球指数分组，无鉴权，服务器可达）。

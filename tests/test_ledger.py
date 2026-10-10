@@ -5,8 +5,17 @@
 import asyncio
 from datetime import datetime
 
+import pytest
+
 import database as db
 import ledger
+
+# ledger_seed.py 含真实记账流水，已 gitignore 不入库（隐私出库）；
+# 缺失时（如公开仓库 clone 环境）跳过本文件全部实算测试。
+pytest.importorskip(
+    "ledger_seed",
+    reason="本地 ledger_seed.py 未提供（真实流水不入库），跳过实算测试",
+)
 from ledger_seed import SEED_EVENTS
 
 
@@ -87,7 +96,7 @@ class TestBuildReport:
         s = r["summary"]
         assert s["total_cny_invested"] == 84850.0
         assert abs(s["usd_in"] - 12478.27) < 0.05
-        assert abs(s["avg_cost"] - 6.7998) < 0.0005          # 勘误后: 84850/12478.27
+        assert abs(s["avg_cost"] - 6.7998) < 0.0005          # 总投入/美元入金折算
         assert abs(s["fx_loss_usd"] - 43.32) < 0.15           # v3: 43.32(购汇30.19+账户内13.13)
         assert abs(s["fee_usd"] - 13.14) < 0.05
         assert abs(s["reward_usd"] - 163.01) < 0.5            # v3估算161,种子实算163.01
@@ -103,7 +112,7 @@ class TestBuildReport:
         assert abs(i["gain_pct"] - 9.73) < 0.05
         assert abs(i["fx_loss_cny"] - (-1169.5)) < 1.5        # 勘误后(v3的-589基于错误avg)
         assert abs(i["expense_cny"] - 246.4) < 0.5
-        assert abs(i["invest_net_cny"] - 84603.68) < 0.5      # 净投入=84850-电费246.32
+        assert abs(i["invest_net_cny"] - 84603.68) < 0.5      # 净投入=总投入-消耗
         assert abs(i["net_cny"] - 6947.86) < 0.5              # 净投入口径(消耗从本金扣除)
         assert abs(i["net_pct"] - 8.21) < 0.05
         assert abs(i["gain_cny"] - 8117.33) < 0.5             # 增值CNY=两项分解之一

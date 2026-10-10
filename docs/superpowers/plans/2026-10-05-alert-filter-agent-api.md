@@ -297,7 +297,7 @@ class TestAgentPortfolioApi:
         self._patch_key(monkeypatch, "right-key")
         server.portfolio_cache = dict(self._base_cache)
         server.market_cache = [{"key": "USDCNH", "price": 7.1}]
-        server._cny_cfg["invested"] = 84850.0
+        server._cny_cfg["invested"] = 14000.0
         server._cny_cfg["expense"] = 0.0
         try:
             r = client.get("/api/agent/portfolio", headers={"X-API-Key": "right-key"})
@@ -477,8 +477,8 @@ curl -H "X-API-Key: <key>" http://<your-domain>/api/agent/portfolio
   "cash": [{"currency": "USD", "amount": 1000.0}],
   "fx": {"usdhkd": 7.8, "usdcnh": 7.12},
   "cny": {
-    "rate": 7.12, "invested": 84850.0, "invested_gross": 84850.0,
-    "expense": 0.0, "value": 87912.0, "pnl": 3062.0, "pnl_pct": 3.6
+    "rate": 7.12, "invested": 14000.0, "invested_gross": 14000.0,
+    "expense": 0.0, "value": 14596.0, "pnl": 596.0, "pnl_pct": 4.26
   }
 }
 ```

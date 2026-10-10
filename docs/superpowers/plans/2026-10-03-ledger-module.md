@@ -8,12 +8,12 @@
 
 **Tech Stack:** Python 3 / FastAPI / aiomysql / httpx / pytest（monkeypatch 桩 DB，无本地 MySQL）/ 原生 JS 单文件前端。
 
-**权威数字来源:** `账户成本盈亏盘点_20261003.md`（v3，已提交 12cdfa6）。本计划种子数据与断言目标全部出自该文档。
+**权威数字来源:** 本地私有基线文档（v3 盘点，不入库）。本计划种子数据与断言目标全部出自该文档。（发布版已脱敏：全部真实金额/渠道/笔数明细以 `<基线值>` 占位，实际值仅存于本地不入库文件与库内。）
 
 **勘误（相对 spec/终版 v3 的三处修正，执行时生效）:**
-1. `cash_accounts.HKD` 是**全账户合并桶**：众安 32.52 + 汇丰 20.20 = **52.72**（spec §8 误写 32.52，会少记 20.20）。
+1. `cash_accounts.HKD` 是**全账户合并桶**：两账户留存相加（spec §8 误写单账户值，会少记另一账户留存）。
 2. fx 事件需要双边金额：schema 增加 `recv_ccy`/`recv_amount` 列；`event_type` 增加 `balance`（结单余额快照，对账用）。
-3. NVDA 修数成本 = 281.77/1.3169 = **213.9616**（v3 写 213.98 为笔误）；奖励合计实算 **163.03 USD**（v3 "≈161" 为估算值）。
+3. NVDA 修数成本按赠股 0 成本折算（v3 原值有笔误）；奖励合计以种子实算为准（v3 为估算值）。
 
 **测试基线:** 执行前先跑 `python3 -m pytest tests/test_portfolio.py tests/test_decision_model.py tests/test_server_auth.py tests/test_email_trader.py -q` 记录当前通过数（约 198），完成后 = 基线 + 新增（预计 +25 左右）。pytest 本地跑（不起服务）。
 
@@ -33,13 +33,13 @@
 
 `event_type` 注释行改为 `-- inflow/fx/fee/reward/expense/transfer/realized/balance`。
 
-- [ ] **Step 2: §8 修数表 HKD 行改为 52.72**——现值 70.48 → **52.72**，依据改为「众安 32.52 + 汇丰 20.20（cash_accounts 为跨账户合并桶）」；NVDA 行改为 213.9616（依据：281.77/1.3169，赠股 0 成本）；奖励合计（§4 表）161.01 改为 **163.03**（v3 估算值修正，种子实算）。
+- [ ] **Step 2: §8 修数表 HKD 行改为合并桶口径**——现值改为**跨账户合并值**，依据改为「多账户留存相加（cash_accounts 为跨账户合并桶）」；NVDA 行按赠股 0 成本折算修正；奖励合计（§4 表）估算值改为**种子实算值**。
 
 - [ ] **Step 3: 提交**
 
 ```bash
 git -C /root/workspace/project/qdii add docs/superpowers/specs/2026-10-03-ledger-module-design.md
-git -C /root/workspace/project/qdii commit -m "docs(spec): ledger设计修订——fx双边金额字段/balance类型/HKD修数52.72跨账户桶/NVDA成本213.9616"
+git -C /root/workspace/project/qdii commit -m "docs(spec): ledger设计修订——fx双边金额字段/balance类型/HKD跨账户桶口径/NVDA赠股成本折算"
 ```
 
 ---
@@ -75,14 +75,14 @@ class TestLedgerCrud:
 
         monkeypatch.setattr(db, "execute", fake_execute)
         run(db.upsert_ledger_event(
-            event_date="2026-06-26", event_type="inflow", account="za_bank",
-            channel="建行购汇汇出", direction="+", amount_ccy="CNY", amount=10000.0,
-            recv_ccy="HKD", recv_amount=11503.90, usd_equivalent=1466.09,
-            cny_amount=10000.0, mid_rate=None, note="", ref_no="V3-I01"))
+            event_date="2026-01-01", event_type="inflow", account="za_bank",
+            channel="示例渠道", direction="+", amount_ccy="CNY", amount=10000.0,
+            recv_ccy="HKD", recv_amount=11000.00, usd_equivalent=1400.00,
+            cny_amount=10000.0, mid_rate=None, note="", ref_no="DEMO-I01"))
         sql = captured["sql"]
         assert "INSERT INTO ledger_events" in sql
         assert "ON DUPLICATE KEY UPDATE" in sql  # ref_no 幂等 upsert
-        assert captured["args"][0] == "V3-I01"
+        assert captured["args"][0] == "DEMO-I01"
 
     def test_get_ledger_events_filters(self, monkeypatch):
         captured = {}
@@ -146,7 +146,7 @@ init_tables 内 fund_nav_history 建表块之后追加（风格同现有 `await 
             event_date     DATE NOT NULL COMMENT '事件日期',
             event_type     VARCHAR(20) NOT NULL COMMENT 'inflow入金/fx换汇/fee费用/reward奖励/expense消耗/transfer转移/realized已实现/balance余额快照',
             account        VARCHAR(20) NOT NULL COMMENT 'za_bank/za_sec/hsbc/zf/ccb/cmb/cib/external',
-            channel        VARCHAR(40) DEFAULT NULL COMMENT '通道: 建行购汇汇出/汇丰柜台/众安App换U/兴业SWIFT/招行原币/致富换汇/支付宝+Visa等',
+            channel        VARCHAR(40) DEFAULT NULL COMMENT '通道: 银行购汇/柜台/SWIFT电汇/券商换汇/支付渠道等（值域示例见 ledger_seed.example.py）',
             direction      CHAR(1) NOT NULL COMMENT '+入账/-出账',
             amount_ccy     VARCHAR(5) NOT NULL COMMENT '付出币种',
             amount         DECIMAL(14,2) NOT NULL COMMENT '付出金额',
@@ -309,126 +309,43 @@ def E(date, etype, account, direction, ccy, amount, ref, channel=None,
 
 
 SEED_EVENTS = [
-    # ---- inflow 入金 11 笔（v3 §二）----
-    E("2026-06-26", "inflow", "za_bank", "+", "CNY", 10000, "V3-I01", "建行购汇汇出",
-      "HKD", 11503.90, 1466.09, 10000, None, "建行1万购汇汇出众安"),
-    E("2026-06-27", "inflow", "hsbc", "+", "CNY", 9000, "V3-I02", "建行购汇汇出",
-      "HKD", 10354.38, 1315.40, 9000, None, "含已换USD1269.74+留存HKD358.28(45.66)"),
-    E("2026-06-29", "inflow", "za_bank", "+", "CNY", 10000, "V3-I03", "建行购汇汇出",
-      "HKD", 11506.81, 1466.46, 10000),
-    E("2026-06-30", "inflow", "za_bank", "+", "CNY", 850, "V3-I04", "同事代换",
-      "HKD", 1000.00, 127.44, 850, None, "同事按1.176471代换优于市场"),
-    E("2026-07-03", "inflow", "hsbc", "+", "CNY", 5000, "V3-I05", "兴业SWIFT",
-      "USD", 736.02, 736.02, 5000),
-    E("2026-07-09", "inflow", "za_bank", "+", "CNY", 10000, "V3-I06", "招行购汇汇出",
-      "HKD", 11501.43, 1465.85, 10000),
-    E("2026-07-09", "inflow", "hsbc", "+", "CNY", 10000, "V3-I07", "兴业SWIFT",
-      "USD", 1467.50, 1467.50, 10000, None, "分两笔到账735.73+731.77"),
-    E("2026-07-18", "inflow", "za_bank", "+", "CNY", 10000, "V3-I08", "招行原币+众安换U",
-      "USD", 1471.92, 1471.92, 10000, None, "招行CNY原币汇出,众安换U@6.793807"),
-    E("2026-07-20", "inflow", "za_bank", "+", "CNY", 10000, "V3-I09", "招行原币+众安换U",
-      "USD", 1473.40, 1473.40, 10000, None, "众安换U@6.787022"),
-    E("2026-09-29", "inflow", "za_bank", "+", "CNY", 7000, "V3-I10", "兴业SWIFT",
-      "USD", 1042.14, 1042.14, 7000),
-    E("2026-09-29", "inflow", "za_bank", "+", "CNY", 3000, "V3-I11", "兴业SWIFT",
-      "HKD", 3501.13, 446.05, 3000),
-    # ---- fx 换汇 17 笔（v3 §三/§四；mid=ECB当日理论汇率=理论应得/付出量；loss由报表实时推导）----
-    E("2026-06-26", "fx", "za_bank", "-", "CNY", 10000, "V3-F01", "建行购汇汇出",
-      "HKD", 11503.90, None, None, 1.153555),
-    E("2026-06-27", "fx", "hsbc", "-", "CNY", 9000, "V3-F02", "建行购汇汇出",
-      "HKD", 10354.38, None, None, 1.153556),
-    E("2026-06-29", "fx", "za_bank", "-", "CNY", 10000, "V3-F03", "建行购汇汇出",
-      "HKD", 11506.81, None, None, 1.154298),
-    E("2026-07-09", "fx", "za_bank", "-", "CNY", 10000, "V3-F04", "招行购汇汇出",
-      "HKD", 11501.43, None, None, 1.153031),
-    E("2026-07-03", "fx", "hsbc", "-", "CNY", 5000, "V3-F05", "兴业SWIFT",
-      "USD", 736.02, None, None, 0.147462),
-    E("2026-07-09", "fx", "hsbc", "-", "CNY", 10000, "V3-F06", "兴业SWIFT",
-      "USD", 1467.50, None, None, 0.147145),
-    E("2026-09-29", "fx", "za_bank", "-", "CNY", 7000, "V3-F07", "兴业SWIFT",
-      "USD", 1042.14, None, None, 0.149179),
-    E("2026-09-29", "fx", "za_bank", "-", "CNY", 3000, "V3-F08", "兴业SWIFT",
-      "HKD", 3501.13, None, None, 1.170450),
-    E("2026-07-18", "fx", "za_bank", "-", "CNY", 10000, "V3-F09", "招行原币+众安换U",
-      "USD", 1471.92, None, None, 0.147547),
-    E("2026-07-20", "fx", "za_bank", "-", "CNY", 10000, "V3-F10", "招行原币+众安换U",
-      "USD", 1473.40, None, None, 0.147778),
-    E("2026-06-30", "fx", "za_bank", "-", "CNY", 850, "V3-F11", "同事代换",
-      "HKD", 1000.00, None, None, 1.155670, "点差为负=收益(vs ECB多换17.68HKD)"),
-    E("2026-06-29", "fx", "hsbc", "-", "HKD", 1000, "V3-F12", "汇丰柜台",
-      "USD", 126.99, None, None, 0.127510),
-    E("2026-06-30", "fx", "hsbc", "-", "HKD", 9000, "V3-F13", "汇丰柜台",
-      "USD", 1142.75, None, None, 0.127522),
-    E("2026-07-14", "fx", "za_bank", "-", "HKD", 23789.86, "V3-F14", "众安App换U",
-      "USD", 3031.83, None, None, 0.127581, "全部换汇里最接近平价0.117%"),
-    E("2026-06-30", "fx", "zf", "-", "HKD", 3000, "V3-F15", "致富换汇",
-      "USD", 381.25, None, None, 0.127523),
-    E("2026-09-04", "fx", "zf", "-", "HKD", 5858.09, "V3-F16", "致富换汇",
-      "USD", 744.57, None, None, 0.127538),
-    E("2026-09-03", "fx", "hsbc", "-", "HKD", 350, "V3-F17", "汇丰柜台",
-      "USD", 44.45, None, None, 0.127514, "众安300+自有50合并购汇"),
-    # ---- fee 显性费用 6 笔（v3 §五）----
-    E("2026-07-27", "fee", "hsbc", "-", "USD", 0.04, "V3-X01", "XACT平台费",
-      None, None, 0.04, None, None, "SGOV/QQQM/QQQ/TSM卖出各0.01"),
-    E("2026-07-14", "fee", "za_sec", "-", "USD", 1.99, "V3-X02", "众安佣金",
-      None, None, 1.99, None, None, "AMD 4股@568.00成交7.15结算"),
-    E("2026-07-15", "fee", "za_sec", "-", "USD", 1.99, "V3-X03", "众安佣金",
-      None, None, 1.99, None, None, "QQQ 1股@719.88"),
-    E("2026-06-30", "fee", "zf", "-", "HKD", 31.39, "V3-X04", "致富佣金杂费",
-      None, None, 4.00, None, None, "03152四笔+DRAM两买"),
-    E("2026-07-31", "fee", "zf", "-", "HKD", 38.45, "V3-X05", "致富保证金利息",
-      None, None, 4.90, None, None, "买DRAM后美元现金转负透支"),
-    E("2026-08-11", "fee", "hsbc", "-", "HKD", 1.69, "V3-X06", "支付宝+Visa",
-      None, None, 0.22, None, None, "电费渠道费(vs ECB)"),
-    # ---- reward 奖励/被动收入 19 笔（v3 §六）----
-    E("2026-06-30", "reward", "za_bank", "+", "HKD", 100, "V3-R01", "股票现金回赠", None, None, 12.74),
-    E("2026-06-30", "reward", "za_bank", "+", "HKD", 60, "V3-R02", "股票现金回赠", None, None, 7.64),
-    E("2026-07-09", "reward", "za_bank", "+", "HKD", 200, "V3-R03", "股票现金回赠", None, None, 25.49),
-    E("2026-07-15", "reward", "za_bank", "+", "HKD", 200, "V3-R04", "股票现金回赠", None, None, 25.49),
-    E("2026-07-16", "reward", "za_bank", "+", "HKD", 100, "V3-R05", "股票现金回赠", None, None, 12.74),
-    E("2026-07-31", "reward", "za_bank", "+", "HKD", 6.81, "V3-R06", "ZA Coin兑现", None, None, 0.87),
-    E("2026-07-14", "reward", "za_bank", "+", "HKD", 20, "V3-R07", "基金优惠券", None, None, 2.55),
-    E("2026-09-29", "reward", "za_bank", "+", "HKD", 20, "V3-R08", "基金申购回赠", None, None, 2.55,
-      "9月申购3500回赠20直接投入NVDA"),
-    E("2026-07-31", "reward", "za_bank", "+", "HKD", 11.51, "V3-R09", "定存利息", None, None, 1.47,
-      "3000HKD@20%年化x7天"),
-    E("2026-07-31", "reward", "za_bank", "+", "HKD", 6.48, "V3-R10", "基金分红", None, None, 0.83),
-    E("2026-08-31", "reward", "za_bank", "+", "HKD", 7.78, "V3-R11", "基金分红", None, None, 0.99),
-    E("2026-09-30", "reward", "za_bank", "+", "HKD", 8.04, "V3-R12", "基金分红", None, None, 1.02),
-    E("2026-07-07", "reward", "za_sec", "+", "USD", 51.99, "V3-R13", "股票券兑换", None, None, 51.99,
-      "后用于买NVDA 0.2598股"),
-    E("2026-09-24", "reward", "zf", "+", "USD", 13.36, "V3-R14", "致富NVDA赠股", None, None, 13.36,
-      "0.0571股按9.24市价234估"),
-    E("2026-06-30", "reward", "zf", "+", "HKD", 0.15, "V3-R15", "致富利息", None, None, 0.02),
-    E("2026-08-11", "reward", "hsbc", "+", "HKD", 1.16, "V3-R16", "汇丰现金回赠", None, None, 0.15),
-    E("2026-10-01", "reward", "hsbc", "+", "USD", 0.60, "V3-R17", "AMKR股息", None, None, 0.60),
-    E("2026-07-10", "reward", "hsbc", "+", "USD", 0.26, "V3-R18", "SGOV股息", None, None, 0.26),
-    E("2026-06-30", "reward", "external", "+", "USD", 2.25, "V3-R19", "同事汇率优惠", None, None, 2.25,
-      "与F11口径一致:点差表同额-2.25"),
-    # ---- expense 消耗 1 笔 ----
-    E("2026-08-11", "expense", "hsbc", "-", "HKD", 288.08, "V3-E01", "支付宝+Visa",
-      None, None, 36.73, None, None, "电费:结单实扣289.24-回赠1.16=288.08(原币247.20CNY)"),
-    # ---- transfer 转出 3 笔 ----
-    E("2026-08-15", "transfer", "external", "-", "HKD", 8.88, "V3-T01", "转其他银行保活",
+    # ---- 发布版脱敏说明 ----
+    # 本计划原收录 v3 全部真实流水（67 笔），发布前已整体脱敏：
+    # 完整真实种子仅存本地 ledger_seed.py（已退跟踪 + gitignore，不入库）；
+    # 仓库内结构示例见 ledger_seed.example.py。以下仅保留事件类型结构示意，
+    # 金额/渠道/备注均为虚构示意值，不构成任何真实账目。
+    # ---- inflow 入金（结构示意）----
+    E("2026-01-01", "inflow", "za_bank", "+", "CNY", 10000, "DEMO-I01", "示例渠道",
+      "HKD", 11000.00, 1400.00, 10000, None, "结构示意: 原币购汇汇出"),
+    E("2026-01-02", "inflow", "hsbc", "+", "CNY", 5000, "DEMO-I02", "示例渠道",
+      "USD", 700.00, 700.00, 5000, None, "结构示意: SWIFT 电汇"),
+    # ---- fx 换汇（结构示意；mid=ECB当日理论汇率=理论应得/付出量；loss由报表实时推导）----
+    E("2026-01-01", "fx", "za_bank", "-", "CNY", 10000, "DEMO-F01", "示例渠道",
+      "HKD", 11000.00, None, None, 1.150000),
+    E("2026-01-02", "fx", "hsbc", "-", "HKD", 1000, "DEMO-F02", "示例柜台",
+      "USD", 128.00, None, None, 0.127500),
+    E("2026-01-03", "fx", "zf", "-", "HKD", 3000, "DEMO-F03", "示例券商换汇",
+      "USD", 382.00, None, None, 0.127500),
+    # ---- fee 显性费用（结构示意）----
+    E("2026-01-04", "fee", "za_sec", "-", "USD", 1.99, "DEMO-X01", "示例佣金",
+      None, None, 1.99, None, None, "结构示意: 交易佣金"),
+    # ---- reward 奖励/被动收入（结构示意）----
+    E("2026-01-05", "reward", "za_bank", "+", "HKD", 100, "DEMO-R01", "现金回赠", None, None, 12.74),
+    E("2026-01-06", "reward", "za_bank", "+", "HKD", 20, "DEMO-R02", "基金申购回赠", None, None, 2.55),
+    # ---- expense 消耗（结构示意）----
+    E("2026-01-07", "expense", "hsbc", "-", "HKD", 300.00, "DEMO-E01", "示例渠道",
+      None, None, 38.00, None, None, "结构示意: 生活缴费"),
+    # ---- transfer 转出（结构示意）----
+    E("2026-01-08", "transfer", "external", "-", "HKD", 8.88, "DEMO-T01", "转其他银行保活",
       None, None, 1.13, None, None, "面值回流不计损益"),
-    E("2026-08-20", "transfer", "external", "-", "HKD", 8.88, "V3-T02", "转其他银行保活",
-      None, None, 1.13, None, None, "面值回流不计损益"),
-    E("2026-09-02", "transfer", "hsbc", "-", "HKD", 300, "V3-T03", "众安→汇丰",
-      None, None, None, None, None, "内部转移(9.3与自有50合并购汇44.45USD)"),
-    # ---- realized 已实现交易 6 笔（v3 §七）----
-    E("2026-07-10", "realized", "hsbc", "-", "USD", -0.21, "V3-L01", "SGOV", None, None, -0.21),
-    E("2026-07-17", "realized", "hsbc", "+", "USD", 1.28, "V3-L02", "QQQM", None, None, 1.28),
-    E("2026-07-27", "realized", "hsbc", "-", "USD", -18.89, "V3-L03", "QQQ", None, None, -18.89),
-    E("2026-07-14", "realized", "za_sec", "-", "HKD", -89.89, "V3-L04", "03152",
-      None, None, -11.46, None, None, "众安短炒四笔净亏"),
-    E("2026-09-18", "realized", "hsbc", "+", "USD", 15.47, "V3-L05", "TSM", None, None, 15.47),
-    E("2026-09-26", "realized", "hsbc", "-", "USD", -22.87, "V3-L06", "PCG", None, None, -22.87),
-    # ---- balance 结单余额快照 4 笔（对账用）----
-    E("2026-09-30", "balance", "za_bank", "+", "HKD", 32.52, "V3-B01", "众安9月结单", None, None, None),
-    E("2026-09-30", "balance", "hsbc", "+", "HKD", 20.20, "V3-B02", "汇丰9月结单", None, None, None),
-    E("2026-10-02", "balance", "hsbc", "+", "USD", 145.80, "V3-B03", "汇丰实数", None, None, None,
-      "与流水推算145.12差0.68疑股息待10月结单"),
-    E("2026-09-30", "balance", "zf", "+", "USD", 225.99, "V3-B04", "致富实数", None, None, None),
+    E("2026-01-09", "transfer", "hsbc", "-", "HKD", 300, "DEMO-T02", "内部划转",
+      None, None, None, None, None, "结构示意: 账户间转移"),
+    # ---- realized 已实现交易（结构示意）----
+    E("2026-01-10", "realized", "hsbc", "-", "USD", -0.21, "DEMO-L01", "示例标的", None, None, -0.21),
+    E("2026-01-11", "realized", "hsbc", "+", "USD", 1.28, "DEMO-L02", "示例标的", None, None, 1.28),
+    # ---- balance 结单余额快照（对账用，结构示意）----
+    E("2026-01-31", "balance", "za_bank", "+", "HKD", 100.00, "DEMO-B01", "结单快照", None, None, None),
+    E("2026-01-31", "balance", "hsbc", "+", "USD", 200.00, "DEMO-B02", "结单快照", None, None, None),
 ]
 
 
@@ -449,26 +366,26 @@ if __name__ == "__main__":
 - [ ] **Step 2: 种子完整性自检（不连库）**
 
 ```bash
+# 发布版脱敏：基线数值以 <基线> 占位，实际值仅存本地不入库文件
 python3 -c "
 from ledger_seed import SEED_EVENTS
 refs = [e['ref_no'] for e in SEED_EVENTS]
-assert len(refs) == len(set(refs)) == 67, len(refs)
-assert sum(e['cny_amount'] for e in SEED_EVENTS if e['event_type']=='inflow') == 84850
+assert len(refs) == len(set(refs)), len(refs)                      # ref_no 全唯一
+assert sum(e['cny_amount'] for e in SEED_EVENTS if e['event_type']=='inflow') == <总投入基线>
 usd_in = sum(e['usd_equivalent'] for e in SEED_EVENTS if e['event_type']=='inflow')
-assert abs(usd_in - 12478.27) < 0.01, usd_in
+assert abs(usd_in - <USD入账基线>) < 0.01, usd_in
 fee = sum(e['usd_equivalent'] for e in SEED_EVENTS if e['event_type']=='fee')
-assert abs(fee - 13.14) < 0.01, fee
+assert abs(fee - <费用基线>) < 0.01, fee
 real = sum(e['usd_equivalent'] for e in SEED_EVENTS if e['event_type']=='realized')
-assert abs(real - (-36.68)) < 0.01, real
-print('种子自检通过: 67笔/投入84850/USD入账%.2f/费用%.2f/已实现%.2f' % (usd_in, fee, real))"
+assert abs(real - <已实现基线>) < 0.01, real
+print('种子自检通过')"
 ```
-预期输出：`种子自检通过: 67笔/投入84270/USD入账12478.27/费用13.14/已实现-36.68`
 
 - [ ] **Step 3: 提交**
 
 ```bash
 git -C /root/workspace/project/qdii add ledger_seed.py
-git -C /root/workspace/project/qdii commit -m "feat(ledger): v3盘点67笔种子事件(11入金/17换汇/6费用/19奖励/1消耗/3转出/6已实现/4余额快照)"
+git -C /root/workspace/project/qdii commit -m "feat(ledger): 种子事件批量入库脚本(幂等upsert)"
 ```
 
 ---
@@ -488,33 +405,36 @@ from ledger_seed import SEED_EVENTS
 
 class TestBuildReport:
     def _report(self, **kw):
-        ctx = dict(total_assets_usd=13651.98, usdcnh=6.7061, cash_accounts=[])
+        ctx = dict(total_assets_usd=<资产基线>, usdcnh=<汇率基线>, cash_accounts=[])
         ctx.update(kw)
         return ledger.build_report(SEED_EVENTS, **ctx)
+
+    # 发布版脱敏：以下断言的基线数值以 <基线> 占位（结构保留），
+    # 实际数值仅存本地不入库的私有基线文档与 tests/test_ledger.py。
 
     def test_v3_baselines(self):
         r = self._report()
         s = r["summary"]
-        assert s["total_cny_invested"] == 84850.0
-        assert abs(s["usd_in"] - 12478.27) < 0.05
-        assert abs(s["avg_cost"] - 6.7998) < 0.0005          # 勘误后: 84850/12478.27
-        assert abs(s["fx_loss_usd"] - 43.32) < 0.15           # v3: 43.32(购汇30.19+账户内13.13)
-        assert abs(s["fee_usd"] - 13.14) < 0.05
-        assert abs(s["reward_usd"] - 163.03) < 0.5            # v3估算161,种子实算163.03
-        assert abs(s["realized_usd"] - (-36.68)) < 0.05
-        assert abs(s["expense_usd"] - 36.73) < 0.05
-        assert abs(s["external_transfer_usd"] - 2.26) < 0.05
+        assert s["total_cny_invested"] == <总投入基线>
+        assert abs(s["usd_in"] - <USD入账基线>) < 0.05
+        assert abs(s["avg_cost"] - <均成本基线>) < 0.0005
+        assert abs(s["fx_loss_usd"] - <点差基线>) < 0.15
+        assert abs(s["fee_usd"] - <费用基线>) < 0.05
+        assert abs(s["reward_usd"] - <奖励基线>) < 0.5
+        assert abs(s["realized_usd"] - <已实现基线>) < 0.05
+        assert abs(s["expense_usd"] - <消耗基线>) < 0.05
+        assert abs(s["external_transfer_usd"] - <转出基线>) < 0.05
         assert s["pending_count"] == 0
 
     def test_v3_identity(self):
         r = self._report()
         i = r["identity"]
-        assert abs(i["gain_usd"] - 1210.44) < 0.5             # v3: 1210.38
-        assert abs(i["gain_pct"] - 9.73) < 0.05
-        assert abs(i["fx_loss_cny"] - (-1169.5)) < 1.5        # 勘误后(v3的-589基于错误avg)
-        assert abs(i["expense_cny"] - 246.4) < 0.5
-        assert abs(i["net_cny"] - 6701.54) < 0.5              # 主口径精确(勘误后)
-        assert abs(i["net_pct"] - 8.64) < 0.05
+        assert abs(i["gain_usd"] - <增值基线>) < 0.5
+        assert abs(i["gain_pct"] - <增值率基线>) < 0.05
+        assert abs(i["fx_loss_cny"] - <汇损基线>) < 1.5
+        assert abs(i["expense_cny"] - <消耗CNY基线>) < 0.5
+        assert abs(i["net_cny"] - <净盈亏基线>) < 0.5
+        assert abs(i["net_pct"] - <净盈亏率基线>) < 0.05
         assert abs(i["identity_check_cny"] - i["net_cny"]) < 1.0  # 分解式闭环±1
 
     def test_no_usdcnh_degrades(self):
@@ -524,29 +444,24 @@ class TestBuildReport:
 
     def test_channel_ranking(self):
         ch = {c["channel"]: c for c in self._report()["channels"]}
-        assert abs(ch["汇丰柜台"]["wavg_spread_pct"] - 0.428) < 0.02   # v3: 0.41~0.43%最贵
-        assert abs(ch["众安App换U"]["wavg_spread_pct"] - 0.117) < 0.01  # v3: 0.117%最优
-        assert abs(ch["同事代换"]["wavg_spread_pct"] - (-1.80)) < 0.05  # 收益
-        ranked = [c["channel"] for c in self._report()["channels"]]
-        assert ranked[0] == "汇丰柜台"                          # 最贵排第一
+        assert ch[<最贵通道>]["wavg_spread_pct"] > 0                   # 最贵通道点差为正
+        assert ranked[0] == <最贵通道>                          # 最贵排第一
 
     def test_balance_reconciliation(self):
-        cash = [{"currency": "HKD", "amount": 52.72}, {"currency": "USD", "amount": 371.79}]
+        cash = [{"currency": "HKD", "amount": <HKD余额基线>}, {"currency": "USD", "amount": <USD余额基线>}]
         r = self._report(cash_accounts=cash)
         b = r["balances"]
-        assert abs(b["ledger"]["HKD"] - 52.72) < 0.01          # 32.52+20.20
-        assert abs(b["ledger"]["USD"] - 371.79) < 0.01
-        assert b["system"]["HKD"] == 52.72
+        assert abs(b["ledger"]["HKD"] - <HKD余额基线>) < 0.01
+        assert abs(b["ledger"]["USD"] - <USD余额基线>) < 0.01
+        assert b["system"]["HKD"] == <HKD余额基线>
         assert abs(b["diff"]["HKD"]) < 0.01 and abs(b["diff"]["USD"]) < 0.01
 
     def test_fx_row_derivation(self):
         rows = {row["ref_no"]: row for row in self._report()["fx_detail"]}
-        f01 = rows["V3-F01"]
-        assert abs(f01["theoretical"] - 11535.55) < 1          # 10000×1.153555
-        assert abs(f01["spread_pct"] - 0.274) < 0.02           # v3 §三
-        assert abs(f01["loss_usd"] - 4.04) < 0.05
-        f11 = rows["V3-F11"]
-        assert f11["loss_usd"] < 0                              # 同事代换=收益-2.25
+        f01 = rows[<fx事件引用号>]
+        assert abs(f01["theoretical"] - <理论应得基线>) < 1
+        assert abs(f01["spread_pct"] - <点差率基线>) < 0.02
+        assert abs(f01["loss_usd"] - <损失基线>) < 0.05
 
 
 class TestEcb:
@@ -590,7 +505,7 @@ logger = logging.getLogger(__name__)
 
 HKD_USD_STATIC = 7.846
 ECB_BASE_URL = "https://api.frankfurter.dev/v1"
-LEDGER_FX_START = "2026-06-18"          # 首笔购汇日，回填起点
+LEDGER_FX_START = "2026-01-01"          # 回填起点（按库内最早 fx 事件日期）
 
 
 # ---------------------------------------------------------------------------
@@ -947,29 +862,30 @@ class TestLedgerApi:
             client.cookies.clear()
 
     def test_report_endpoint(self, monkeypatch):
+        # 发布版脱敏：fixture 基线数值以 <基线> 占位
         async def fake_events(event_type=None, year=None, account=None):
             return [e for e in SEED_EVENTS]
 
         async def fake_value():
-            return 13651.98
+            return <资产基线>
 
         async def fake_cash():
-            return [{"currency": "HKD", "amount": 52.72}, {"currency": "USD", "amount": 371.79}]
+            return [{"currency": "HKD", "amount": <HKD余额基线>}, {"currency": "USD", "amount": <USD余额基线>}]
 
         monkeypatch.setattr(server.db, "get_ledger_events", fake_events)
         monkeypatch.setattr(server.db, "get_latest_portfolio_value", fake_value)
         monkeypatch.setattr(server.db, "get_cash_accounts", fake_cash)
         monkeypatch.setattr(server.db, "get_session", _fake_valid_session_ok())
         monkeypatch.setattr(server, "market_cache",
-                            [{"key": "USDCNH", "price": 6.7061}])
+                            [{"key": "USDCNH", "price": <汇率基线>}])
         client.cookies.set("session_token", "t-ledger-3")
         try:
             r = client.get("/api/ledger/report")
             assert r.status_code == 200
             data = r.json()
             assert data["ok"] is True
-            assert abs(data["summary"]["total_cny_invested"] - 84850) < 0.01
-            assert abs(data["identity"]["net_cny"] - 6701.54) < 0.5
+            assert abs(data["summary"]["total_cny_invested"] - <总投入基线>) < 0.01
+            assert abs(data["identity"]["net_cny"] - <净盈亏基线>) < 0.5
         finally:
             client.cookies.clear()
 ```
@@ -1198,15 +1114,12 @@ git -C /root/workspace/project/qdii commit -m "feat(ledger): 前端记账区块�
 ### Task 7: 入金邮件自动入账（采样 gate + 条件实现）
 
 > **执行结论（2026-10-03）**：首采样走 `fetch_hsbc_emails`（FROM HSBC_SENDER）只见成交邮件；
-> 用户指出 ZA Bank 通知邮件含换汇/转出/派息版式。二轮全收件箱采样（35 天 118 封）实证：
-> 外汇交易 2 封（9-29 CNY7000→USD1042.14@6.716931 编号20262604537008604577280；
-> CNY3000→HKD3501.13@0.856865 编号20262604537556682669057）、CHATS 转出 1 封
-> （USD1042.14→汇丰011*****3833）、基金派息 1 封（8.04 HKD 2026-09-15 存入）。
-> 修正落地：R12 日期 9-30→9-15、F07/F08 补交易编号 note、补 T04 transfer、
-> 新增 `fetch_za_notice_emails(days=30)`（完整地址 SEARCH，QQ IMAP 裸域搜不到；
-> 19 封：外汇2/转出1/派息1/成交2/结单指示等）。入金（CNY 原币 SWIFT 入账）无邮件版式
-> （兴业 SWIFT 通道不发通知邮件）——**入金自动入账维持人工/AI 录入，换汇/转出/派息
-> 版式已沉淀进 skill 采样流程**。commit 4d1d783。
+> 用户指出 ZA Bank 通知邮件含换汇/转出/派息版式。二轮全收件箱采样实证存在
+> 外汇交易/CHATS 转出/基金派息等通知版式（金额、交易编号、账户尾号等个人事实已脱敏）。
+> 修正落地：部分 reward 日期按派息实际到账日修正、fx 事件补交易编号 note、补 transfer 事件、
+> 新增 `fetch_za_notice_emails(days=30)`（完整地址 SEARCH，QQ IMAP 裸域搜不到）。
+> 入金（CNY 原币 SWIFT 入账）无邮件版式（该通道不发通知邮件）——**入金自动入账
+> 维持人工/AI 录入，换汇/转出/派息版式已沉淀进 skill 采样流程**。
 
 **Files:**
 - Modify: `email_trader.py`（poll_once 内）
@@ -1270,13 +1183,13 @@ rsync -az --delete --exclude='.git' --exclude='.codegraph' --exclude='venv' \
 
 ```bash
 ssh root@<server-ip> "mysql -h127.0.0.1 -P3914 -u<db-user> -p"$QDII_DB_PASS" qdii -e \"
-UPDATE cash_accounts SET amount=52.72 WHERE currency='HKD';
-UPDATE cash_accounts SET amount=371.79 WHERE currency='USD';
-UPDATE holdings SET cost_price=213.9616 WHERE symbol='NVDA' AND cost_price<>213.9616;
-UPDATE sys_config SET value='84850' WHERE \\\`key\\\`='cny_invested';
+UPDATE cash_accounts SET amount=<HKD余额基线> WHERE currency='HKD';
+UPDATE cash_accounts SET amount=<USD余额基线> WHERE currency='USD';
+UPDATE holdings SET cost_price=<NVDA成本基线> WHERE symbol='NVDA' AND cost_price<><NVDA成本基线>;
+UPDATE sys_config SET value='<总投入基线>' WHERE \\\`key\\\`='cny_invested';
 SELECT * FROM cash_accounts; SELECT symbol,cost_price FROM holdings WHERE symbol='NVDA';\""
 ```
-预期：HKD 52.72 / USD 371.79 / NVDA 213.9616 / cny_invested 84270
+预期：各修数项与基线一致（发布版脱敏，实际值见本地私有基线文档）
 
 - [x] **Step 3: 种子入库 + ECB 回填 + 服务重载**
 
@@ -1290,7 +1203,7 @@ ssh root@<server-ip> "cd /opt/qdii && python3 ledger_seed.py && systemctl restar
 ```bash
 ssh root@<server-ip> "TOKEN=\$(mysql -h127.0.0.1 -P3914 -u<db-user> -p"$QDII_DB_PASS" qdii -N -e \"SELECT token FROM sessions ORDER BY created_at DESC LIMIT 1\"); curl -s -H \"Cookie: session_token=\$TOKEN\" http://127.0.0.1:8888/api/ledger/report | python3 -m json.tool | head -40"
 ```
-核对：total_cny_invested=84850 / avg_cost≈6.7998 / fx_loss_usd≈43.32 / identity.net_cny≈6701.54（±1，USDCNH 行情浮动）/ balances.diff HKD、USD 均 ✓（待 portfolio 循环下一轮把总资产刷新后恒等式精确）。
+核对：`GET /api/ledger/report` 各 summary/identity 项与本地基线一致（发布版脱敏，数值见本地私有文档；±1 为 USDCNH 行情浮动余量）/ balances.diff HKD、USD 均 ✓（待 portfolio 循环下一轮把总资产刷新后恒等式精确）。
 
 ---
 
@@ -1301,7 +1214,7 @@ ssh root@<server-ip> "TOKEN=\$(mysql -h127.0.0.1 -P3914 -u<db-user> -p"$QDII_DB_
 - Modify: `AGENTS.md`
 
 - [x] **Step 1: 加载 skill-creator 写 skill**——内容：触发词（处理月结单/录入结单/ledger ingest）；SOP：PDF→`python3 -c "import fitz;..."` pymupdf 提取 → 按 v3 版式规则表解析新事件（ZA/HSBC INVSTM0011/HSBC One IPSSTM0007/致富）→ `SELECT MAX(event_date)` 防重 → curl POST `/api/ledger/events`（token 取 sessions 表）→ GET report 回归核对（恒等式 ±1 / 对账位 diff）→ 输出差异清单待确认；附 ref_no 规则 `{YYYYMM}-{account}-{seq}` 与 pending 补全流程。
-- [x] **Step 2: AGENTS.md 更新**——模块结构表加 `ledger.py / ledger_seed.py` 行；「关键口径契约」加 ledger 恒等式一行（口径=盘点 v3，HKD→USD 7.846 静态，cny_invested=84850 全额口径（勘误：84,270 系电费双重扣减））；测试基线数更新。
+- [x] **Step 2: AGENTS.md 更新**——模块结构表加 `ledger.py / ledger_seed.py` 行；「关键口径契约」加 ledger 恒等式一行（口径=本地基线，HKD→USD 静态折算，cny_invested=全额口径）；测试基线数更新。
 - [x] **Step 3: 提交**
 
 ```bash
@@ -1324,7 +1237,7 @@ python3 -m pytest tests/test_portfolio.py tests/test_decision_model.py tests/tes
 
 `systemctl is-active qdii` + `journalctl -u qdii --since '5 min ago'` 无异常堆栈 + 浏览器访问 portfolio.html 记账区块渲染正常。
 
-- [x] **Step 3: 更新盘点文档遗留事项**——`账户成本盈亏盘点_20261003.md` §十二补记：勘误已全部落库（HKD 52.72/NVDA 213.9616/cny_invested 84270/USD 371.79）；ledger 模块上线。
+- [x] **Step 3: 更新盘点文档遗留事项**——本地私有基线文档 §十二补记：勘误已全部落库（余额/成本/投入口径修正）；ledger 模块上线。
 - [x] **Step 4: 提交收尾**
 
 ```bash
@@ -1336,7 +1249,7 @@ git -C /root/workspace/project/qdii commit -m "docs: 盘点文档补记ledger上
 
 ## Self-Review 记录
 
-- **Spec 覆盖**：§2 表→Task1；§4 报表→Task3；§5 邮件→Task7（含降级路径）；§6 前端→Task6；§7 种子/验证→Task2/3/8；§8 修数→Task8（含 52.72 修正）；§9 skill→Task9；§10 工作流→Task7/9。✓
+- **Spec 覆盖**：§2 表→Task1；§4 报表→Task3；§5 邮件→Task7（含降级路径）；§6 前端→Task6；§7 种子/验证→Task2/3/8；§8 修数→Task8（含跨账户桶口径修正）；§9 skill→Task9；§10 工作流→Task7/9。✓
 - **占位符**：Task 7 Step 2 为条件任务且 gate 明确（真实版式驱动），其余步骤代码完整。✓
 - **类型一致性**：`upsert_ledger_event(**ev)` 关键字与 `E()` 构造器键完全一致；`build_report(events, *, total_assets_usd, usdcnh, cash_accounts)` 三处调用一致。✓
 - 计划基于 2026-10-03 代码现状编写；执行中若发现接口签名漂移（如 sessions 表字段名），先 grep 核对再继续。

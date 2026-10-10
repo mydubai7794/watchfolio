@@ -108,8 +108,8 @@
   ],
   "cash": [{"currency": "USD", "amount": 1000.0}],
   "fx": {"usdhkd": 7.8, "usdcnh": 7.12},
-  "cny": {"invested": 84850.0, "invested_gross": 84850.0, "expense": 0.0,
-          "value": 87912.0, "pnl": 3062.0, "pnl_pct": 3.6, "rate": 7.12}
+  "cny": {"invested": 14000.0, "invested_gross": 14000.0, "expense": 0.0,
+          "value": 14596.0, "pnl": 596.0, "pnl_pct": 4.26, "rate": 7.12}
 }
 ```
 

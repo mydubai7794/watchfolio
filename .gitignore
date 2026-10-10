@@ -22,6 +22,7 @@ juejin/
 .DS_Store
 tmpclaude*
 monthStatement/
+ledger_seed.py
 .playwright-cli/
 .mcp.json
 AGENTS.local.md
