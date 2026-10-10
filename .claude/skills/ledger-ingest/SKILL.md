@@ -1,6 +1,6 @@
 ---
 name: ledger-ingest
-description: tickr 持仓网站记账模块（ledger）录入技能。当用户给出银行结单 PDF/App 截图文字/邮件通知/口述流水，要求录入记账、入账、补账、对账、核对余额、查点差或查投入成本时使用。触发词：记账、录入、入账、结单录入、ledger、对账、总投入、点差、通道成本。录入通道为服务器 POST /api/ledger/events（幂等），录入后自动跑 /api/ledger/report 对账并汇报差异。
+description: Watchfolio 持仓网站记账模块（ledger）录入技能。当用户给出银行结单 PDF/App 截图文字/邮件通知/口述流水，要求录入记账、入账、补账、对账、核对余额、查点差或查投入成本时使用。触发词：记账、录入、入账、结单录入、ledger、对账、总投入、点差、通道成本。录入通道为服务器 POST /api/ledger/events（幂等），录入后自动跑 /api/ledger/report 对账并汇报差异。
 ---
 
 # 记账录入（ledger ingest）
