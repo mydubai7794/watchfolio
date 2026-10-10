@@ -79,7 +79,10 @@
   tick≥5 的「有效分时日」（杂点日自动回退上一完整时段）并以 [ts,price] 对
   下发（前端悬浮显示北京时间+价格）；组合 tick 写入条件
   `session != "closed" or overnight_used > 0`；写入口毛刺延迟确认（hold/discard/confirm）。
-- **记账口径（ledger）**：总投入以 sys_config 全额口径为准（本地基线，数值不入库）；恒等式
+- **记账口径（ledger）**：总投入以 sys_config 全额口径为准（本地基线，数值不入库；
+  cny_invested 由 POST /api/ledger/events 尾部自动重算同步=Σ inflow.cny_amount，
+  derived_sync 回显 + 直写 _cny_cfg 零延迟，expense_cny 仍 skill 手工累加——
+  历史成本口径不可从事件表推导）；恒等式
   `net_cny = 总资产×USDCNH − 总投入 = 增值 + 汇损 − 消耗`；fx 事件带双边金额 +
   ECB mid_rate（点差实时推导不落库）；balance 快照按「账户×币种」取最新对账
   cash_accounts；HKD→USD 静态 7.846。录入走 POST /api/ledger/events

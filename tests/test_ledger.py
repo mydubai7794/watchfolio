@@ -406,6 +406,33 @@ class TestLedgerApi:
         finally:
             client.cookies.clear()
 
+    def test_post_non_inflow_no_sync_change(self, monkeypatch):
+        # spec §7：非 inflow 批（fx）不改变 cny_invested——重算与事件类型解耦
+        # 的行为契约，防未来改增量式同步时误触非 inflow 批
+        async def fake_upsert(**ev):
+            return 1
+
+        async def fake_sync():
+            return {"before": 124850.0, "after": 124850.0}
+
+        monkeypatch.setattr(server.db, "upsert_ledger_event", fake_upsert)
+        monkeypatch.setattr(server.db, "sync_ledger_cny_invested", fake_sync)
+        monkeypatch.setattr(server.db, "get_session", _fake_valid_session())
+        monkeypatch.setattr(server, "_cny_cfg", {"invested": 124850.0, "expense": 0.0})
+        client.cookies.set("session_token", "t-ledger-5")
+        try:
+            r = client.post("/api/ledger/events", json={"events": [
+                {"event_date": "2026-10-08", "event_type": "fx",
+                 "account": "za_bank", "direction": "-", "amount_ccy": "CNY",
+                 "amount": 10000, "ref_no": "TEST-NONINFLOW-1",
+                 "recv_ccy": "USD", "recv_amount": 1491.48, "mid_rate": 0.1491}]})
+            assert r.status_code == 200
+            assert r.json()["derived_sync"]["cny_invested"] == \
+                {"before": 124850.0, "after": 124850.0}
+            assert server._cny_cfg["invested"] == 124850.0
+        finally:
+            client.cookies.clear()
+
 
 # ---------------------------------------------------------------------------
 # sync_ledger_cny_invested（cny_invested 服务端重算同步）
