@@ -306,14 +306,14 @@ def test_session_persisted_via_db(monkeypatch):
     monkeypatch.setattr(server.db, "create_session", fake_create)
 
     async def fake_get_user(username):
-        # 桩掉 DB 用户查询，保持测试离线不连库
-        return {"username": username, "password": "hello9987"}
+        # 桩掉 DB 用户查询，保持测试离线不连库（存量明文兼容分支）
+        return {"username": username, "password": "legacy-plain-pass"}
 
     monkeypatch.setattr(server.db, "get_user", fake_get_user)
     # 预置验证码后走完整登录流程
     server._captchas["cid"] = {"answer": 7, "expires": time.time() + 60}
     r = client.post("/api/login", json={
-        "username": "admin", "password": "hello9987",
+        "username": "admin", "password": "legacy-plain-pass",
         "captcha_id": "cid", "captcha_answer": "7"})
     assert r.status_code == 200
     assert len(calls) == 1 and calls[0][1] == "admin"

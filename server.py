@@ -870,6 +870,25 @@ async def proxy_check(proxy_id: int):
 # Config
 # ---------------------------------------------------------------------------
 
+# 敏感配置键片段（键名含任一片段即脱敏返回）
+SENSITIVE_KEY_FRAGMENTS = ("TOKEN", "KEY", "SECRET", "PASSWORD", "AUTH_CODE")
+
+
+def is_sensitive_key(key: str) -> bool:
+    """键名含敏感片段（TOKEN/KEY/SECRET/PASSWORD/AUTH_CODE）即视为敏感配置。"""
+    k = (key or "").upper()
+    return any(frag in k for frag in SENSITIVE_KEY_FRAGMENTS)
+
+
+def mask_secret(value: str | None) -> str:
+    """敏感值掩码：长度>8 显示前2+****+后2，否则全掩码。"""
+    if not value:
+        return "****"
+    if len(value) > 8:
+        return value[:2] + "****" + value[-2:]
+    return "****"
+
+
 @app.get("/api/config")
 async def config_list():
     rows = await db.get_configs()
@@ -877,11 +896,22 @@ async def config_list():
         for k, v in row.items():
             if isinstance(v, datetime):
                 row[k] = v.isoformat()
+        sensitive = is_sensitive_key(row.get("key", ""))
+        row["masked"] = sensitive
+        if sensitive:
+            row["value"] = mask_secret(row.get("value"))
     return rows
 
 
 @app.put("/api/config/{key}")
 async def config_set(key: str, data: ConfigInput):
+    # 留空 = 不修改；敏感键提交值等于当前掩码形态 = 未改动，均跳过落库
+    if data.value == "":
+        return {"ok": True, "skipped": True}
+    if is_sensitive_key(key):
+        current = await db.get_config(key)
+        if current is not None and data.value == mask_secret(current):
+            return {"ok": True, "skipped": True}
     await db.set_config(key, data.value)
     return {"ok": True}
 

@@ -1,0 +1,50 @@
+# 构建上下文最小化：密钥/隐私/本地大目录一律不进镜像
+# （参照 .gitignore，另排除运行时无关的文档、测试与子项目）
+
+# 版本控制与本地工具
+.git/
+.gitignore
+.codegraph/
+.claude/
+.idea/
+.vscode/
+.playwright-cli/
+
+# Python 本地产物
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+build/
+dist/
+
+# 密钥与本地配置（绝不进镜像）
+qdii.env
+.env
+.mcp.json
+*.local.md
+
+# 本地数据与隐私文件
+qdii.db
+uvicorn.log
+tmpclaude*
+monthStatement/
+ledger_seed.py
+
+# 运行时无关目录（文档/测试/独立子项目/调研资料）
+akshare-code/
+akshare-docs/
+juejin/
+StockWatcher/
+docs/
+tests/
+scripts/
+test_*.py
+
+# 本地文档与报告
+*.md
+!README.md
+QQQ定投VIX止盈回测报告.html

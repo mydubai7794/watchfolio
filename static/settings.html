@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%232A6CF0'/%3E%3Cpath d='M28 66 V46' stroke='%23fff' stroke-width='5' stroke-linecap='round'/%3E%3Crect x='21' y='50' width='14' height='14' rx='3' fill='%23fff'/%3E%3Cpath d='M52 58 V34' stroke='%23fff' stroke-width='5' stroke-linecap='round'/%3E%3Crect x='45' y='40' width='14' height='14' rx='3' fill='%23fff'/%3E%3Cpath d='M76 46 V20' stroke='%23fff' stroke-width='5' stroke-linecap='round'/%3E%3Crect x='69' y='26' width='14' height='16' rx='3' fill='%23fff'/%3E%3C/svg%3E">
+<title>系统设置</title>
+<style>
+:root {
+  --bg: #F5F5F7;
+  --card: #FFFFFF;
+  --txt: #111114; --txt2: #8A8A8E; --txt3: #C7C7CC;
+  --up: #E5443B; --down: #00A870; --accent: #2A6CF0;
+  --shadow: 0 1px 3px rgba(0,0,0,0.05);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { background: var(--bg); color: var(--txt); font-size: 15px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", sans-serif;
+  min-height: 100vh; line-height: 1.5; font-variant-numeric: tabular-nums; }
+a { text-decoration: none; }
+button { font-family: inherit; }
+
+.header { position: sticky; top: 0; z-index: 20; background: var(--card);
+  box-shadow: 0 1px 0 rgba(0,0,0,0.04);
+  padding: 12px 24px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.header-title { font-size: 17px; font-weight: 600; line-height: 1.2; }
+.nav-peer { font-size: 14px; font-weight: 500; color: var(--txt2); }
+.nav-peer:hover { color: var(--txt); }
+.nav-peer.cur { color: var(--accent); }
+.header-status { margin-left: auto; display: flex; align-items: center; gap: 12px;
+  font-size: 11px; color: var(--txt3); line-height: 1.2; }
+.link { color: var(--txt2); cursor: pointer; font-size: 13px; }
+.link:hover { color: var(--txt); }
+
+.content { padding: 16px 24px 40px; max-width: 1200px; margin: 0 auto;
+  display: flex; flex-direction: column; gap: 16px; }
+.card { background: var(--card); border-radius: 16px; box-shadow: var(--shadow); }
+.pad { padding: 24px; }
+.card-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.card-title { font-size: 17px; font-weight: 600; line-height: 1.2; }
+.card-note { font-size: 11px; color: var(--txt3); }
+
+/* 表格 */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--bg);
+  white-space: nowrap; vertical-align: middle; }
+th:last-child, td:last-child { text-align: right; }
+th { color: var(--txt2); font-weight: 400; font-size: 12px; }
+td { font-size: 14px; line-height: 1.2; }
+td.wrap { white-space: normal; max-width: 360px; font-size: 12px; color: var(--txt2); }
+td.cfg-key { font-weight: 600; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px; letter-spacing: .3px; }
+.masked { color: var(--txt2); }
+
+input[type="text"] { background: var(--bg); border: none; border-radius: 10px;
+  padding: 8px 12px; font-size: 13px; color: var(--txt); font-family: inherit;
+  width: 320px; max-width: 100%; }
+input[type="text"]:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); outline: none; }
+input::placeholder { color: var(--txt3); }
+
+.btn { border: none; border-radius: 10px; padding: 6px 14px; font-size: 13px;
+  cursor: pointer; background: var(--bg); color: var(--txt); font-weight: 500; }
+.btn:hover { filter: brightness(0.96); }
+.btn.primary { background: var(--accent); color: #fff; }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn-row { display: flex; gap: 8px; justify-content: flex-end; }
+
+.footer-note { font-size: 11px; color: var(--txt3); text-align: center; }
+
+@media (max-width: 768px) {
+  .header { padding: 8px 12px; gap: 8px; }
+  .content { padding: 12px 12px 32px; gap: 12px; }
+  .pad { padding: 16px; }
+  .table-wrap { margin: 0 -16px; padding: 0 16px; }
+  input[type="text"] { width: 100%; }
+}
+</style>
+</head>
+<body>
+
+<header class="header">
+  <a class="nav-peer" href="/static/portfolio.html">我的持仓</a>
+  <a class="nav-peer" href="/static/index.html">监控</a>
+  <a class="nav-peer" href="/static/ledger.html">记账</a>
+  <div class="header-title">系统设置</div>
+  <div class="header-status">
+    <a class="link" href="#" onclick="logout();return false;">登出</a>
+  </div>
+</header>
+
+<main class="content">
+
+  <section class="card pad">
+    <div class="card-head"><div class="card-title">sys_config 配置项</div>
+      <div class="card-note">敏感项（TOKEN/KEY/SECRET/PASSWORD/AUTH_CODE）掩码显示，留空保存 = 保持不变</div></div>
+    <div class="table-wrap">
+      <table id="cfgTable">
+        <thead><tr><th>Key</th><th>当前值</th><th>说明</th><th>操作</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <div class="footer-note">配置修改即时生效（部分带缓存项 60s 内热加载），无需重启服务</div>
+
+</main>
+
+<script>
+const SENSITIVE_FRAGMENTS = ['TOKEN', 'KEY', 'SECRET', 'PASSWORD', 'AUTH_CODE'];
+const isSensitive = k => SENSITIVE_FRAGMENTS.some(f => (k || '').toUpperCase().includes(f));
+let configs = [];
+let editingKey = null;
+
+async function logout() {
+  await fetch('/api/logout', {method:'POST'});
+  location.href = '/static/login.html';
+}
+
+function guard(resp) {
+  if (resp.status === 401) { location.href = '/static/login.html'; return false; }
+  return true;
+}
+
+async function loadConfigs() {
+  try {
+    const r = await fetch('/api/config');
+    if (!guard(r)) return;
+    const d = await r.json();
+    if (!r.ok) return;
+    configs = d;
+    render();
+  } catch (e) { console.error(e); }
+}
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function render() {
+  const tbody = document.querySelector('#cfgTable tbody');
+  if (editingKey != null) {
+    const row = configs.find(c => c.key === editingKey);
+    if (!row) editingKey = null;
+  }
+  tbody.innerHTML = configs.map(c => {
+    const sensitive = !!c.masked || isSensitive(c.key);
+    if (c.key === editingKey) {
+      const ph = sensitive ? '留空=保持不变' : '输入新值';
+      return `<tr><td class="cfg-key mono">${esc(c.key)}</td>` +
+        `<td><input type="text" id="editInput" placeholder="${ph}" autocomplete="off"></td>` +
+        `<td class="wrap">${esc(c.remark || '')}</td>` +
+        `<td><div class="btn-row"><button class="btn primary" onclick="saveEdit()">保存</button>` +
+        `<button class="btn" onclick="cancelEdit()">取消</button></div></td></tr>`;
+    }
+    const valHtml = sensitive
+      ? `<span class="mono masked">${esc(c.value)}</span>`
+      : `<span class="mono">${esc(c.value)}</span>`;
+    return `<tr><td class="cfg-key mono">${esc(c.key)}</td><td>${valHtml}</td>` +
+      `<td class="wrap">${esc(c.remark || '')}</td>` +
+      `<td><div class="btn-row"><button class="btn" onclick="startEdit('${esc(c.key)}')">编辑</button></div></td></tr>`;
+  }).join('') || '<tr><td colspan="4" style="text-align:center;color:var(--txt3)">无配置项</td></tr>';
+  if (editingKey != null) {
+    const input = document.getElementById('editInput');
+    if (input) input.focus();
+  }
+}
+
+function startEdit(key) { editingKey = key; render(); }
+
+function cancelEdit() { editingKey = null; render(); }
+
+async function saveEdit() {
+  const input = document.getElementById('editInput');
+  if (!input) return;
+  const value = input.value;
+  try {
+    const r = await fetch('/api/config/' + encodeURIComponent(editingKey), {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({value})
+    });
+    if (!guard(r)) return;
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.ok === false) {
+      alert('保存失败：' + (d.message || d.detail || ('HTTP ' + r.status)));
+      return;
+    }
+    editingKey = null;
+    await loadConfigs();
+  } catch (e) {
+    alert('保存失败：' + e.message);
+  }
+}
+
+loadConfigs();
+</script>
+</body>
+</html>

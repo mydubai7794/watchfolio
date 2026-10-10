@@ -168,7 +168,6 @@ tests/test_server_auth.py tests/test_email_trader.py tests/test_longport.py
 tests/test_alert_engine.py tests/test_alert_api.py tests/test_daily_bars.py
 tests/test_longport_push.py tests/test_macro_fetcher.py tests/test_ledger.py
 tests/test_nav.py`（当前 441 passed）。
-tests/test_scorer.py 是存量坏（scorer.normalize 已删），不计入基线。
 pytest 本地跑可以（不起服务）；**服务只能线上起一份**。
 
 ## 已知边界

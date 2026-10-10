@@ -1,0 +1,69 @@
+# QDII 持仓网站 Docker Compose 编排：db + init + app 三服务
+#
+# 快速启动（README「快速开始」同款路径）：
+#   1. cp qdii.env.example qdii.env
+#   2. 编辑 qdii.env，取消注释并填好数据库 5 键：
+#        QDII_DB_HOST=db     <- 写本文件里的 db 服务名，不是 127.0.0.1
+#        QDII_DB_PORT=3306   <- 容器内端口，不是 3914
+#        QDII_DB_USER/PASS/NAME 自拟（USER/PASS 与 db 服务自动同步，见下）
+#   3. docker compose --env-file qdii.env up -d
+#   4. docker compose logs init    # 查看建表/种子输出与初始账号提示
+#   5. 浏览器访问 http://<host>:8888
+#
+# 凭证同步机制：db 服务的账号密码经 ${VAR:-默认值} 变量替换读取，
+# 带 --env-file qdii.env 启动时自动与 qdii.env 的 QDII_DB_* 保持一致，
+# 无需两处手改；不带 --env-file 直接 up 时落到默认档，
+# 需自行保证与 qdii.env 一致，否则 app 连库会被拒。
+#
+# 注意：镜像内不含 qdii.env（.dockerignore 已排除），配置只经 env_file 注入；
+#      init 一次性建表 + 种子数据 + 种子账号后退出（Exited(0) 属正常），
+#      app 等它成功结束后才启动；db 数据落 named volume 持久化。
+
+services:
+  db:
+    image: mysql:8.0
+    # 鉴权插件回退传统档（客户端驱动兼容兜底）；库表字符集显式 utf8mb4
+    command:
+      - --default-authentication-plugin=mysql_native_password
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${QDII_DB_PASS:-qdii-root-change-me}
+      MYSQL_DATABASE: ${QDII_DB_NAME:-qdii}
+      MYSQL_USER: ${QDII_DB_USER:-qdii}
+      MYSQL_PASSWORD: ${QDII_DB_PASS:-qdii-pass-change-me}
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      # init_db.py 无连接重试，app/init 又依赖本健康门，故配足次数与预热期
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 60s
+    restart: unless-stopped
+
+  init:
+    build: .
+    env_file: qdii.env
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    # 覆盖镜像默认 CMD：一次性建表 + 种子数据 + 种子账号，成功即退出
+    command: ["python3", "init_db.py"]
+
+  app:
+    build: .
+    env_file: qdii.env
+    ports:
+      - "8888:8888"
+    depends_on:
+      db:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  db-data:

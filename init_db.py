@@ -2,6 +2,10 @@
 """一次性初始化脚本：建表 + 种子数据。"""
 import asyncio
 import logging
+import os
+import secrets
+
+import config  # noqa: F401  导入即完成项目根 qdii.env → os.environ 注入（幂等）
 
 logging.basicConfig(
     level=logging.INFO,
@@ -42,13 +46,23 @@ async def init():
     # 1. 建表 + 种子配置
     await init_tables()
 
-    # 1.5 种子引导用户（仅本一次性 CLI 写入；pbkdf2 哈希落库，避免明文。
-    #     INSERT IGNORE 幂等不覆盖已有行；上线后请尽快改掉初始口令）
-    from database import execute as db_execute, hash_password
-    await db_execute(
-        "INSERT IGNORE INTO users (username, password) VALUES (%s, %s)",
-        args=("admin", hash_password("hello9987")),
-    )
+    # 1.5 初始账号（仅 users 表为空时创建；pbkdf2 哈希落库避免明文。
+    #     口令优先取环境变量 QDII_ADMIN_PASSWORD，未设置时 secrets 随机
+    #     生成并打印到启动日志——stdout 即日志，docker logs 亦可见，
+    #     上线后请立即登录修改初始口令）
+    from database import execute as db_execute, execute_dict as db_query, hash_password
+    rows = await db_query("SELECT COUNT(*) AS n FROM users")
+    if rows and rows[0].get("n", 0) == 0:
+        admin_password = os.environ.get("QDII_ADMIN_PASSWORD") or secrets.token_urlsafe(12)
+        await db_execute(
+            "INSERT IGNORE INTO users (username, password) VALUES (%s, %s)",
+            args=("admin", hash_password(admin_password)),
+        )
+        logger.info("=" * 60)
+        logger.info("[init] 初始账号 admin / 初始口令 %s —— 请立即登录并修改", admin_password)
+        logger.info("=" * 60)
+    else:
+        logger.info("users 表已有账号，跳过初始账号创建")
 
     # 2. 种子 ETF（INSERT IGNORE 等效逻辑 —— add_etf 使用 INSERT，
     #    如果已存在会因 PRIMARY KEY 冲突跳过，这里先查再插入）

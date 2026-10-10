@@ -1,8 +1,14 @@
-# QDII 持仓网站
+# tickr —— 券商风格个人持仓网站
 
 券商风格的个人持仓管理网站：**美股 + 港股 + 场外基金 + 现金（统一 USD 口径）**，附带一条 **A 股 QDII ETF 竞价监控**（4 步决策模型）与**记账报表**子系统。
 
 前后端一体：FastAPI + MySQL 后端，无构建的单文件前端；一切曲线/回显从数据库重建，前端不直接消费外部行情。
+
+![主看板](docs/screenshots/dashboard.png)
+
+![监控页](docs/screenshots/monitor.png)
+
+![记账页](docs/screenshots/ledger.png)
 
 ## 项目简介
 
@@ -37,8 +43,17 @@
 | `macro_fetcher.py` | 宏观四指标日更抓取与解析 |
 | `longport_fetcher.py` | 长桥 OpenAPI 封装（限流信号量/凭证热加载/token 续期） |
 | `ledger_seed.example.py` | 记账种子事件格式示例（真实流水不入库） |
-| `init_db.py` | 一次性初始化：建表 + 种子数据 + 种子账号 |
+| `init_db.py` | 一次性初始化：建表 + 种子数据 + 初始账号（users 为空时创建，口令随机或环境变量注入） |
 | `static/portfolio.html` | 单文件前端（持仓主页/监控页/记账页/登录页） |
+
+### 邮件版式扩展
+
+邮件自动记账当前内置三类券商成交邮件版式：汇丰（「全部執行」汇总门控）、众安、致富（「待成交 = 0」终态门控，同发件人营销邮件由解析门槛拦截）。新增一家券商只需两步：
+
+1. 在 `email_trader.py` 实现该版式的解析函数——正则提取成交字段（代码/方向/数量/价格/币种等）并映射到 `trade_records` 表口径；
+2. 在邮件分发逻辑中按发件人/主题特征注册路由，并补一组该版式的离线样例测试。
+
+欢迎以新增版式的方式贡献扩展，覆盖更多券商即扩展数据源覆盖面。解析门槛（如「全部執行」标记、终态校验）是防营销邮件误入账的关键，移植时务必保留等价门控。
 
 ## 数据源与配置总览
 
@@ -61,7 +76,117 @@
 
 > 说明：24h数据源与股票行情网关为**自建可选增强**，无配置时自动降级（对应标的回退新浪扩展价定格口径），不影响其余功能。所有 key 经 `qdii.env` 注入，见 [`qdii.env.example`](qdii.env.example)。
 
-## 快速开始
+## 自建行情网关（可选）
+
+**背景**：加密数据源对部分服务器 IP 有访问限制，直连不可达时可部署一个 Cloudflare Worker 反向代理作中转——「股票行情网关」即由此而来。无交易标的（AMKR/PCG/F 等）的夜盘活价补齐同样经该网关：业务侧 `X-Auth-Token` 与 `X-H24-APIKEY` 双头同值鉴权，消费逻辑见 `portfolio_fetcher.py`。
+
+部署步骤：
+
+1. 生成访问令牌：`openssl rand -hex 16`；
+2. 按下方示例部署 Worker，把令牌配置为 Worker 侧校验值；
+3. 将 Worker 地址填入 `qdii.env` 的 `QDII_EQUITY_QUOTE_URL`，令牌填入 `QDII_EQUITY_API_KEY`，重启服务生效。
+
+```js
+const TOKEN = "XXX";  // 例: openssl rand -hex 16 生成
+
+const ROUTES = [
+  ["/spot/", "https://api.binance.com"],   // 现货 /api/v3 (bStocks)
+  ["/sapi/", "https://api.binance.com"],   // 美股行情 /sapi/v1/equity/...
+  ["/fapi/", "https://fapi.binance.com"],  // TradFi 永续 /fapi/v1/...
+];
+
+
+export default {
+  async fetch(request) {
+    if (request.headers.get("x-auth-token") !== TOKEN) {
+      return new Response("forbidden", { status: 403 });
+    }
+    const url = new URL(request.url);
+    for (const [prefix, origin] of ROUTES) {
+      if (url.pathname.startsWith(prefix)) {
+        const headers = new Headers(request.headers);
+        headers.delete("x-auth-token");
+        headers.delete("host");
+        headers.delete("cookie");
+        return fetch(origin + url.pathname + url.search, {
+          method: request.method,
+          headers,
+          body: ["GET", "HEAD"].includes(request.method) ? undefined : request.body,
+        });
+      }
+    }
+    return new Response("no route", { status: 404 });
+  }
+};
+```
+
+
+> 不部署也不影响主功能：未配置时相关标的自动降级（扩展价定格口径 / 直接跳过），其余数据源与功能不受影响。
+
+## 快速开始（Docker Compose，推荐）
+
+一条命令拉起三个服务：`db`（MySQL 8，utf8mb4，数据卷持久化 + healthcheck）→ `init`（一次性建表 + 种子数据 + 初始账号，成功后退出）→ `app`（FastAPI 主服务，8888 端口）。
+
+```bash
+# 1. 克隆
+git clone <repo-url> && cd qdii
+
+# 2. 配置
+cp qdii.env.example qdii.env
+vi qdii.env   # 取消注释并填好数据库 5 键（QDII_DB_*），Docker 路径下固定为：
+              #   QDII_DB_HOST=db      ← 写 compose 的 db 服务名，不是 127.0.0.1
+              #   QDII_DB_PORT=3306    ← 容器内端口，不是 3914
+              #   QDII_DB_USER=qdii
+              #   QDII_DB_PASS=<自拟口令>
+              #   QDII_DB_NAME=qdii
+              # 其余数据源键按需配置，不配自动走各自降级链，不影响启动
+
+# 3. 一条命令启动（db 健康后 init 建表种子，app 等 init 成功退出才起）
+docker compose --env-file qdii.env up -d
+
+# 4. 查看初始化输出（建表 + 种子 + 初始账号提示）
+docker compose logs init
+
+# 5. 浏览器访问 http://<your-domain>:8888
+```
+
+> 说明：
+> - 带 `--env-file qdii.env` 时，db 服务的账号密码经变量替换**自动与 qdii.env 保持一致**，无需两处手改；直接 `docker compose up -d` 不带 `--env-file` 会落到 compose 默认档凭证，需自行保证与 qdii.env 一致，否则连库被拒。
+> - `init` 服务成功后显示 `Exited (0)` 属正常，不是故障。
+> - 生产可自行绑定域名并反代到 8888 端口。
+
+常用运维：
+
+```bash
+docker compose ps                  # 三服务状态（init 为 Exited(0) 属正常）
+docker compose logs -f app         # 跟主服务日志
+docker compose down                # 停止（db 数据卷保留）
+docker compose down -v             # 停止并删卷（清库重来）
+docker compose build && docker compose --env-file qdii.env up -d   # 改代码后重建
+```
+
+### 初始账号与口令
+
+`init_db.py` 仅在 `users` 表**为空**时创建初始账号 `admin`（口令以 pbkdf2 哈希落库，见 `database.py` 的 `hash_password`）：
+
+- 口令优先取环境变量 `QDII_ADMIN_PASSWORD`（`qdii.env` 中的同名键同样生效）；
+- 未设置时随机生成（`secrets.token_urlsafe(12)`），并打印醒目日志行：
+
+```
+[init] 初始账号 admin / 初始口令 <值> —— 请立即登录并修改
+```
+
+日志走 stdout——systemd 部署下 `journalctl -u <服务名>`、docker 部署下 `docker logs` 均可见。`users` 表已有账号时跳过创建，重复运行不会覆盖既有口令。**首次启动后请立即修改口令。**
+
+修改口令（前端与设置页均无改密入口——设置页仅管理系统配置项 `sys_config`，不含 `users` 表）：
+
+```bash
+python3 -c "from database import hash_password; print(hash_password('你的新口令'))"
+# 再执行 SQL：
+# UPDATE users SET password='<上面输出的哈希>' WHERE username='admin';
+```
+
+## 手动部署（venv，非 Docker）
 
 ```bash
 # 1. 克隆
@@ -79,29 +204,14 @@ vi qdii.env   # 至少填好数据库 5 键（QDII_DB_*），其余按需
 mysql -h<host> -P<port> -u<user> -p -e \
   "CREATE DATABASE IF NOT EXISTS qdii DEFAULT CHARACTER SET utf8mb4"
 
-# 5. 初始化（建表 + 种子数据 + 种子账号）
+# 5. 初始化（建表 + 种子数据 + 初始账号；口令见「初始账号与口令」）
 python3 init_db.py
 
 # 6. 启动（服务端口 8888）
 uvicorn server:app --host 0.0.0.0 --port 8888
 ```
 
-浏览器访问 `http://<your-domain>:8888`（生产可自行绑定域名并反代到 8888 端口）。
-
-### 初始账号与口令
-
-`init_db.py` 会向 `users` 表 **INSERT IGNORE 种子账号**（幂等，不覆盖已有行；口令以 pbkdf2 哈希落库，见 `init_db.py:48-51` 与 `database.py:882 hash_password`）：
-
-- 用户名：`admin`
-- 初始口令：为初始化种子值（见 `init_db.py:50`），**首次启动后请立即按下述方式修改**
-
-修改口令（前端暂无改密入口）：
-
-```bash
-python3 -c "from database import hash_password; print(hash_password('你的新口令'))"
-# 再执行 SQL：
-# UPDATE users SET password='<上面输出的哈希>' WHERE username='admin';
-```
+浏览器访问 `http://<your-domain>:8888`。
 
 ## 默认标的清单修改
 
@@ -125,7 +235,7 @@ python3 -m pytest tests/test_portfolio.py tests/test_decision_model.py \
 
 - 测试为纯本地运行（不起服务）；
 - `tests/test_ledger.py` 依赖本地 `ledger_seed.py`（真实记账流水，**隐私不入库**、已被 gitignore）：文件缺失时 `pytest.importorskip` 自动跳过实算测试（见 `tests/test_ledger.py:15-18`）；格式参考 `ledger_seed.example.py`，复制为 `ledger_seed.py` 即可跑全量。
-- 其余 `tests/` 下文件为存量/探索性脚本，不在基线内（含已知存量坏 `test_scorer.py`）。
+- 其余 `tests/` 下文件为存量/探索性脚本，不在基线内。
 
 ## 已知局限与未实现
 
@@ -161,6 +271,28 @@ python3 -m pytest tests/test_portfolio.py tests/test_decision_model.py \
 | 长桥接口限流 | 官方 1s≤10 次、并发≤5，调用侧全局信号量 + 顺序逐只摊薄 |
 | 全球指数单通道 | N225/KS11 唯一稳定通道为腾讯 gz 前缀，其余通道对云服务器 IP 风控 |
 
+## 记账与入金
+
+### 入金为何要手动录入
+
+换汇/转出/派息三类事件有银行通知邮件可采样辅助；**入金（CNY 原币入账）无通知邮件版式**，需手动录入。银行账户之间的后续流转（活期 → 证券户等）无需关心——页面展示的是总资产口径，月结单可借记账 skill 定期兜底入账核对。
+
+### 口述录入示例
+
+> 「我从交通银行汇款 1 万人民币到众安，并且在众安转换成了 1491.48 美元，汇率 6.704742，帮我记一下账」
+
+录为两笔事件（演示值，格式可直接照抄）：
+
+1. `inflow`：币种 CNY、金额 10000（`cny_amount=10000`），`ref_no` 自定幂等键（如 `in-20261010-cmb-za`）；
+2. `fx`：CNY 10000 → USD 1491.48，`mid_rate` 取 ECB 当日参考价（实际成交汇率与参考价的偏差即点差）。
+
+效果：总投入累计增加、持仓现金增加，换汇点差自动进入通道成本报表。
+
+### 录入通道
+
+- **skill（推荐）**：项目内 `.claude/skills/ledger-ingest/SKILL.md`（Claude Code 项目级自动识别，也可复制到 `~/.claude/skills/` 全局使用）——对话口述流水即可完成录入并自动对账；
+- **API 直录**：`POST /api/ledger/events`，body 为 `{"events": [...]}`，`ref_no` 幂等（重复提交自动去重），字段口径见 skill 文件与 `ledger_seed.example.py`。
+
 ## 目录结构
 
 ```
@@ -175,7 +307,10 @@ qdii/
 ├── ledger.py              # 记账报表 + TWR 纯计算
 ├── macro_fetcher.py       # 宏观四指标日更
 ├── longport_fetcher.py    # 长桥 OpenAPI 封装
-├── init_db.py             # 一次性初始化（建表/种子/种子账号）
+├── init_db.py             # 一次性初始化（建表/种子/初始账号，口令随机或 env 注入）
+├── Dockerfile             # 镜像构建（python:3.12-slim + uvicorn 8888）
+├── docker-compose.yml     # db + init + app 三服务编排
+├── .dockerignore          # 构建上下文最小化（密钥/隐私/无关目录不入镜像）
 ├── vix_seed.py            # VIX 日K种子导入（可选，一次导入历史底座）
 ├── StockWatcher/          # 配套 Windows 任务栏看盘小工具（独立子项目）
 ├── ledger_seed.example.py # 记账种子事件格式示例
@@ -190,6 +325,10 @@ qdii/
 └── AGENTS.local.md        # 本地环境信息（不入库，自行创建）
 ```
 
+## AI 协作
+
+仓库内置 `AGENTS.md` 协作规范（模块口径/数据源矩阵/部署细节）与 `.claude/skills/ledger-ingest` 记账录入 skill：用 Claude Code 打开本项目，即可获得记账录入、对账与开发协作辅助。
+
 ## 免责声明
 
-本项目为个人自用项目，外部数据源接口随时可能变动，页面所有内容不构成任何投资建议。
+本项目为个人自用项目：仅供学习交流，页面数据来自公开行情接口，数据版权归原数据商所有，请勿用于商业用途；不构成任何投资建议；无自动下单、无荐股功能，决策模型输出仅作参考提示。
