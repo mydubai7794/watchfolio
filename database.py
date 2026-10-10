@@ -207,16 +207,25 @@ async def init_tables():
     #   UPDATE sys_config SET value='<新token>' WHERE `key`='LONGPORT_ACCESS_TOKEN';
     # 服务 60s 内热加载生效，无需重启。行情套餐：美股 LV1（QBBO 含夜盘）永久
     # 免费，换 token 不影响套餐；港股 LV2 / A股 LV1 为体验套餐有独立到期时间。
+    # 凭证不再内置明文：seed 值取环境变量 QDII_LP_*（未配置的项跳过不种），
+    # 存量库已 seed 的值不受影响（INSERT IGNORE）；首次部署前先在 qdii.env 配齐。
     import longport_fetcher as _lp
-    await execute(
-        "INSERT IGNORE INTO sys_config (`key`, value, remark) VALUES "
-        "(%s, %s, %s), (%s, %s, %s), (%s, %s, %s)",
-        args=(_lp.CFG_KEY_APP_KEY, _lp.DEFAULT_APP_KEY, "长桥开放平台 App Key",
-              _lp.CFG_KEY_APP_SECRET, _lp.DEFAULT_APP_SECRET, "长桥开放平台 App Secret",
-              _lp.CFG_KEY_ACCESS_TOKEN, _lp.DEFAULT_ACCESS_TOKEN,
-              "长桥访问令牌(约90天到期,后台重新生成后UPDATE本行,60s热加载)"),
-        _pool=pool,
-    )
+    _env_creds = _lp._env_creds()
+    _seed_rows = [(_lp.CFG_KEY_APP_KEY, _env_creds["app_key"],
+                   "长桥开放平台 App Key"),
+                  (_lp.CFG_KEY_APP_SECRET, _env_creds["app_secret"],
+                   "长桥开放平台 App Secret"),
+                  (_lp.CFG_KEY_ACCESS_TOKEN, _env_creds["access_token"],
+                   "长桥访问令牌(约90天到期,后台重新生成后UPDATE本行,60s热加载)")]
+    _seed_rows = [r for r in _seed_rows if r[1]]   # 环境变量未配置的项跳过
+    if _seed_rows:
+        _placeholders = ", ".join(["(%s, %s, %s)"] * len(_seed_rows))
+        await execute(
+            f"INSERT IGNORE INTO sys_config (`key`, value, remark) "
+            f"VALUES {_placeholders}",
+            args=[v for row in _seed_rows for v in row],
+            _pool=pool,
+        )
 
     # ---- users (登录用户表，存量明文密码登录命中后自动升级 pbkdf2 哈希) ----
     await execute(

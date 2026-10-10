@@ -19,7 +19,7 @@
 - 来源：`/root/kline_csv/VIX_US_day_10y.csv`（服务器）或 `/tmp/opencode/backtest/kline_csv/VIX_US_day_10y.csv`（本地），格式 `date,close` 两列，2016-10-03 ~ 2026-10-02 共 2516 根
 - 落表：复用 `daily_bars` 表，symbol=`VIX`，open/high/low=close 填充、volume=0（分位只看 close；指标 ma50/rsi 等对 VIX 无意义但无害）
 - 载体：`vix_seed.py` CLI（ledger_seed 同款幂等模式，INSERT IGNORE，可安全重放）；路径 fallback 服务器路径→本地路径；**CSV 文件不进 repo**
-- database.py 连的即线上库（***REMOVED***:3914），本地跑一次即完成线上导入；部署后服务器也可重放修数
+- database.py 连的即线上库（<server-ip>:3914），本地跑一次即完成线上导入；部署后服务器也可重放修数
 
 ### 2.2 VIX 日增量（长桥）
 

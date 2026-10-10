@@ -1,6 +1,6 @@
 # qdii 项目开发规范（AGENTS.md）
 
-券商风格持仓网站：美股 + 港股 + 基金 + 现金（USD 口径），域名 http://***REMOVED***。
+券商风格持仓网站：美股 + 港股 + 基金 + 现金（USD 口径），域名 http://<your-domain>。
 含 A股 ETF 监控（4 步决策模型）。**调试一律在服务器上做（ssh + journalctl + curl），
 禁止本地起服务**——双实例会让外部数据源请求翻倍触发风控。
 
@@ -32,7 +32,7 @@
 | fetcher.py | A股 ETF 监控抓取（腾讯 ETF + 新浪/东财期指智能路由） |
 | tencent_bus.py | 腾讯行情攒批发送路由（微批合并：监控/候选/持仓/看板共用一个节奏） |
 | email_trader.py | 券商成交邮件 → trade_records 幂等入库 → **自动应用持仓与现金**（汇丰「全部執行」/致富「待成交=0 终态」两类门控；apply_trade 先插表再动 holdings/cash，可安全重放；QQ IMAP，30min 双源同轮，任一源失败水位不推进按水位回溯）；fetch_za_notice_emails 众安通知（换汇/转出/派息/入金）仅供记账对账采样，**不进自动轮询** |
-| database.py | MySQL 全部表结构与 CRUD（远程 ***REMOVED***:3914） |
+| database.py | MySQL 全部表结构与 CRUD（远程 <server-ip>:3914） |
 | static/portfolio.html | 持仓前端（单文件，无构建） |
 
 ## 数据源矩阵（频次=正常态）
@@ -47,7 +47,7 @@
 | twelvedata | 美股兜底 + USDCNH(离岸) 主价 + 锚点恢复兜底 | 直连 | 8 credits/min，60s 节流 |
 | 长桥 LongPort | 冷启动锚点恢复主源（日K收盘价）+ pre/post 扩展价 | 直连 | 扩展价随轮 30/60s；锚点后台逐只 4s |
 | 24h数据源 | 收盘→开盘全段美股活价 | **直连可用**（公开行情镜像域名） | 闭市 60s（bookTicker 批量 weight 1） |
-| 24h数据源·股票行情 | 无交易标的（AMKR/PCG/F）夜盘活价 | 直连（***REMOVED*** 网关，X-Auth-Token+X-H24-APIKEY 双鉴权同值） | 闭市 60s 逐只并发（weight 1/只）；日均 ~4.7K 次 ≈ 200K events/天套餐的 2.4% |
+| 24h数据源·股票行情 | 无交易标的（AMKR/PCG/F）夜盘活价 | 直连（<h24-gateway-host> 网关，X-Auth-Token+X-H24-APIKEY 双鉴权同值） | 闭市 60s 逐只并发（weight 1/只）；日均 ~4.7K 次 ≈ 200K events/天套餐的 2.4% |
 | HSBC/致富邮件 | 成交记录（自动应用持仓/现金，致富同发件人营销邮件靠解析门槛挡） | IMAP 直连 | 30min 双源同轮 |
 | 众安银行邮件 | 换汇/转出/派息/入金通知 | IMAP 直连 | 按需（记账采样辅助，无自动轮询） |
 | ECB frankfurter.dev | 记账汇率日线（CNY/HKD/USD） | 直连 | 每日 22:35（库空回填一次区间） |
@@ -127,6 +127,19 @@
   60s `_nav_ctx_cache` 缓存日线+事件（补录事件 60s 内 eventual 生效）。
   前端 CNY 卡片副行 ` · TWR ±x.xx%`、走势图「市值|净值」双模式。
 
+## 密钥与敏感配置
+
+- 所有密钥不入库：服务器 `/opt/qdii/qdii.env`（systemd EnvironmentFile，600 权限）；
+  本地项目根 `qdii.env`（已 gitignore）；长桥凭证/AGENT_API_KEY/MAIL_ADDRESS/
+  MAIL_AUTH_CODE 存 MySQL sys_config。
+- qdii.env 支持的键：QDII_DB_HOST/PORT/USER/PASS/NAME、QDII_EQUITY_API_KEY、
+  QDII_EQUITY_QUOTE_URL、QDII_TWELVEDATA_API_KEY、QDII_EASTMONEY_TOKEN、
+  QDII_IMAP_USER/QDII_IMAP_PASSWORD、QDII_LP_APP_KEY/APP_SECRET/ACCESS_TOKEN。
+- 真实 IP/域名/运维命令见 `AGENTS.local.md`（不入库）。
+- 提交前门禁：`python3 scripts/check_secrets.py`。
+- MCP 配置：`.mcp.json` 含数据库真实连接值、已 gitignore；仓库内提供
+  `.mcp.json.example` 占位模板，复制为 `.mcp.json` 并填入真实值即可。
+
 ## 部署
 
 ```bash
@@ -134,13 +147,14 @@ rsync -az --delete --exclude='.git' --exclude='.codegraph' --exclude='venv' \
   --exclude='__pycache__' --exclude='akshare-code' --exclude='akshare-docs' \
   --exclude='juejin' --exclude='StockWatcher' --exclude='*.pyc' --exclude='.pytest_cache' \
   --exclude='.idea' --exclude='uvicorn.log' --exclude='美股夜盘数据源研报.md' \
+  --exclude='qdii.env' --exclude='*.local.md' --exclude='.mcp.json' \
   --exclude='static/download' \
-  ./ root@***REMOVED***:/opt/qdii/ && ssh root@***REMOVED*** "systemctl restart qdii"
+  ./ root@<server-ip>:/opt/qdii/ && ssh root@<server-ip> "systemctl restart qdii"
 ```
 
 线上验证：`systemctl is-active qdii` + `journalctl -u qdii --since '2 min ago'` +
 带 session cookie curl API（token 从 qdii.sessions 表取，cookie 名 session_token）。
-MySQL：`mysql -h127.0.0.1 -P3914 -udubai -p'***REMOVED***' qdii`。
+MySQL：`mysql -h127.0.0.1 -P3914 -u<db-user> -p"$QDII_DB_PASS" qdii`。
 
 诊断要点：服务端口 **8888**；`kill -USR1 <pid>` 转储全部后台 task 栈到 journalctl
 （格式 `TASK <name> → file:line in func`），排查「卡死」先看它；sessions 表无

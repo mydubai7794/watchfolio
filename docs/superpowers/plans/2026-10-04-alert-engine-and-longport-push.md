@@ -1991,19 +1991,19 @@ rsync -az --delete --exclude='.git' --exclude='.codegraph' --exclude='venv' \
   --exclude='__pycache__' --exclude='akshare-code' --exclude='akshare-docs' \
   --exclude='juejin' --exclude='StockWatcher' --exclude='*.pyc' --exclude='.pytest_cache' \
   --exclude='.idea' --exclude='uvicorn.log' --exclude='美股夜盘数据源研报.md' \
-  ./ root@***REMOVED***:/opt/qdii/ && ssh root@***REMOVED*** "systemctl restart qdii"
+  ./ root@<server-ip>:/opt/qdii/ && ssh root@<server-ip> "systemctl restart qdii"
 ```
 
 - [ ] **Step 3: 线上验证（ssh + journalctl + curl，AGENTS.md 线上验证口径）**
 
 ```bash
-ssh root@***REMOVED*** "systemctl is-active qdii && sleep 20 && journalctl -u qdii --since '2 min ago' | grep -E '日K|提醒|邮件|alert' | tail -20"
+ssh root@<server-ip> "systemctl is-active qdii && sleep 20 && journalctl -u qdii --since '2 min ago' | grep -E '日K|提醒|邮件|alert' | tail -20"
 ```
 
 Expected: `active`；日志出现「日K刷新开始/完成」（首刷 13 只约 40s）；无异常栈。
 
 ```bash
-ssh root@***REMOVED*** "TOKEN=\$(mysql -h127.0.0.1 -P3914 -udubai -p'***REMOVED***' qdii -N -e \"SELECT token FROM sessions WHERE expires > NOW() ORDER BY created_at DESC LIMIT 1\"); curl -s -H \"Cookie: session_token=\$TOKEN\" 'http://127.0.0.1:8888/api/kline/QQQ?range=10' | head -c 400; echo; curl -s -H \"Cookie: session_token=\$TOKEN\" 'http://127.0.0.1:8888/api/alert/rules' | head -c 300"
+ssh root@<server-ip> "TOKEN=\$(mysql -h127.0.0.1 -P3914 -u<db-user> -p"$QDII_DB_PASS" qdii -N -e \"SELECT token FROM sessions WHERE expires > NOW() ORDER BY created_at DESC LIMIT 1\"); curl -s -H \"Cookie: session_token=\$TOKEN\" 'http://127.0.0.1:8888/api/kline/QQQ?range=10' | head -c 400; echo; curl -s -H \"Cookie: session_token=\$TOKEN\" 'http://127.0.0.1:8888/api/alert/rules' | head -c 300"
 ```
 
 Expected: kline 返回真实日K JSON；rules 返回 defaults。
@@ -2011,7 +2011,7 @@ Expected: kline 返回真实日K JSON；rules 返回 defaults。
 - [ ] **Step 4: 数据落库确认**
 
 ```bash
-ssh root@***REMOVED*** "mysql -h127.0.0.1 -P3914 -udubai -p'***REMOVED***' qdii -e \"SELECT symbol, COUNT(*) bars, MIN(date) mn, MAX(date) mx FROM daily_bars GROUP BY symbol\""
+ssh root@<server-ip> "mysql -h127.0.0.1 -P3914 -u<db-user> -p"$QDII_DB_PASS" qdii -e \"SELECT symbol, COUNT(*) bars, MIN(date) mn, MAX(date) mx FROM daily_bars GROUP BY symbol\""
 ```
 
 Expected: 13 行（SKHY≈60、DRAM≈127，其余≈1000）。
@@ -2019,7 +2019,7 @@ Expected: 13 行（SKHY≈60、DRAM≈127，其余≈1000）。
 - [ ] **Step 5: 合成触发验证（测试规则压价触发）**
 
 ```bash
-ssh root@***REMOVED*** "TOKEN=\$(mysql -h127.0.0.1 -P3914 -udubai -p'***REMOVED***' qdii -N -e \"SELECT token FROM sessions WHERE expires > NOW() ORDER BY created_at DESC LIMIT 1\"); curl -s -X PUT -H \"Cookie: session_token=\$TOKEN\" -H 'Content-Type: application/json' -d '{\"params\":{\"price_plan\":{\"enabled\":true,\"levels\":[-0.1]}},\"enabled\":1}' http://127.0.0.1:8888/api/alert/rules/QQQ; sleep 70; mysql -h127.0.0.1 -P3914 -udubai -p'***REMOVED***' qdii -e 'SELECT id,symbol,rule,level,title FROM alerts ORDER BY id DESC LIMIT 3'"
+ssh root@<server-ip> "TOKEN=\$(mysql -h127.0.0.1 -P3914 -u<db-user> -p"$QDII_DB_PASS" qdii -N -e \"SELECT token FROM sessions WHERE expires > NOW() ORDER BY created_at DESC LIMIT 1\"); curl -s -X PUT -H \"Cookie: session_token=\$TOKEN\" -H 'Content-Type: application/json' -d '{\"params\":{\"price_plan\":{\"enabled\":true,\"levels\":[-0.1]}},\"enabled\":1}' http://127.0.0.1:8888/api/alert/rules/QQQ; sleep 70; mysql -h127.0.0.1 -P3914 -u<db-user> -p"$QDII_DB_PASS" qdii -e 'SELECT id,symbol,rule,level,title FROM alerts ORDER BY id DESC LIMIT 3'"
 ```
 
 Expected: alerts 表出现 QQQ price_plan 触发行（-0.1% 档几乎必触发）；随后把该规则改回（PUT levels `[-5,-10,8,15]`）并清测试数据：`DELETE FROM alerts WHERE symbol='QQQ';` 再 PUT 恢复默认。
@@ -2256,11 +2256,11 @@ Expected: FAIL `ModuleNotFoundError`
 先在服务器探测 SDK push API 签名（本地无 SDK 也能写，导入段仿 longport_fetcher 的 try/except 双包模式）：
 
 ```bash
-ssh root@***REMOVED*** "/opt/qdii/venv/bin/python3 -c \"
+ssh root@<server-ip> "/opt/qdii/venv/bin/python3 -c \"
 from longbridge import QuoteContext, Config, SubType
 import inspect
 print([m for m in dir(QuoteContext) if 'subscribe' in m.lower() or 'on_quote' in m.lower() or 'on_depth' in m.lower()])
-\"" 2>/dev/null || ssh root@***REMOVED*** "python3 -c \"from longbridge import QuoteContext; print([m for m in dir(QuoteContext) if 'sub' in m.lower() or 'quote' in m.lower()])\""
+\"" 2>/dev/null || ssh root@<server-ip> "python3 -c \"from longbridge import QuoteContext; print([m for m in dir(QuoteContext) if 'sub' in m.lower() or 'quote' in m.lower()])\""
 ```
 
 （若服务器 python 路径不同，先 `systemctl cat qdii` 看 ExecStart 解释器路径再代入。）
@@ -2515,7 +2515,7 @@ Expected: 全绿（≥ 238 基线）
 - [ ] **Step 3: shadow 观测确认**
 
 ```bash
-ssh root@***REMOVED*** "systemctl is-active qdii && sleep 30 && journalctl -u qdii --since '2 min ago' | grep -E '长桥推送' | tail -10"
+ssh root@<server-ip> "systemctl is-active qdii && sleep 30 && journalctl -u qdii --since '2 min ago' | grep -E '长桥推送' | tail -10"
 ```
 
 Expected: 「长桥推送已连接并订阅 13 只」+ 周期性统计行（quotes 计数在增长=免费档夜盘有推送）。
@@ -2523,7 +2523,7 @@ Expected: 「长桥推送已连接并订阅 13 只」+ 周期性统计行（quot
 - [ ] **Step 4: SSE quote 冒烟（curl 挂 10s）**
 
 ```bash
-ssh root@***REMOVED*** "TOKEN=\$(mysql -h127.0.0.1 -P3914 -udubai -p'***REMOVED***' qdii -N -e \"SELECT token FROM sessions WHERE expires > NOW() ORDER BY created_at DESC LIMIT 1\"); timeout 10 curl -s -N -H \"Cookie: session_token=\$TOKEN\" http://127.0.0.1:8888/api/stream | grep -E 'event: (quote|alert)|keepalive' | head -8"
+ssh root@<server-ip> "TOKEN=\$(mysql -h127.0.0.1 -P3914 -u<db-user> -p"$QDII_DB_PASS" qdii -N -e \"SELECT token FROM sessions WHERE expires > NOW() ORDER BY created_at DESC LIMIT 1\"); timeout 10 curl -s -N -H \"Cookie: session_token=\$TOKEN\" http://127.0.0.1:8888/api/stream | grep -E 'event: (quote|alert)|keepalive' | head -8"
 ```
 
 Expected: 至少出现 keepalive；美股时段出现 `event: quote`。

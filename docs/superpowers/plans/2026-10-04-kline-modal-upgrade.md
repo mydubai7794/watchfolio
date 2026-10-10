@@ -987,13 +987,13 @@ Expected: 全绿（基线 337 + Task1/2 新增）
 - [ ] **Step 2: 部署重启（AGENTS.md 标准 deploy）**
 
 ```bash
-rsync -az --delete --exclude='.git' --exclude='.codegraph' --exclude='venv' --exclude='__pycache__' --exclude='akshare-code' --exclude='akshare-docs' --exclude='juejin' --exclude='StockWatcher' --exclude='*.pyc' --exclude='.pytest_cache' --exclude='.idea' --exclude='uvicorn.log' --exclude='美股夜盘数据源研报.md' ./ root@***REMOVED***:/opt/qdii/ && ssh root@***REMOVED*** "systemctl restart qdii"
+rsync -az --delete --exclude='.git' --exclude='.codegraph' --exclude='venv' --exclude='__pycache__' --exclude='akshare-code' --exclude='akshare-docs' --exclude='juejin' --exclude='StockWatcher' --exclude='*.pyc' --exclude='.pytest_cache' --exclude='.idea' --exclude='uvicorn.log' --exclude='美股夜盘数据源研报.md' ./ root@<server-ip>:/opt/qdii/ && ssh root@<server-ip> "systemctl restart qdii"
 ```
 
 - [ ] **Step 3: API 验收（带 session）**
 
 ```bash
-ssh root@***REMOVED*** "TOKEN=\$(mysql -h127.0.0.1 -P3914 -udubai -p'***REMOVED***' qdii -N -e \"SELECT token FROM sessions WHERE expires > NOW() ORDER BY created_at DESC LIMIT 1\"); for TF in day week month 5m; do echo ==\$TF==; curl -s -H \"Cookie: session_token=\$TOKEN\" \"http://127.0.0.1:8888/api/kline/QQQ?tf=\$TF&range=5\" | head -c 260; echo; done"
+ssh root@<server-ip> "TOKEN=\$(mysql -h127.0.0.1 -P3914 -u<db-user> -p"$QDII_DB_PASS" qdii -N -e \"SELECT token FROM sessions WHERE expires > NOW() ORDER BY created_at DESC LIMIT 1\"); for TF in day week month 5m; do echo ==\$TF==; curl -s -H \"Cookie: session_token=\$TOKEN\" \"http://127.0.0.1:8888/api/kline/QQQ?tf=\$TF&range=5\" | head -c 260; echo; done"
 ```
 
 Expected: day≈5 根全字段；week/month 为聚合根；5m QQQ 有 bars（volume_mode=ticks）；`journalctl -u qdii --since '2 min ago'` 无 Traceback。

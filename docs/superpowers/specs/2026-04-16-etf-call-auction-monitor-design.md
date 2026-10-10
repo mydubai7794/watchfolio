@@ -40,7 +40,7 @@ qdii/
 
 ## 4. 数据库设计
 
-MySQL 连接：`***REMOVED***:3914/*REMOVED*/qdii`
+MySQL 连接：`<server-ip>:3914/<db-user>/qdii`
 
 ### 4.1 表 `etf_targets`
 

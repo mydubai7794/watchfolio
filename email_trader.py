@@ -22,6 +22,7 @@ import unicodedata
 from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 
+import config   # 触发 load_env_file：邮箱凭证环境变量在本模块常量求值前注入
 import database as db
 
 logger = logging.getLogger(__name__)
@@ -31,9 +32,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 IMAP_HOST = "imap.qq.com"
 IMAP_PORT = 993
-IMAP_USER = "***REMOVED***"
-# IMAP 授权码属敏感凭据：优先从环境变量读取，缺省回退现值保持部署零影响
-IMAP_PASSWORD = os.getenv("QDII_IMAP_PASSWORD", "***REMOVED***")
+# 邮箱账号与授权码属敏感凭据：全部经环境变量注入（QDII_IMAP_USER /
+# QDII_IMAP_PASSWORD），任一缺失时轮询入口安全跳过（见 poll_once）
+IMAP_USER = os.getenv("QDII_IMAP_USER", "")
+IMAP_PASSWORD = os.getenv("QDII_IMAP_PASSWORD", "")
 HSBC_SENDER = "HSBC@notification.hsbc.com.hk"
 CHIEF_SENDER = "donotreply@chiefgroup.com.hk"
 
@@ -538,6 +540,11 @@ async def poll_once(days: int = 1) -> list[dict]:
     last_poll 推进到当前时刻；任一源拉取异常时保持旧水位，下轮放大窗口重试
     （幂等去重不怕重复；该轮已成功应用的交易不受影响）。
     """
+    # 凭证未配置：安全跳过本轮（不抛异常、不推进水位，配置好后自然恢复轮询）
+    if not IMAP_USER or not IMAP_PASSWORD:
+        logger.warning("邮箱凭证未配置(QDII_IMAP_USER/QDII_IMAP_PASSWORD)，"
+                       "本轮成交邮件轮询跳过")
+        return []
     # 读取上次成功轮询时刻（读取失败不阻断本轮，回退保守窗口）
     try:
         last_poll = await db.get_config(LAST_POLL_KEY)

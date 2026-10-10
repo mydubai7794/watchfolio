@@ -506,7 +506,7 @@ Expected: 348 + 本项目新增（Task 1 +4 / Task 2 +8 左右）全 PASS，0 fa
 Run: `python3 vix_seed.py /tmp/opencode/backtest/kline_csv/VIX_US_day_10y.csv`
 Expected: 输出「CSV 2516 根，本次新增 2516 根；VIX 库内共 2516 根，区间 2016-10-03 ~ 2026-10-02」。
 重跑一次验证幂等：新增 0 根。
-（服务器路径 fallback 已内置；若本地 CSV 缺失，先 `scp root@***REMOVED***:/root/kline_csv/VIX_US_day_10y.csv /tmp/opencode/backtest/kline_csv/`。）
+（服务器路径 fallback 已内置；若本地 CSV 缺失，先 `scp root@<server-ip>:/root/kline_csv/VIX_US_day_10y.csv /tmp/opencode/backtest/kline_csv/`。）
 
 - [ ] **Step 3: 部署**
 
@@ -516,7 +516,7 @@ rsync -az --delete --exclude='.git' --exclude='.codegraph' --exclude='venv' \
   --exclude='juejin' --exclude='StockWatcher' --exclude='*.pyc' --exclude='.pytest_cache' \
   --exclude='.idea' --exclude='uvicorn.log' --exclude='美股夜盘数据源研报.md' \
   --exclude='QQQ定投VIX止盈回测报告.html' \
-  ./ root@***REMOVED***:/opt/qdii/ && ssh root@***REMOVED*** "systemctl restart qdii && sleep 5 && systemctl is-active qdii"
+  ./ root@<server-ip>:/opt/qdii/ && ssh root@<server-ip> "systemctl restart qdii && sleep 5 && systemctl is-active qdii"
 ```
 （回测报告 HTML 不部署。）
 Expected: active。

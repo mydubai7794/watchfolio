@@ -22,7 +22,7 @@
 | 登录 | 算术图形验证码（PNG）+ token 有效期 30 天 |
 | 监控启停 | **全系统取消手动启停**：删除 monitor start/stop/mode 路由与前端按钮，A股监控纯 auto |
 | 汇率获取 | **与基金 NAV 拉取合并为同一任务**：每次取 NAV 前先取一次 HKD→USD（新浪 fx_susdhkd，失败兜底 7.80），内存缓存供全局换算 |
-| 部署 | ***REMOVED***:8888（端口已开），systemd 守护，完成后停本地 8000 服务 |
+| 部署 | <server-ip>:8888（端口已开），systemd 守护，完成后停本地 8000 服务 |
 
 ## 三、样例持仓（种子数据，幂等插入）
 
@@ -190,12 +190,12 @@ HKFUND 持仓：
 
 回归：`pytest tests/ -x` 全绿（重点 test_http_apis.py 因路由删除需更新）。
 
-## 九、部署（***REMOVED***:8888）
+## 九、部署（<server-ip>:8888）
 
 1. rsync 代码（排除 .git/akshare-code/akshare-docs/juejin/StockWatcher/__pycache__/uvicorn.log/.idea/.pytest_cache）
 2. 服务器 `/opt/qdii` venv：`python3 -m venv venv && venv/bin/pip install -r requirements.txt`（含新增 pillow）
 3. systemd unit `/etc/systemd/system/qdii.service`：`ExecStart=/opt/qdii/venv/bin/uvicorn server:app --host 0.0.0.0 --port 8888`，WorkingDirectory=/opt/qdii，Restart=always；`config.py` 的 `SERVER_PORT` 改 8888（或 unit env `SERVER_PORT=8888`，采用前者简单）
-4. DB 连接：unit env `DB_HOST=127.0.0.1`（MySQL 在本机 3914；部署时先验证 `mysql -h127.0.0.1 -P3914` 连通，不通则保留 ***REMOVED*** 公网地址）
+4. DB 连接：unit env `DB_HOST=127.0.0.1`（MySQL 在本机 3914；部署时先验证 `mysql -h127.0.0.1 -P3914` 连通，不通则保留 <server-ip> 公网地址）
 5. proxy_pool 插入三台海外代理（幂等 INSERT IGNORE）：春川/东京/洛杉矶（url 含账号密码）；连通性检测目标从 baidu 换 https://ipinfo.io/ip（海外代理用 baidu 检测会误判——改为按代理分别检测不现实，统一换成 ipinfo）
 6. 启动后验证清单：
    - `curl http://127.0.0.1:8888/api/captcha` 返回 JSON 含 base64
@@ -204,7 +204,7 @@ HKFUND 持仓：
    - `journalctl -u qdii -f`：portfolio_loop / fund_nav 正常、无异常栈
    - 现有功能：/api/quote 正常返回（StockWatcher 依赖）
 7. 停本地服务：`kill 2365780`（本地 uvicorn 8000）
-8. 公网验证：`http://***REMOVED***:8888`（用户侧浏览器最终确认）
+8. 公网验证：`http://<server-ip>:8888`（用户侧浏览器最终确认）
 
 ## 十、约束与规范
 

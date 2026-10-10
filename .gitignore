@@ -21,3 +21,12 @@ akshare-docs/
 juejin/
 .DS_Store
 tmpclaude*
+monthStatement/
+.playwright-cli/
+.mcp.json
+AGENTS.local.md
+*.local.md
+qdii.env
+账户成本盈亏盘点*.md
+美股夜盘数据源研报.md
+QQQ定投VIX止盈回测报告.html

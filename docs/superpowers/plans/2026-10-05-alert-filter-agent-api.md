@@ -433,7 +433,7 @@ ON DUPLICATE KEY UPDATE cfg_value=VALUES(cfg_value);
 ## 请求示例
 
 ```bash
-curl -H "X-API-Key: <key>" http://***REMOVED***/api/agent/portfolio
+curl -H "X-API-Key: <key>" http://<your-domain>/api/agent/portfolio
 ```
 
 ## 响应结构
@@ -550,7 +550,7 @@ git add docs/api-agent-portfolio.md
 git commit -m "docs: 外部agent持仓接口文档(鉴权/示例/字段口径)"
 ```
 
-> 注意：写文档前先在服务器上执行 `mysql -h127.0.0.1 -P3914 -udubai -p'***REMOVED***' qdii -e "SHOW CREATE TABLE sys_config\G"` 核对 sys_config 的真实列名（cfg_key/cfg_value 还是 key/value），文档中的 INSERT 语句必须与真实 DDL 一致；如列名不同，按真实列名修正文档后再提交。
+> 注意：写文档前先在服务器上执行 `mysql -h127.0.0.1 -P3914 -u<db-user> -p"$QDII_DB_PASS" qdii -e "SHOW CREATE TABLE sys_config\G"` 核对 sys_config 的真实列名（cfg_key/cfg_value 还是 key/value），文档中的 INSERT 语句必须与真实 DDL 一致；如列名不同，按真实列名修正文档后再提交。
 
 ---
 

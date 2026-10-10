@@ -1263,13 +1263,13 @@ rsync -az --delete --exclude='.git' --exclude='.codegraph' --exclude='venv' \
   --exclude='juejin' --exclude='StockWatcher' --exclude='*.pyc' --exclude='.pytest_cache' \
   --exclude='.idea' --exclude='uvicorn.log' --exclude='美股夜盘数据源研报.md' \
   --exclude='monthStatement' --exclude='.playwright-cli' \
-  ./ root@***REMOVED***:/opt/qdii/ && ssh root@***REMOVED*** "systemctl restart qdii"
+  ./ root@<server-ip>:/opt/qdii/ && ssh root@<server-ip> "systemctl restart qdii"
 ```
 
 - [x] **Step 2: 修数（幂等 UPDATE×4）**
 
 ```bash
-ssh root@***REMOVED*** "mysql -h127.0.0.1 -P3914 -udubai -p'***REMOVED***' qdii -e \"
+ssh root@<server-ip> "mysql -h127.0.0.1 -P3914 -u<db-user> -p"$QDII_DB_PASS" qdii -e \"
 UPDATE cash_accounts SET amount=52.72 WHERE currency='HKD';
 UPDATE cash_accounts SET amount=371.79 WHERE currency='USD';
 UPDATE holdings SET cost_price=213.9616 WHERE symbol='NVDA' AND cost_price<>213.9616;
@@ -1281,14 +1281,14 @@ SELECT * FROM cash_accounts; SELECT symbol,cost_price FROM holdings WHERE symbol
 - [x] **Step 3: 种子入库 + ECB 回填 + 服务重载**
 
 ```bash
-ssh root@***REMOVED*** "cd /opt/qdii && python3 ledger_seed.py && systemctl restart qdii && sleep 12 && systemctl is-active qdii && journalctl -u qdii --since '1 min ago' | tail -15"
+ssh root@<server-ip> "cd /opt/qdii && python3 ledger_seed.py && systemctl restart qdii && sleep 12 && systemctl is-active qdii && journalctl -u qdii --since '1 min ago' | tail -15"
 ```
 预期：`ledger seed 完成: 67 笔事件`；服务 active；日志出现 `ECB 参考价缓存 +N 条(2026-06-18..2026-10-02)`
 
 - [x] **Step 4: 线上报表验证（对 v3 基线）**
 
 ```bash
-ssh root@***REMOVED*** "TOKEN=\$(mysql -h127.0.0.1 -P3914 -udubai -p'***REMOVED***' qdii -N -e \"SELECT token FROM sessions ORDER BY created_at DESC LIMIT 1\"); curl -s -H \"Cookie: session_token=\$TOKEN\" http://127.0.0.1:8888/api/ledger/report | python3 -m json.tool | head -40"
+ssh root@<server-ip> "TOKEN=\$(mysql -h127.0.0.1 -P3914 -u<db-user> -p"$QDII_DB_PASS" qdii -N -e \"SELECT token FROM sessions ORDER BY created_at DESC LIMIT 1\"); curl -s -H \"Cookie: session_token=\$TOKEN\" http://127.0.0.1:8888/api/ledger/report | python3 -m json.tool | head -40"
 ```
 核对：total_cny_invested=84850 / avg_cost≈6.7998 / fx_loss_usd≈43.32 / identity.net_cny≈6701.54（±1，USDCNH 行情浮动）/ balances.diff HKD、USD 均 ✓（待 portfolio 循环下一轮把总资产刷新后恒等式精确）。
 

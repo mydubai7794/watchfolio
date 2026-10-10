@@ -27,7 +27,7 @@
 
 | # | 位置 | 内容 | 轮换渠道 |
 |---|------|------|----------|
-| 1 | config.py:8 | MySQL 密码（`4BlB…` 24位，账号 *REMOVED*@***REMOVED***:3914） | 服务器 MySQL 改密 |
+| 1 | config.py:8 | MySQL 密码（24位，账号见 AGENTS.local.md） | 服务器 MySQL 改密 |
 | 2 | config.py:5 | MySQL 公网 IP 兜底（基础设施信息） | — |
 | 3 | portfolio_fetcher.py:64 | 24h股票行情网关鉴权 key（`Rd84…` 64位，双 header 同值） | 网关侧重置 |
 | 4 | portfolio_fetcher.py:69 | twelvedata API key（`5299…` 32位hex） | 官网重置 |
@@ -52,14 +52,14 @@
 
 | 文件 | 内容 |
 |------|------|
-| AGENTS.md:135-145 | 部署段含 `ssh root@***REMOVED***`、`mysql -p'明文'`、域名 `***REMOVED***` |
+| AGENTS.md:135-145 | 部署段含 `ssh root@<server-ip>`、`mysql -p'明文'`、自有域名 |
 | docs/superpowers/plans/2026-10-01-portfolio-module.md（1467,1487 行等） | `mysql -p'明文'` + 服务器 IP |
 | docs/superpowers/plans/2026-10-03-ledger-module.md（1272,1291 行） | 同上 |
 | docs/superpowers/plans/2026-10-04-alert-engine-and-longport-push.md（2006,2014,2022,2526 行） | 同上 |
 | docs/superpowers/plans/2026-10-04-kline-modal-upgrade.md（996 行） | 同上 |
 | docs/superpowers/plans/2026-10-05-alert-filter-agent-api.md（553 行） | 同上 |
 | docs/superpowers/plans/2026-10-09-nav-twr.md（594 行） | 同上 |
-| docs/api-agent-portfolio.md、docs/系统全景说明.md、docs/数据源请求规模调研与新浪替代方案.md、docs/superpowers/specs/2026-10-04-*-design.md、AGENTS.md 数据源矩阵 | 域名/IP（`*REMOVED*`、`***REMOVED***`、网关域名）为**接口契约类信息**，级别 P1，可统一占位符化 |
+| docs/api-agent-portfolio.md、docs/系统全景说明.md、docs/数据源请求规模调研与新浪替代方案.md、docs/superpowers/specs/2026-10-04-*-design.md、AGENTS.md 数据源矩阵 | 域名/IP（自有域名、服务器 IP、网关域名）为**接口契约类信息**，级别 P1，可统一占位符化 |
 
 ### P1-B 个人隐私数据（非密钥但绝不入库）
 

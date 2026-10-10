@@ -23,23 +23,35 @@ import fetcher as ft
 # longport_fetcher：纯函数与状态机
 # ---------------------------------------------------------------------------
 
-REAL_TOKEN = (
-    "***REMOVED***iOiJKV1QifQ."
-    "eyJpc3MiOiJsb25nYnJpZGdlIiwic3ViIjoiYWNjZXNzX3Rva2VuIiwiZXhwIjoxNzk4NzkxODcw"
-    "LCJpYXQiOjE3OTEwMTU4NzF9.sig")
+def _fake_jwt(exp_epoch: int) -> str:
+    """程序内构造纯伪造 JWT（hk_ 前缀 + base64url 三段），与真实 token 零关联。"""
+    import base64
+    import json as _json
+
+    def _seg(obj: dict) -> str:
+        return base64.urlsafe_b64encode(
+            _json.dumps(obj, separators=(",", ":")).encode()).decode().rstrip("=")
+    header = {"alg": "RS256", "typ": "JWT", "kid": "unit-test-fake-kid"}
+    payload = {"iss": "unit-test", "sub": "unit-test",
+               "exp": exp_epoch, "ak": "fake"}
+    return f"hk_m_{_seg(header)}.{_seg(payload)}.fake-signature"
+
+
+FAKE_EXP = int(time.time()) + 90 * 86400   # 未来 90 天（未过期，剩余天数断言用）
+FAKE_TOKEN = _fake_jwt(FAKE_EXP)
 
 
 class TestTokenParse:
     def test_exp_parse(self):
-        assert lp._parse_token_exp(REAL_TOKEN) == 1798791870.0
+        assert lp._parse_token_exp(FAKE_TOKEN) == float(FAKE_EXP)
 
     def test_exp_invalid(self):
         assert lp._parse_token_exp("not-a-jwt") is None
         assert lp._parse_token_exp("") is None
 
     def test_days_left_positive(self):
-        # 用未过期 token 计算剩余天数（2026-10-03 起约 90 天）
-        days = lp._token_days_left(REAL_TOKEN)
+        # 用未过期 token 计算剩余天数（构造时约 90 天）
+        days = lp._token_days_left(FAKE_TOKEN)
         assert days is not None and 0 < days < 365
 
     def test_days_left_expired(self):
@@ -72,7 +84,9 @@ class _LpState:
     def __enter__(self):
         for k in ("fail_streak", "token_invalid", "_backoff_until",
                   "last_error", "last_error_code", "_ctx",
-                  "_creds_cache", "_creds_ts", "_refresh_at", "_refresh_result"):
+                  "_creds_cache", "_creds_ts", "_creds_warned",
+                  "_creds_mixed_warned",
+                  "_refresh_at", "_refresh_result"):
             self.snap[k] = getattr(lp, k)
         return self
 
@@ -131,7 +145,7 @@ class TestStatus:
     def test_status_shape(self):
         with _LpState():
             lp.fail_streak, lp.token_invalid = 1, False
-            lp._creds_cache = {"access_token": REAL_TOKEN}
+            lp._creds_cache = {"access_token": FAKE_TOKEN}
             lp._creds_ts = time.monotonic()   # 命中热加载缓存
             s = lp.status()
             assert s["token_status"] in ("ok", "expiring", "expired", "unknown")
@@ -141,7 +155,7 @@ class TestStatus:
     def test_status_token_invalid(self):
         with _LpState():
             lp.token_invalid = True
-            lp._creds_cache = {"access_token": REAL_TOKEN}
+            lp._creds_cache = {"access_token": FAKE_TOKEN}
             lp._creds_ts = time.monotonic()
             assert lp.status()["token_status"] == "invalid"
 

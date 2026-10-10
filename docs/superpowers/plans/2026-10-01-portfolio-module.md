@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在 qdii 项目上叠加"券商风格持仓收益页"：美股+港股基金持仓、USD 统一口径、当日分时+历史日线双图、算术验证码登录、全系统取消手动启停，并部署到 ***REMOVED***:8888。
+**Goal:** 在 qdii 项目上叠加"券商风格持仓收益页"：美股+港股基金持仓、USD 统一口径、当日分时+历史日线双图、算术验证码登录、全系统取消手动启停，并部署到 <server-ip>:8888。
 
 **Architecture:** 同进程模块化扩展（spec 方案A）：新增 `portfolio_fetcher.py`（行情/净值/汇率采集与纯计算函数）+ `static/portfolio.html`；`database.py` 加 3 表与 CRUD；`server.py` 挂 API 路由、验证码、两个后台任务并删除手动启停；现有 A股监控/候选池/SSE/代理池不动。
 
@@ -1448,23 +1448,23 @@ body 修改为 `JSON.stringify({ username, password, captcha_id: captchaId, capt
 
 ---
 
-### Task 8: 部署上线（***REMOVED***:8888）【主Agent执行，不委派】
+### Task 8: 部署上线（<server-ip>:8888）【主Agent执行，不委派】
 
 - [ ] **Step 1: rsync 代码**：
 ```bash
-ssh root@***REMOVED*** "mkdir -p /opt/qdii"
+ssh root@<server-ip> "mkdir -p /opt/qdii"
 rsync -az --delete --exclude '.git' --exclude 'akshare-code' --exclude 'akshare-docs' \
   --exclude 'juejin' --exclude 'StockWatcher' --exclude '__pycache__' --exclude '.idea' \
   --exclude '.pytest_cache' --exclude 'uvicorn.log' --exclude '.codegraph' --exclude '.claude' \
   --exclude '.mcp.json' --exclude 'qdii.db' --exclude 'docs' \
-  /root/workspace/project/qdii/ root@***REMOVED***:/opt/qdii/
+  /root/workspace/project/qdii/ root@<server-ip>:/opt/qdii/
 ```
 （docs 体积小可留；--delete 前先确认目标目录无他物）
 - [ ] **Step 2: 服务器环境**：
 ```bash
-ssh root@***REMOVED*** "cd /opt/qdii && python3 -m venv venv && venv/bin/pip install -q -r requirements.txt && venv/bin/python -c 'import fastapi, httpx, aiomysql, PIL; print(\"deps ok\")'"
+ssh root@<server-ip> "cd /opt/qdii && python3 -m venv venv && venv/bin/pip install -q -r requirements.txt && venv/bin/python -c 'import fastapi, httpx, aiomysql, PIL; print(\"deps ok\")'"
 ```
-- [ ] **Step 3: 验证 DB 本机可达**：`ssh root@***REMOVED*** "mysql -h127.0.0.1 -P3914 -udubai -p'***REMOVED***' qdii -e 'SELECT COUNT(*) FROM holdings'"`（预期 7；不通则 systemd unit 不设 DB_HOST=127.0.0.1，沿用默认公网地址）
+- [ ] **Step 3: 验证 DB 本机可达**：`ssh root@<server-ip> "mysql -h127.0.0.1 -P3914 -u<db-user> -p"$QDII_DB_PASS" qdii -e 'SELECT COUNT(*) FROM holdings'"`（预期 7；不通则 systemd unit 不设 DB_HOST=127.0.0.1，沿用默认公网地址）
 - [ ] **Step 4: systemd unit** `/etc/systemd/system/qdii.service`：
 ```ini
 [Unit]
@@ -1484,7 +1484,7 @@ WantedBy=multi-user.target
 `systemctl daemon-reload && systemctl enable --now qdii`
 - [ ] **Step 5: 代理池种子**（幂等）：
 ```bash
-ssh root@***REMOVED*** "mysql -h127.0.0.1 -P3914 -udubai -p'***REMOVED***' qdii -e \"
+ssh root@<server-ip> "mysql -h127.0.0.1 -P3914 -u<db-user> -p"$QDII_DB_PASS" qdii -e \"
 INSERT IGNORE INTO proxy_pool (url, latency_ms, alive) VALUES
 ('http://*REMOVED**REMOVED*:7779', 800, 1),
 ('http://*REMOVED**REMOVED*:7779', 900, 1),
@@ -1493,13 +1493,13 @@ INSERT IGNORE INTO proxy_pool (url, latency_ms, alive) VALUES
 - [ ] **Step 6: 连通性检测目标改造**（本任务前置小改，主Agent完成）：server.py `proxy_check` 的 `https://www.baidu.com` 改为 `https://ipinfo.io/ip`（海外代理用 baidu 会误判）
 - [ ] **Step 7: 上线验证**：
 ```bash
-curl -s http://***REMOVED***:8888/api/captcha | head -c 100
-curl -s http://***REMOVED***:8888/api/quote | head -c 100
-ssh root@***REMOVED*** "journalctl -u qdii -n 50 --no-pager"
+curl -s http://<server-ip>:8888/api/captcha | head -c 100
+curl -s http://<server-ip>:8888/api/quote | head -c 100
+ssh root@<server-ip> "journalctl -u qdii -n 50 --no-pager"
 ```
 浏览器人工验证：登录页验证码、admin/hello9987 登录、持仓页 7 条有行情、指数监控页正常
 - [ ] **Step 8: 停本地服务**：`kill 2365780`（本地 8000 旧 uvicorn）；确认 `ss -tlnp | grep 8000` 为空
-- [ ] **Step 9: 最终 Commit** `git add -A && git commit -m "chore(deploy): 上线***REMOVED***:8888并停本地服务"`
+- [ ] **Step 9: 最终 Commit** `git add -A && git commit -m "chore(deploy): 上线<server-ip>:8888并停本地服务"`
 
 ---
 

@@ -432,8 +432,8 @@ python server.py
 
 | 环境变量 | 默认值 | 说明 |
 |----------|--------|------|
-| DB_HOST | ***REMOVED*** | MySQL 地址 |
+| DB_HOST | <server-ip> | MySQL 地址 |
 | DB_PORT | 3914 | MySQL 端口 |
-| DB_USER | *REMOVED* | MySQL 用户 |
+| DB_USER | <db-user> | MySQL 用户 |
 | DB_PASS | - | MySQL 密码 |
 | DB_NAME | qdii | 数据库名 |

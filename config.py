@@ -1,11 +1,45 @@
 """全局配置"""
 import os
+from pathlib import Path
 
-# MySQL 连接（敏感项优先读 QDII_ 前缀环境变量，缺省回退现值保持部署零影响）
-DB_HOST = os.getenv("QDII_DB_HOST", "***REMOVED***")
+
+def load_env_file() -> None:
+    """加载 env 文件注入环境变量（只 setdefault 不覆盖已有值，幂等可重复调用）。@author yys
+
+    顺序：项目根 qdii.env（本地开发）优先，其次 /opt/qdii/qdii.env（服务器
+    systemd EnvironmentFile 位），第一个存在且可读的文件生效。格式 KEY=VALUE
+    每行一条，# 开头整行注释、空行跳过，无 = 的行解析失败跳过不抛错；
+    文件不存在/无权限静默返回。真实密钥全部经环境变量注入（不入库），
+    代码零兜底明文。
+    """
+    # 项目根按本文件位置推导（非 cwd 相对路径：从任意工作目录启动均命中），
+    # 与 /opt/qdii/qdii.env 第二路径在生产部署目录重合，无副作用
+    local_env = Path(__file__).resolve().parent / "qdii.env"
+    for path in (str(local_env), "/opt/qdii/qdii.env"):
+        try:
+            with open(path, "r", encoding="utf-8-sig") as f:
+                raw_lines = f.readlines()
+        except OSError:
+            continue
+        for line in raw_lines:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key:
+                os.environ.setdefault(key, value)
+        return   # 第一个成功读取的文件生效
+
+
+load_env_file()   # 模块导入即注入：下方 DB_* 等常量求值时环境变量已就位
+
+# MySQL 连接（敏感项优先读 QDII_ 前缀环境变量，缺省本机/空值，真实值走 env 注入）
+DB_HOST = os.getenv("QDII_DB_HOST", "127.0.0.1")
 DB_PORT = int(os.getenv("QDII_DB_PORT", "3914"))
-DB_USER = os.getenv("QDII_DB_USER", "*REMOVED*")
-DB_PASS = os.getenv("QDII_DB_PASS", "***REMOVED***")
+DB_USER = os.getenv("QDII_DB_USER", "")
+DB_PASS = os.getenv("QDII_DB_PASS", "")
 DB_NAME = os.getenv("QDII_DB_NAME", "qdii")
 DB_POOL_SIZE = 5
 

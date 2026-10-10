@@ -99,6 +99,16 @@ def _stub_chief_fetch(monkeypatch):
     monkeypatch.setattr(et, "fetch_chief_emails", lambda days=1: [])
 
 
+@pytest.fixture(autouse=True)
+def _fake_imap_creds(monkeypatch):
+    """注入明显假凭证，解耦真实环境：poll_once 入口在 IMAP_USER/PASSWORD
+    任一为空时安全短路返回 []——干净环境（无 qdii.env、无 QDII_IMAP_* 环境变量）
+    下模块常量为空串，TestPollOnce/TestPollOnceChief 会因此全红。
+    假凭证不会真连 IMAP（拉取函数全部被 mock）。"""
+    monkeypatch.setattr(et, "IMAP_USER", "u@test")
+    monkeypatch.setattr(et, "IMAP_PASSWORD", "p@test")
+
+
 class TestParseHsbcTrade:
     def test_full_sample_buy(self):
         """任务实测样例：买入 NVDA 1 股 @USD229.80。"""
@@ -471,6 +481,15 @@ class TestPollOnce:
         assert len(results) == 1 and results[0]["status"] == "applied"
         assert calls["insert"][0]["message_id"] == "<mail1@hsbc>"
         assert calls["deduct"] == [("USD", 229.80)]
+
+    def test_poll_once_no_creds_short_circuit(self, monkeypatch):
+        """凭证缺失：WARNING 短路返回 []，不发起拉取不触库（水位不动）。"""
+        monkeypatch.setattr(et, "IMAP_USER", "")
+        called = []
+        monkeypatch.setattr(et, "fetch_hsbc_emails",
+                            lambda days=1: called.append(days) or [])
+        assert asyncio.run(et.poll_once(days=1)) == []
+        assert called == []
 
     def test_poll_once_skips_unparsed(self, monkeypatch):
         """非全部执行邮件：解析为 None 直接跳过，不触库。"""

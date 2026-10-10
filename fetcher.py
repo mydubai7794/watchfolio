@@ -25,6 +25,8 @@ from datetime import datetime
 
 import httpx
 
+# 顺序契约：from config import 使 config 模块（导入即 load_env_file 注入
+# qdii.env）先于下方 EASTMONEY_PARAMS 求值——token 的 os.getenv 依赖 env 已就位
 from config import FUTURES_NAME_MAP, MIN_INTERVAL_SEC
 from tencent_bus import tencent_bus
 
@@ -66,13 +68,14 @@ _last_global_index_cache: dict[str, dict] = {}
 # 全球指数刷新节流：A股时段候选轮 5s 快刷，指数 60s 一次（与窗口外候选轮同节奏）
 _GLOBAL_INDEX_REFRESH_SEC = 60.0
 _global_index_fetch_at: float = 0.0
-# 东财接口 token 属敏感凭据：优先从环境变量读取，缺省回退现值保持部署零影响
+# 东财接口 token 属敏感凭据：经环境变量注入（QDII_EASTMONEY_TOKEN），未配置
+# 传空串（该参数不强校验，失败自动走腾讯→新浪降级链）
 EASTMONEY_PARAMS = {
     "orderBy": "dm",
     "sort": "desc",
     "pageSize": "500",  # 一次获取全部数据
     "pageIndex": "0",
-    "token": os.getenv("QDII_EASTMONEY_TOKEN", "***REMOVED***"),
+    "token": os.getenv("QDII_EASTMONEY_TOKEN", ""),
     "field": "dm,sc,name,p,zsjd,zde,zdf,f152,o,h,l,zjsj,vol,wp,np,ccl",
     "blockName": "callback",
 }
@@ -840,7 +843,12 @@ async def _fetch_futures_eastmoney(futures_indices: list[str]) -> dict[str, floa
     ]
     if not needed_codes:
         return None
-
+    # token 未配置：跳过东财源（视为该源失败），调用方自动走腾讯→新浪降级链，
+    # 免发注定失败的无鉴权请求
+    if not EASTMONEY_PARAMS.get("token"):
+        logger.info("东财token未配置(QDII_EASTMONEY_TOKEN)，跳过东财源，"
+                    "走腾讯→新浪降级链")
+        return None
     data = await _http_get_json(EASTMONEY_FUTURES_URL, source="eastmoney_futures", params=EASTMONEY_PARAMS)
 
     if data:

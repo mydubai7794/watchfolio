@@ -18,7 +18,7 @@ namespace StockWatcher
 
         private static string CONFIG_PATH;
         private const string DEFAULT_REFRESH_INTERVAL = "5";
-        private const string DEFAULT_QDII_API_URL = "http://***REMOVED***/api/quote";
+        private const string DEFAULT_QDII_API_URL = "http://<your-domain>/api/quote";
         private const string DEFAULT_SETTING =
             INI_PROPERTY_REFRESH_INTERVAL + "=" + DEFAULT_REFRESH_INTERVAL + "\r\n" +
             INI_PROPERTY_QDII_API_URL + "=" + DEFAULT_QDII_API_URL + "\r\n" +

@@ -462,7 +462,7 @@ git commit -m "feat(ui): 持仓页券商风重做：分时昨收基线+表头排
 
 - [ ] **Step 1: 质量评审**（code-reviewer subagent：分时基线口径、排序 null 处理、移动端双渲染一致性、sessions DB 化的并发/过期清理、XSS 保留完整性）
 - [ ] **Step 2: 修复评审问题并全量测试** `python3 -m pytest tests/ -q`
-- [ ] **Step 3: 部署**：`rsync -az --delete --exclude='.git' --exclude='.codegraph' --exclude='venv' --exclude='__pycache__' --exclude='akshare-code' --exclude='juejin' --exclude='StockWatcher' --exclude='*.pyc' ./ root@***REMOVED***:/opt/qdii/ && ssh root@***REMOVED*** "systemctl restart qdii"`
+- [ ] **Step 3: 部署**：`rsync -az --delete --exclude='.git' --exclude='.codegraph' --exclude='venv' --exclude='__pycache__' --exclude='akshare-code' --exclude='juejin' --exclude='StockWatcher' --exclude='*.pyc' ./ root@<server-ip>:/opt/qdii/ && ssh root@<server-ip> "systemctl restart qdii"`
 - [ ] **Step 4: 公网验证**（用 make_token 造长效 token）：
   - `/api/captcha` 200
   - `/api/portfolio/overview` 200 且 summary 字段完整

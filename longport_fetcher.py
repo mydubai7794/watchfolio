@@ -6,8 +6,12 @@
 无论哪个包都显式指向新平台境内加速域名。坑点全记录见项目根
 《长桥OpenAPI踩坑记录.md》（401004 排查/平台迁移/指数符号等）。
 
-凭证配置（sys_config 表，到期换 token 无需改代码/重启，60s 内热加载）：
+凭证配置（sys_config 表优先热加载，环境变量 QDII_LP_* 兜底；到期换 token
+无需改代码/重启，60s 内热加载）：
 - LONGPORT_APP_KEY / LONGPORT_APP_SECRET / LONGPORT_ACCESS_TOKEN 三个键
+  （sys_config）；环境变量 QDII_LP_APP_KEY / QDII_LP_APP_SECRET /
+  QDII_LP_ACCESS_TOKEN 作为库缺项时的逐项回落；两处均未配置视为长桥
+  不可用，自动走既有降级链（新浪冷备 / twelvedata 回切）
 - 换 token 操作：长桥后台「开放平台 → 访问令牌」重新生成（选正式账户身份，
   模拟盘身份 token 会被行情网关 401004 拒绝）后执行
   UPDATE sys_config SET value='<新token>' WHERE `key`='LONGPORT_ACCESS_TOKEN';
@@ -35,8 +39,11 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
+
+import config   # 触发 load_env_file：凭证环境变量在本模块使用前注入
 
 logger = logging.getLogger(__name__)
 
@@ -68,31 +75,16 @@ LONGBRIDGE_HTTP_URL = "https://openapi.longbridge.cn"
 LONGBRIDGE_QUOTE_WS_URL = "wss://openapi-quote.longbridge.cn/v2"
 
 # ---------------------------------------------------------------------------
-# 凭证（sys_config 热加载；缺省回落内置值，便于未配置环境直接起服务）
+# 凭证（sys_config 优先热加载；库缺项回落环境变量 QDII_LP_*；全空视为未配置）
 # ---------------------------------------------------------------------------
 
 CFG_KEY_APP_KEY = "LONGPORT_APP_KEY"
 CFG_KEY_APP_SECRET = "LONGPORT_APP_SECRET"
 CFG_KEY_ACCESS_TOKEN = "LONGPORT_ACCESS_TOKEN"
 
-# 内置缺省凭证（首次部署 seed 到 sys_config 后以库内值为准；换 token 只改库）
-DEFAULT_APP_KEY = "***REMOVED***"
-DEFAULT_APP_SECRET = "***REMOVED***"
-DEFAULT_ACCESS_TOKEN = (
-    "***REMOVED***iOiJKV1QifQ."
-    "eyJpc3MiOiJsb25nYnJpZGdlIiwic3ViIjoiYWNjZXNzX3Rva2VuIiwiZXhwIjoxNzk4NzkxODcwLCJpYXQi"
-    "OjE3OTEwMTU4NzEsImFrIjoiaGtfMjhmNzgwZTNlYmQ5NTAyMmU4ZDNmZDdmN2E5MTM3MzgiLCJhYWlkIjow"
-    "LCJhYyI6IiIs***REMOVED***IiwiYmwi"
-    "OjAsInVsIjowLCJpayI6Il8wIiwicmVnaW9uX2hvbWUiOiJISyJ9.JIFkOljYd5v_QmnFnQFFfumKsNHTj7N"
-    "plijjjieVHXwgv1HIcDSvJ0v88AK_jVhejYA2uNVyvbtmJxrLM5t_L4Ghuur1vWycYkf6XG6WC9gfqb1MKaK"
-    "rmCbkIh7qVxr3wM2***REMOVED***_vCC"
-    "W7Ce3whCaX72e4RC2fV7bTn4FPjv4HUq8nXfLlf5TzhMqBHPxjGTAuBdM-wUPVccuL9os2J6-wzKPRAE-Fb_"
-    "ddwcRt3mPP5mnGCNboqPNqj1Zd2Kxbpc6jo4sDdaDNmvi1Xt7_Y_BJY9uPZm7d3gh_4Q3K6UM6QisaCUqHjS"
-    "y2YPzxCDdWEs6hURjSxo***REMOVED***"
-    "***REMOVED***Nx7tnBQnCw6OEmx1y9Zc"
-    "YiGbri1kwGNQoyfTq33dJ0bUZyX18VT0XeNztDKtBOo-mXlycdDSrqoxfn9QmoFCMem0yEP7_wg1pcdWMfdr"
-    "CnN678SV_Deq1K0Sq0MT0qT6***REMOVED***"
-)
+ENV_KEY_APP_KEY = "QDII_LP_APP_KEY"
+ENV_KEY_APP_SECRET = "QDII_LP_APP_SECRET"
+ENV_KEY_ACCESS_TOKEN = "QDII_LP_ACCESS_TOKEN"
 
 _CREDS_TTL_SEC = 60.0        # 凭证热加载周期（换 token 后最长 60s 生效）
 _FAIL_THRESHOLD = 3          # 连续失败 >=3 轮 → 回切新浪冷备
@@ -108,6 +100,8 @@ _LP_SEM = asyncio.Semaphore(2)  # 长桥并发护栅：官方限并发≤5、1s�
 # 模块级状态（进程内单例语义，与项目 fetcher 风格一致）
 _creds_cache: dict | None = None
 _creds_ts = 0.0
+_creds_warned = False         # 凭证未配置 WARNING 只打一次的节流标记
+_creds_mixed_warned = False   # 凭证来源混配 WARNING 只打一次的节流标记
 _ctx = None                    # QuoteContext 惰性单例（同步对象）
 _ctx_token: str | None = None  # 建ctx时的 token 指纹（换 token 重建）
 _ctx_lock = asyncio.Lock()
@@ -142,14 +136,21 @@ def _token_days_left(token: str) -> float | None:
     return (exp - time.time()) / 86400.0
 
 
+def _env_creds() -> dict:
+    """环境变量兜底凭证（QDII_LP_* 前缀；sys_config 缺项时逐项回落）。@author yys"""
+    return {"app_key": os.getenv(ENV_KEY_APP_KEY, ""),
+            "app_secret": os.getenv(ENV_KEY_APP_SECRET, ""),
+            "access_token": os.getenv(ENV_KEY_ACCESS_TOKEN, "")}
+
+
 async def _load_creds() -> dict:
-    """读凭证：sys_config 优先（热加载），读库失败回落内置缺省。"""
-    global _creds_cache, _creds_ts
+    """读凭证：sys_config 优先（热加载），库缺项回落环境变量；全空视为未配置。"""
+    global _creds_cache, _creds_ts, _creds_warned, _creds_mixed_warned
     now = time.monotonic()
     if _creds_cache and now - _creds_ts < _CREDS_TTL_SEC:
         return _creds_cache
-    creds = {"app_key": DEFAULT_APP_KEY, "app_secret": DEFAULT_APP_SECRET,
-             "access_token": DEFAULT_ACCESS_TOKEN}
+    creds = _env_creds()
+    srcs = {"app_key": "env", "app_secret": "env", "access_token": "env"}
     try:
         import database as db
         for cfg_key, field in ((CFG_KEY_APP_KEY, "app_key"),
@@ -158,8 +159,26 @@ async def _load_creds() -> dict:
             v = await db.get_config(cfg_key)
             if v:
                 creds[field] = v
+                srcs[field] = "sys_config"
     except Exception as e:
-        logger.warning("长桥凭证读库失败(用内置缺省): %s", e)
+        logger.warning("长桥凭证读库失败(用环境变量兜底): %s", e)
+    if all(creds.values()):
+        _creds_warned = False   # 凭证恢复配置后允许下次缺失再告警
+    elif not _creds_warned:
+        _creds_warned = True
+        logger.warning("长桥凭证未配置(sys_config 与 QDII_LP_* 环境变量均缺)，"
+                       "长桥源停用，行情走既有降级链")
+    if len(set(srcs.values())) > 1:
+        # 混配（如 key 来自 sys_config、secret/token 来自 env）：多半是换凭证时
+        # 只改了一处，签名必败——节流告警一次，混配消除后重置允许再告警
+        if not _creds_mixed_warned:
+            _creds_mixed_warned = True
+            logger.warning("长桥凭证来源混配：key=%s secret=%s token=%s，"
+                           "如遇签名失败请核对 sys_config 与 qdii.env 是否同一应用",
+                           srcs["app_key"], srcs["app_secret"],
+                           srcs["access_token"])
+    else:
+        _creds_mixed_warned = False
     _creds_cache, _creds_ts = creds, now
     return creds
 
@@ -174,6 +193,8 @@ async def _get_ctx():
     if not _SDK_OK:
         return None
     creds = await _load_creds()
+    if not all(creds.values()):
+        return None   # 凭证未配置：不建 ctx（视为长桥不可用，走既有降级链）
     token = creds["access_token"]
     async with _ctx_lock:
         if _ctx is not None and _ctx_token == token:
@@ -265,9 +286,10 @@ def is_available() -> bool:
 
 def status() -> dict:
     """数据源状态（/api/datasource/status 下发、前端横幅依据）。"""
-    token = (_creds_cache or {}).get("access_token") or DEFAULT_ACCESS_TOKEN
+    token = ((_creds_cache or {}).get("access_token")
+             or os.getenv(ENV_KEY_ACCESS_TOKEN, ""))
     days = _token_days_left(token)
-    if not _SDK_OK:
+    if not _SDK_OK or not token:
         token_status = "missing"
     elif token_invalid:
         token_status = "invalid"

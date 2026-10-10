@@ -2,7 +2,7 @@
 
 `GET /api/agent/portfolio` — 供外部 agent（持仓鉴定/再平衡分析）拉取当前持仓、收益、现金、盈亏快照。数据与持仓页同源（读服务端内存缓存，零额外行情请求），只读。
 
-- 服务地址：`http://***REMOVED***`
+- 服务地址：`http://<your-domain>`
 - 请求方法：`GET`
 - 无需浏览器登录态（middleware 已放行 `/api/agent/` 前缀），凭 `X-API-Key` 请求头自鉴权
 
@@ -25,7 +25,7 @@ ON DUPLICATE KEY UPDATE value=VALUES(value);
 ## 请求示例
 
 ```bash
-curl -H "X-API-Key: <key>" http://***REMOVED***/api/agent/portfolio
+curl -H "X-API-Key: <key>" http://<your-domain>/api/agent/portfolio
 ```
 
 错误响应格式（FastAPI 原生形态，统一为 `{"detail": "..."}`）：

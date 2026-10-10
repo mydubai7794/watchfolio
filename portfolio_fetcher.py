@@ -24,6 +24,7 @@ from urllib.parse import quote
 
 import httpx
 
+import config   # 触发 load_env_file：密钥类环境变量在本模块常量求值前注入
 from tencent_bus import tencent_bus
 
 logger = logging.getLogger(__name__)
@@ -59,14 +60,17 @@ H24_ALIAS = {"QQQM": "QQQ"}
 # 同名符号）夜盘活价补齐；
 # 仅支持单 symbol 逐只请求（weight=1/只），网关域名境内直连可达（免代理），
 # 双层鉴权：X-Auth-Token（网关）+ X-H24-APIKEY（业务），两值相同
-EQUITY_QUOTE_URL = "***REMOVED***"
-# key 支持环境变量注入（默认保留现值，部署无需改动）
-EQUITY_API_KEY = os.getenv("EQUITY_API_KEY", "***REMOVED***")
+# 网关地址与业务 key 全部经环境变量注入（QDII_EQUITY_QUOTE_URL /
+# QDII_EQUITY_API_KEY）；任一缺失时股票行情补齐请求安全跳过，标的自然
+# 回退新浪扩展价定格口径
+EQUITY_QUOTE_URL = os.getenv("QDII_EQUITY_QUOTE_URL", "")
+EQUITY_API_KEY = os.getenv("QDII_EQUITY_API_KEY", "")
 # twelvedata 接口型美股/港股行情兜底（有 key 不 ban IP；免费 8 credits/min，
 # 批量请求 credits=symbol 数，故单次批量上限 8 并轮换指针覆盖全部持仓）
 TWELVEDATA_QUOTE_URL = "https://api.twelvedata.com/quote"
-# key 支持环境变量注入（默认保留现值，部署无需改动；不再散落硬编码）
-TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "***REMOVED***")
+# key 经环境变量注入（QDII_TWELVEDATA_API_KEY）；未配置时兜底/锚点恢复/
+# 外汇三条 twelvedata 请求路径全部短路跳过，走既有降级链
+TWELVEDATA_API_KEY = os.getenv("QDII_TWELVEDATA_API_KEY", "")
 TWELVEDATA_BATCH = 8   # 单次兜底批量上限（对齐免费 8 credits/min 限额）
 # Yahoo v8 chart 当日分时（5m K 线含盘前盘后）：range=5d 拉取后解析层只取最后一个
 # UTC 自然日——盘中即当日实时分时、闭市即上一交易时段全程；不用 range=1d 是因为
@@ -822,7 +826,9 @@ async def fetch_quotes(us_symbols: list[str], hk_symbols: list[str],
 
     # twelvedata 兜底：主源整体失败且连续>=3轮、距上次>=60s；批量上限 8 只
     # （免费 8 credits/min），轮换指针逐次覆盖全部持仓（美股/港股混合）
-    if not quotes and _td_fail_streak >= _TD_FAIL_THRESHOLD and time.monotonic() - _last_td_used >= _TD_MIN_INTERVAL_SEC:
+    if (not quotes and TWELVEDATA_API_KEY
+            and _td_fail_streak >= _TD_FAIL_THRESHOLD
+            and time.monotonic() - _last_td_used >= _TD_MIN_INTERVAL_SEC):
         _last_td_used = time.monotonic()
         hk_set = set(hk_symbols)
         batch = [all_symbols[i % len(all_symbols)]
@@ -928,6 +934,8 @@ async def fetch_td_session_anchors(us_symbols: list[str]) -> dict[str, dict]:
     退化为腾讯兜底：f[4]=场基准、f[3]=定格，凌晨/盘前窗口语义恰好正确）。
     """
     global _last_td_used
+    if not TWELVEDATA_API_KEY:
+        return {}   # key 未配置：跳过请求，调用方退化为腾讯兜底锚点口径
     batch = [s for s in us_symbols][:TWELVEDATA_BATCH]
     if not batch or time.monotonic() - _last_td_used < _TD_MIN_INTERVAL_SEC:
         return {}
@@ -1052,6 +1060,8 @@ async def fetch_equity_overnight_quotes(symbols: list[str]) -> dict[str, dict]:
     """
     if not symbols:
         return {}
+    if not EQUITY_QUOTE_URL or not EQUITY_API_KEY:
+        return {}   # 网关地址/key 未配置：跳过补齐，标的维持盘后价定格口径
     headers = {"X-Auth-Token": EQUITY_API_KEY, "X-H24-APIKEY": EQUITY_API_KEY}
 
     async def _one(client: httpx.AsyncClient, sym: str) -> tuple[str, dict | None]:
@@ -1078,6 +1088,8 @@ async def fetch_td_fx(pair: str) -> float:
     （48 credits/天），USD/HKD 仅腾讯主源失败时冷备调用（可忽略）；无独立
     节流，频次由调用方控制。
     """
+    if not TWELVEDATA_API_KEY:
+        return 0.0   # key 未配置：跳过请求（USD/HKD 走腾讯主源/静态兜底）
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(TWELVEDATA_QUOTE_URL, params={

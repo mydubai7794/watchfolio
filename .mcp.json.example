@@ -8,10 +8,10 @@
         "@benborla29/mcp-server-mysql"
       ],
       "env": {
-        "MYSQL_HOST": "***REMOVED***",
+        "MYSQL_HOST": "<db-host>",
         "MYSQL_PORT": "3914",
-        "MYSQL_USER": "*REMOVED*",
-        "MYSQL_PASS": "***REMOVED***",
+        "MYSQL_USER": "<db-user>",
+        "MYSQL_PASS": "<db-pass>",
         "MYSQL_DB": "qdii",
         "ALLOW_DDL_OPERATION": "true",
         "SCHEMA_DDL_PERMISSIONS": "qdii:true",

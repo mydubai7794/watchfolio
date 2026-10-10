@@ -72,9 +72,9 @@ pytest-asyncio
 import os
 
 # MySQL 连接
-DB_HOST = os.getenv("DB_HOST", "***REMOVED***")
+DB_HOST = os.getenv("DB_HOST", "<server-ip>")
 DB_PORT = int(os.getenv("DB_PORT", "3914"))
-DB_USER = os.getenv("DB_USER", "*REMOVED*")
+DB_USER = os.getenv("DB_USER", "<db-user>")
 DB_PASS = os.getenv("DB_PASS", "n7VO5yOzTDavUocK")
 DB_NAME = os.getenv("DB_NAME", "qdii")
 DB_POOL_SIZE = 5
