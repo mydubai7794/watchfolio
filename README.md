@@ -4,11 +4,17 @@
 
 前后端一体：FastAPI + MySQL 后端，无构建的单文件前端；一切曲线/回显从数据库重建，前端不直接消费外部行情。
 
-![主看板](screenshots/dashboard.png)
+![持仓+市场看板](screenshots/持仓+市场看板.png)
 
-![监控页](screenshots/monitor.png)
+![持仓明细](screenshots/持仓明细.png)
 
-![记账页](screenshots/ledger.png)
+![分析看板](screenshots/分析看板.png)
+
+![市场估值+资产走势](screenshots/市场估值+资产走势.png)
+
+![策略提醒](screenshots/策略提醒.png)
+
+![记账](screenshots/记账.png)
 
 ## 项目简介
 

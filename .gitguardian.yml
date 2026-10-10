@@ -1,0 +1,8 @@
+# GitGuardian 扫描忽略配置：以下路径中的凭证形态均为测试假样本/门禁规则正例
+# （如 hash 纯函数测试的 "s3cret"、check_secrets 自测的 Basic Auth 正例、
+# 设计文档中的 proxy.test 假域名示例），不构成真实泄露。
+version: 2
+ignores:
+  - matches:
+      - "tests/**"
+      - "docs/superpowers/**"

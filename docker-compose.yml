@@ -10,10 +10,10 @@
 #   4. docker compose logs init    # 查看建表/种子输出与初始账号提示
 #   5. 浏览器访问 http://<host>:8888
 #
-# 凭证同步机制：db 服务的账号密码经 ${VAR:-默认值} 变量替换读取，
+# 凭证同步机制：db 服务的账号密码经 ${VAR:?必填} 变量替换读取，
 # 带 --env-file qdii.env 启动时自动与 qdii.env 的 QDII_DB_* 保持一致，
-# 无需两处手改；不带 --env-file 直接 up 时落到默认档，
-# 需自行保证与 qdii.env 一致，否则 app 连库会被拒。
+# 无需两处手改；未配置对应变量时 compose 直接报错拒绝启动（无默认档，
+# 避免占位默认密码形态被密钥扫描误报，也更安全）。
 #
 # 注意：镜像内不含 qdii.env（.dockerignore 已排除），配置只经 env_file 注入；
 #      init 一次性建表 + 种子数据 + 种子账号后退出（Exited(0) 属正常），
@@ -28,10 +28,10 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
     environment:
-      MYSQL_ROOT_PASSWORD: ${QDII_DB_PASS:-qdii-root-change-me}
+      MYSQL_ROOT_PASSWORD: ${QDII_DB_PASS:?请在 qdii.env 配置 QDII_DB_PASS}
       MYSQL_DATABASE: ${QDII_DB_NAME:-qdii}
-      MYSQL_USER: ${QDII_DB_USER:-qdii}
-      MYSQL_PASSWORD: ${QDII_DB_PASS:-qdii-pass-change-me}
+      MYSQL_USER: ${QDII_DB_USER:?请在 qdii.env 配置 QDII_DB_USER}
+      MYSQL_PASSWORD: ${QDII_DB_PASS:?请在 qdii.env 配置 QDII_DB_PASS}
     volumes:
       - db-data:/var/lib/mysql
     healthcheck:
