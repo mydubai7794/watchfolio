@@ -1324,6 +1324,26 @@ async def ledger_event_exists(ref_no: str) -> bool:
     return bool(rows)
 
 
+async def sync_ledger_cny_invested() -> dict:
+    """重算并覆盖写 sys_config.cny_invested（=Σ inflow.cny_amount）。@author yys
+
+    重算覆盖式天然幂等：重放/同 ref_no 修正/部分失败重试均自动收敛，
+    无需判「新插入还是更新」。公式与报表侧 ledger.py total_cny 逐字一致
+    （不分 direction，负向冲正自然抵减）。值相同跳过写入——set_config 的
+    ON DUPLICATE 会把 remark 覆盖为 VALUES(remark)。
+    """
+    rows = await execute_dict(
+        "SELECT ROUND(SUM(cny_amount), 2) AS s FROM ledger_events "
+        "WHERE event_type = 'inflow'")
+    target = float(rows[0]["s"] or 0) if rows else 0.0
+    before = float(await get_config("cny_invested") or 0)
+    if abs(target - before) >= 0.005:
+        await set_config(
+            "cny_invested", f"{target:.2f}",
+            remark="人民币累计投入本金（=Σ inflow.cny_amount，ledger POST 自动同步）")
+    return {"before": before, "after": target}
+
+
 async def get_ledger_events(event_type: str | None = None, year: int | None = None,
                             account: str | None = None) -> list[dict]:
     """事件明细查询（可选筛选），按日期升序。"""

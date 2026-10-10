@@ -374,3 +374,57 @@ class TestLedgerApi:
             assert data["identity"]["net_cny"] == pytest.approx(expected_net, abs=0.5)
         finally:
             client.cookies.clear()
+
+
+# ---------------------------------------------------------------------------
+# sync_ledger_cny_invested（cny_invested 服务端重算同步）
+# ---------------------------------------------------------------------------
+
+from decimal import Decimal
+
+
+class TestSyncCnyInvested:
+    def _patch(self, monkeypatch, sum_value, config_value):
+        calls = {}
+
+        async def fake_sum(*a, **k):
+            return [{"s": sum_value}]
+
+        async def fake_get(key):
+            return config_value
+
+        async def fake_set(key, value, remark=""):
+            calls.update(key=key, value=value, remark=remark)
+            return 1
+
+        monkeypatch.setattr(db, "execute_dict", fake_sum)
+        monkeypatch.setattr(db, "get_config", fake_get)
+        monkeypatch.setattr(db, "set_config", fake_set)
+        return calls
+
+    def test_sync_writes_when_diff(self, monkeypatch):
+        calls = self._patch(monkeypatch, Decimal("680.00"), "0")
+        out = run(db.sync_ledger_cny_invested())
+        assert out == {"before": 0.0, "after": 680.0}
+        assert calls["key"] == "cny_invested"
+        assert calls["value"] == "680.00"
+        assert "自动同步" in calls["remark"]
+
+    def test_sync_skips_when_equal(self, monkeypatch):
+        calls = self._patch(monkeypatch, Decimal("680.00"), "680.00")
+        out = run(db.sync_ledger_cny_invested())
+        assert out == {"before": 680.0, "after": 680.0}
+        assert calls == {}
+
+    def test_sync_empty_table(self, monkeypatch):
+        calls = self._patch(monkeypatch, None, "500")
+        out = run(db.sync_ledger_cny_invested())
+        assert out == {"before": 500.0, "after": 0.0}
+        assert calls["value"] == "0.00"
+
+    def test_sync_replays_converge(self, monkeypatch):
+        # 重放修正：config 旧值 500，Σ 已变 1180 → 覆盖为新 Σ（幂等收敛）
+        calls = self._patch(monkeypatch, Decimal("1180.00"), "500")
+        out = run(db.sync_ledger_cny_invested())
+        assert out == {"before": 500.0, "after": 1180.0}
+        assert calls["value"] == "1180.00"
