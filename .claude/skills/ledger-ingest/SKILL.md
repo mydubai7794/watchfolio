@@ -16,7 +16,7 @@ description: Watchfolio 持仓网站记账模块（ledger）录入技能。当�
 1. **查重**：`GET /api/ledger/events?type=<类型>`，按 ref_no 判断是否已录（幂等 upsert，重复提交安全但不留垃圾）。
 2. **构造事件**（字段口径见下），`POST /api/ledger/events`，body：`{"events":[...]}`。
 3. **对账验证**：`GET /api/ledger/report`，检查：
-   - `balances.diff` 各币种 ≈ 0（±1 容差；新结单出余额快照后必须重新提交 balance 事件）
+   - `balances.diff` 各币种 ≈ 0（±1 容差；新结单出余额快照后必须重新提交 balance 事件；口述场景可选：用 report 的 `balances.ledger` 推算值补一条 balance 快照——ref_no 同源加 `-bal` 后缀——令 diff 提前归零，不补则等下一期结单定格）
    - `identity.identity_check_cny == identity.net_cny`（恒等式自洽）
 4. **汇报**：把 summary 变化（总投入/加权成本/点差/净盈亏）与上一次的差异汇报给用户。
 
@@ -30,7 +30,7 @@ description: Watchfolio 持仓网站记账模块（ledger）录入技能。当�
 - `direction`：`+` 入账 / `-` 出账。realized 盈亏直接用正负金额 + 对应 direction。
 - `fx` 双边：`amount_ccy/amount`=卖出币种与数量，`recv_ccy/recv_amount`=买入币种与数量；`mid_rate`=ECB 当日中间价（单位付币所得收币）。取值：`curl -s https://api.frankfurter.dev/v1/latest?base=CNY&symbols=USD,HKD`（或历史日期 `.../2026-10-05?...`；无当日取前一工作日）。**点差不手填**，报表从 mid_rate 推导。
 - `usd_equivalent`：该笔 USD 计价。HKD→USD 固定 **7.846**；CNY→USD 用当日实价（`fx_spark` 或行情缓存 USDCNH）。
-- `cny_amount`：仅 inflow 必填（人民币实际投入）。
+- `cny_amount`：仅 inflow 必填（人民币实际投入）。inflow 入库后服务端自动同步 `sys_config.cny_invested`（恒等 Σ inflow.cny_amount，POST 响应 `derived_sync.cny_invested` 回显 before/after），**无需手工 UPDATE**；若 before≠after 且本批无 inflow = 历史值被纠正，汇报时提请用户注意。
 - `ref_no` 幂等键，命名规则：
   - 结单：`STMT-<账户>-<YYYYMM>-<序号>`
   - 邮件实证：`ZA-<邮件内交易编号>`
@@ -38,7 +38,7 @@ description: Watchfolio 持仓网站记账模块（ledger）录入技能。当�
 - `balance` 快照：结单上「账户×币种」期末余额，amount=余额值，direction=`+`，每期结单都提交（报表按账户×币种取最新）。
 - `expense` 消耗事件**必须同步** sys_config：`UPDATE sys_config SET value=ROUND(value+<新增消耗折CNY>,2) WHERE \`key\`='expense_cny'`（持仓页「人民币累计」净投入口径依赖此值，两边由 ledger 页 identity.invest_net_cny 对账校验）。
 - `channel`：换汇通道名（汇丰柜台/众安App换U/建行购汇汇出/招行原币+众安换U/兴业SWIFT/致富换汇），沿用既有命名，新通道先与用户确认。
-- `note`：写证据来源（结单页码/邮件编号/口述），月结单冲销差异（回赠/利息）单独记 reward/fee 而非改旧账。
+- `note`：写证据来源（结单页码/邮件编号/口述），月结单冲销差异（回赠/利息）单独记 reward/fee 而非改旧账。付款行实证写这里（如「交行汇款」）——付款行不进账户枚举、不单列账户。
 
 ## 邮件采样对账（辅助）
 
