@@ -308,6 +308,16 @@ def get_vix_percentile(qqq_asof: str | None = None) -> float | None:
 # ---------------------------------------------------------------------------
 
 
+def _us_symbols_with_benchmarks(holdings: list[dict]) -> list[str]:
+    """美股持仓 + VIX/SPY/RSP 固定基准（决策上下文数据源：VIX 分位 +
+    SPY 对标 + RSP 等权广度代理；已持仓的基准不重复追加）。@author yys"""
+    symbols = [h["symbol"] for h in holdings if h["market"] == "US"]
+    for fixed in ("VIX", "SPY", "RSP"):
+        if fixed not in symbols:
+            symbols.append(fixed)
+    return symbols
+
+
 def lp_symbol(symbol: str) -> str:
     """长桥符号必须带 .US 后缀（缺后缀静默空陷阱；BRK.B 这类带点
     符号不能以 "." 判定，必须 endswith(".US")）。"""
@@ -400,9 +410,7 @@ async def daily_refresh_loop(holdings_loader=None):
     while True:
         try:
             holdings = await loader()
-            symbols = [h["symbol"] for h in holdings if h["market"] == "US"]
-            if "VIX" not in symbols:      # VIX 分位数据源（V2 止盈过滤），固定追加不依赖持仓
-                symbols.append("VIX")
+            symbols = _us_symbols_with_benchmarks(holdings)
             if symbols:
                 logger.info("日K刷新开始: %d 只", len(symbols))
                 await refresh_all(symbols)

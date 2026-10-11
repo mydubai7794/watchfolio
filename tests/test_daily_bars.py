@@ -304,3 +304,14 @@ def test_compute_indicators_ma200_bias():
 def test_compute_indicators_ma200_bias_none_when_short():
     snap = dbar.compute_indicators(_bars([1.0] * 60))
     assert snap["ma200"] is None and snap["ma200_bias"] is None
+
+
+def test_us_symbols_with_benchmarks():
+    holdings = [
+        {"symbol": "QQQ", "market": "US"},
+        {"symbol": "SPY", "market": "US"},        # 已持仓不重复追加
+        {"symbol": "VGT", "market": "US"},
+        {"symbol": "HK0000740297", "market": "HKFUND"},   # 港股基金排除
+    ]
+    out = dbar._us_symbols_with_benchmarks(holdings)
+    assert out == ["QQQ", "SPY", "VGT", "VIX", "RSP"]
