@@ -77,3 +77,68 @@ def parse_eps_growth(text) -> float | None:
     if v1 == 0:
         return None
     return round((v2 / v1 - 1) * 100, 4)
+
+
+async def run_valuation_round() -> dict:
+    """估值轮：长桥批量静态信息（日更）+ EDGAR companyconcept 增速（周更
+    门控：周一或距上次成功 >6 天或首跑）→ 双节奏 upsert。
+
+    stats: rows=写入行数（US 标的，含门控行）/ fund=ETF 门控 /
+    no_data=长桥数值缺失 / no_cik=无 CIK 映射 / growth_runs=本轮是否拉增速。
+    @author yys"""
+    holdings = await db.get_holdings(enabled_only=True)
+    us = [h for h in holdings if h.get("market") == "US"
+          and h["symbol"].upper() not in edgar_fetcher._EDGAR_EXCLUDE]
+    stats = {"rows": 0, "fund": 0, "no_data": 0, "no_cik": 0,
+             "growth_runs": False}
+    infos = await longport_fetcher.fetch_static_info(
+        [h["symbol"] for h in us])
+    sinfo = normalize_static_info(infos)
+
+    ts = await db.get_config("VALUATION_GROWTH_TS")
+    run_growth = True
+    if ts:
+        try:
+            last = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+            age = (datetime.now() - last).total_seconds()
+            run_growth = datetime.now().weekday() == 0 \
+                or age > GROWTH_INTERVAL_SEC
+        except ValueError:
+            run_growth = True
+    tmap = await edgar_fetcher.get_ticker_map() if run_growth else {}
+    growth_written = False
+    for h in us:
+        sym = h["symbol"]
+        try:
+            s = sinfo.get(sym) or {}
+            eps_ttm, bps = s.get("eps_ttm"), s.get("bps")
+            dy = s.get("dividend_yield")
+            if h.get("asset_type") == "etf":
+                eps_ttm = bps = dy = None   # ETF 字段噪声，置空落库覆盖
+                stats["fund"] += 1
+            # 门控行同样落库（QQQ 置 None 覆盖历史脏值）；eps/bps 缺失或 0 计 no_data
+            await db.upsert_holding_valuation_static(sym, eps_ttm, bps, dy)
+            if not eps_ttm or not bps:
+                stats["no_data"] += 1
+            if run_growth and h.get("asset_type") in ("stock", "fpi") \
+                    and eps_ttm and bps and eps_ttm > 0 and bps > 0:
+                cik = tmap.get(sym.upper()) \
+                    or edgar_fetcher._CIK_OVERRIDES.get(sym.upper())
+                if cik is None:
+                    stats["no_cik"] += 1
+                else:
+                    text = await edgar_fetcher.fetch_companyconcept(cik)
+                    g = parse_eps_growth(text) if text else None
+                    if g is not None:
+                        await db.upsert_holding_valuation_growth(sym, g)
+                        growth_written = True
+            stats["rows"] += 1
+        except Exception as e:
+            logger.warning("估值处理 %s 失败（仅跳过该标的）: %s", sym, e)
+            stats["rows"] += 1
+    stats["growth_runs"] = run_growth
+    if run_growth and growth_written:
+        await db.set_config("VALUATION_GROWTH_TS",
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "估值增速周更水位")
+    return stats

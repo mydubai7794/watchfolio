@@ -396,6 +396,15 @@ async def edgar_daily_loop():
     while True:
         try:
             await run_edgar_round()
+            # 估值因子轮（长桥日更 + EDGAR 周更增速）：独立兜底，失败不影响主轮
+            try:
+                import valuation
+                vstats = await valuation.run_valuation_round()
+                logger.info("估值轮完成: %s", vstats)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("估值轮失败: %s", e)
         except asyncio.CancelledError:
             raise
         except Exception as e:

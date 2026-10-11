@@ -2,6 +2,7 @@
 import asyncio
 import json
 import pytest
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import database as db
@@ -136,3 +137,115 @@ def test_parse_eps_growth():
         {"start": "2025-01-01", "end": "2025-12-31", "val": 2.4,
          "form": "10-K", "fp": "FY", "filed": "2026-02-01"}]}})
     assert valuation.parse_eps_growth(corrected) == pytest.approx(100.0, abs=0.01)
+
+
+# ---------------------------------------------------------------------------
+# 轮编排：run_valuation_round（打桩长桥/EDGAR/db）
+# ---------------------------------------------------------------------------
+
+def _v_env(monkeypatch, holdings, infos, cc_texts, growth_ts=None):
+    """估值轮打桩环境：db 配置/持仓/upsert 与长桥/EDGAR 拉取全 fake，
+    rec 记录调用序列供断言。@author yys"""
+    cfg = {"VALUATION_GROWTH_TS": growth_ts}
+    rec = {"static": [], "growth": [], "set_cfg": []}
+
+    async def fake_cfg(key):
+        return cfg.get(key)
+
+    async def fake_set(key, value, remark=""):
+        cfg[key] = value
+        rec["set_cfg"].append(key)
+
+    async def fake_holdings(enabled_only=True):
+        return holdings
+
+    async def fake_up_static(sym, eps, bps, dy):
+        rec["static"].append((sym, eps, bps, dy))
+
+    async def fake_up_growth(sym, g):
+        rec["growth"].append((sym, g))
+
+    monkeypatch.setattr(db, "get_config", fake_cfg)
+    monkeypatch.setattr(db, "set_config", fake_set)
+    monkeypatch.setattr(db, "get_holdings", fake_holdings)
+    monkeypatch.setattr(db, "upsert_holding_valuation_static", fake_up_static)
+    monkeypatch.setattr(db, "upsert_holding_valuation_growth", fake_up_growth)
+
+    async def fake_sinfo(symbols):
+        return infos
+
+    async def fake_cc(cik, concept="EarningsPerShareDiluted"):
+        return cc_texts.get(cik)
+
+    async def fake_tmap():
+        return {"NVDA": 1045810, "BABA": 1577552}
+
+    monkeypatch.setattr(longport_fetcher, "fetch_static_info", fake_sinfo)
+    monkeypatch.setattr(edgar_fetcher, "fetch_companyconcept", fake_cc)
+    monkeypatch.setattr(edgar_fetcher, "get_ticker_map", fake_tmap)
+    return rec, cfg
+
+
+_HOLDINGS = [
+    {"symbol": "NVDA", "market": "US", "asset_type": "stock"},
+    {"symbol": "BABA", "market": "US", "asset_type": "fpi"},
+    {"symbol": "QQQ", "market": "US", "asset_type": "etf"},
+    {"symbol": "DRAM", "market": "US", "asset_type": None},
+    {"symbol": "F", "market": "US", "asset_type": None},
+    {"symbol": "700.HK", "market": "HKFUND", "asset_type": None},
+]
+
+
+def test_run_valuation_round_full(monkeypatch):
+    infos = [
+        SimpleNamespace(symbol="NVDA.US", eps_ttm=8.0, bps=9.5,
+                        dividend_yield=0.52),
+        SimpleNamespace(symbol="BABA.US", eps_ttm=4.39, bps=64.37,
+                        dividend_yield=1.03),
+        SimpleNamespace(symbol="DRAM.US", eps_ttm=0, bps=0,
+                        dividend_yield=0),
+        # F 不出现（_EDGAR_EXCLUDE，长桥批量请求列表已排除）
+    ]
+    rec, cfg = _v_env(monkeypatch, _HOLDINGS, infos,
+                      {1045810: NVDA_CC, 1577552: BABA_CC})
+    stats = asyncio.run(valuation.run_valuation_round())
+    # us=4 只（NVDA/BABA/QQQ/DRAM）；700.HK 非 US 不进、F 被 _EDGAR_EXCLUDE 排除
+    assert stats["rows"] == 4
+    # F 被 _EDGAR_EXCLUDE 排除，长桥请求列表都不含 F
+    assert ("F", None, None, None) not in rec["static"]
+    # ETF fund 门控：QQQ 置空落库（覆盖历史噪声脏值），不写有效数值
+    assert ("QQQ", None, None, None) in rec["static"]
+    assert not any(r[0] == "QQQ" and r[1] is not None for r in rec["static"])
+    # no_data：DRAM eps=0
+    assert ("DRAM", 0.0, 0.0, 0.0) in rec["static"]
+    # 增速：NVDA/BABA 均写入（首跑无 TS 必跑增速）
+    assert ("NVDA", pytest.approx(66.667, abs=0.01)) in [
+        (s, g) for s, g in rec["growth"]]
+    assert ("BABA", pytest.approx(-17.91, abs=0.01)) in [
+        (s, g) for s, g in rec["growth"]]
+    assert cfg["VALUATION_GROWTH_TS"] is not None
+
+
+def test_run_valuation_round_growth_throttle(monkeypatch):
+    """非周一且 TS 距今 1 天 → 不拉增速（省请求），static 正常。"""
+    yesterday = (datetime.now() - timedelta(days=1)).strftime(
+        "%Y-%m-%d %H:%M:%S")
+    infos = [SimpleNamespace(symbol="NVDA.US", eps_ttm=8.0, bps=9.5,
+                             dividend_yield=0.52)]
+    rec, cfg = _v_env(monkeypatch, _HOLDINGS[:1], infos, {},
+                      growth_ts=yesterday)
+    stats = asyncio.run(valuation.run_valuation_round())
+    assert rec["static"] == [("NVDA", 8.0, 9.5, 0.52)]
+    assert rec["growth"] == []                     # 节流期内零增速请求
+    assert stats["growth_runs"] is False
+
+
+def test_run_valuation_round_no_cik(monkeypatch):
+    """长桥数值好但无 CIK 映射：static 写入、增速跳过。"""
+    infos = [SimpleNamespace(symbol="GEV.US", eps_ttm=5.0, bps=30.0,
+                             dividend_yield=0.5)]
+    holdings = [{"symbol": "GEV", "market": "US", "asset_type": "stock"}]
+    rec, cfg = _v_env(monkeypatch, holdings, infos, {})
+    asyncio.run(valuation.run_valuation_round())
+    assert rec["static"] == [("GEV", 5.0, 30.0, 0.5)]
+    assert rec["growth"] == []
