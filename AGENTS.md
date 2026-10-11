@@ -137,7 +137,8 @@
   recent_trades）；realized = Σ卖额 − Σ买额 − 期初成本（期初 = q0 × 当前
   cost_price 近似，approx 打标）；卖出后涨跌幅前端用 positions 现价 join
   (现价−exit_avg)/exit_avg；K线 `/api/kline` payload 带 trades（日期
-  YYYY-MM-DD 对齐日K轴），弹层日K画 B▲红/S▼绿 标记 + 成交列表（每笔至今
+  YYYY-MM-DD 对齐日K轴），弹层日K画 ▲红(买)/▼绿(卖) 标记（仅日K，周月/分时不画）
+  + 成交列表（每笔至今
   涨跌幅）。零新增外部请求（清仓标的 enabled 保持 1 搭腾讯批总线）。
 
 ## 密钥与敏感配置

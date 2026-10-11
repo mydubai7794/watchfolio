@@ -2452,8 +2452,9 @@ function klDrawMain(bars, marks, ov) {
     ctx.fillText(name + ' ' + p.toFixed(2), W - pad.r + 4, y(p) - 8);
   });
   // 买卖点标记：BUY 红▲画蜡烛 low 下方，SELL 绿▼画蜡烛 high 上方（红涨绿跌语义）。
-  // bars 为可见窗口切片：局部建 date→索引 映射，标记日期不在窗口（range 截尾/周月聚合/非交易日）则跳过
-  if (KL.trades && KL.trades.length) {
+  // 仅日K画标记（周月聚合桶日期与成交日同格式会误命中，5m 格式天然不匹配）：
+  // bars 为可见窗口切片，局部建 date→索引 映射，标记日期不在窗口（range 截尾/非交易日）则跳过
+  if (KL.tf === 'day' && KL.trades && KL.trades.length) {
     const tIdx = {};
     bars.forEach((b, i) => { tIdx[b.date] = i; });
     ctx.font = 'bold 10px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';

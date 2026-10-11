@@ -104,6 +104,47 @@ def test_anchor_negative_clamped():
     assert rows[0]["approx"] is True
 
 
+def test_oversell_clamped_mid_cycle():
+    """周期中段超卖钳制：SELL 量超当时持有 → 钳 0 闭合 + approx=True。
+
+    注意口径：仅 BUY 10/SELL 15 两笔不会触发钳制——锚点反推
+    q0 = 0 − (10−15) = +5 > 0，超卖缺口被解释为 email 记录前的期初持仓
+    （cost=0 期初成本 0，approx=False）。尾部补 BUY 5 使锚点净额归 0，
+    SELL 15 才真正落入轨迹钳制分支（qty<0 → 钳 0、周期打 approx）。
+    realized = 15×120 − 10×100 = 800（期初 q0=0 无期初成本）。
+    """
+    trades = [_tr("MU", "BUY", 10, 100, datetime(2026, 1, 5)),
+              _tr("MU", "SELL", 15, 120, datetime(2026, 1, 20)),
+              _tr("MU", "BUY", 5, 50, datetime(2026, 3, 1))]
+    rows = ledger.build_closed_positions(trades, [_h("MU", 0)])
+    assert len(rows) == 1                            # 首周期闭合；尾部 5 股未闭合丢弃
+    r = rows[0]
+    assert r["exit_date"] == "2026-01-20"
+    assert r["hold_days"] == 15
+    assert r["exit_qty"] == 15.0
+    assert r["exit_avg"] == 120.0
+    assert r["realized_pnl"] == 800.0
+    assert r["realized_pct"] == 80.0
+    assert r["approx"] is True
+
+
+def test_dirty_quantity_rows_filtered():
+    """脏量行过滤：quantity=0 / −3 行被 quantity>0 门挡掉（锚点 net 同步按
+    过滤后口径），周期推导与无脏行基线完全一致。"""
+    clean = [_tr("MU", "BUY", 10, 100, datetime(2026, 1, 5)),
+             _tr("MU", "SELL", 10, 120, datetime(2026, 2, 10))]
+    dirty = clean + [_tr("MU", "BUY", 0, 100, datetime(2026, 1, 6)),
+                     _tr("MU", "SELL", -3, 120, datetime(2026, 2, 11))]
+    base = ledger.build_closed_positions(clean, [_h("MU", 0)])
+    with_dirty = ledger.build_closed_positions(dirty, [_h("MU", 0)])
+    assert with_dirty == base
+    assert len(with_dirty) == 1
+    assert with_dirty[0]["realized_pnl"] == 200.0
+    assert with_dirty[0]["exit_qty"] == 10.0
+    assert with_dirty[0]["exit_avg"] == 120.0
+    assert with_dirty[0]["approx"] is False
+
+
 def test_open_position_no_cycle():
     """未闭合：qty>0（部分减仓后仍持有）→ 不产生周期。"""
     trades = [_tr("MU", "BUY", 10, 100, datetime(2026, 1, 5)),
