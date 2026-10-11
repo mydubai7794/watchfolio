@@ -300,7 +300,7 @@ async def fetch_ecb_rates(start: str, end: str,
 # 已清仓周期推导（trade_records 回放，纯计算无 IO）
 # ---------------------------------------------------------------------------
 
-def _dt_or_none(v):
+def _dt_or_none(v) -> datetime | None:
     """宽容取 datetime：datetime 原样 / date 补零点 / ISO 字符串截前 10 解析。"""
     if v is None or isinstance(v, datetime):
         return v
@@ -321,6 +321,12 @@ def _replay_closed_cycles(sym: str, meta: dict, cur_qty: float,
     改量/删行失真）钳 0 且首周期打 approx。数量每次归零 → 周期闭合：
     realized = Σ卖额 − (Σ买额 + 期初成本)。@author yys
     """
+    if not recs:
+        return []
+    # 脏记录防御：非法量（≤0）行过滤后再回放（锚点 net 同步按过滤后口径）
+    recs = [t for t in recs if float(t["quantity"]) > 0]
+    if not recs:
+        return []
     net = sum(float(t["quantity"]) * (1 if t["side"] == "BUY" else -1)
               for t in recs)
     q0 = cur_qty - net
@@ -365,7 +371,8 @@ def _replay_closed_cycles(sym: str, meta: dict, cur_qty: float,
                     "hold_days": (dt.date() - start.date()).days
                                  if dt and start else None,
                     "exit_qty": round(sell_qty, 4),
-                    "exit_avg": round(exit_avg, 4) if exit_avg else None,
+                    "exit_avg": round(exit_avg, 4)
+                                if exit_avg is not None else None,
                     "realized_pnl": round(realized, 2),
                     "realized_pct": round(realized / basis * 100, 2)
                                     if basis > 0 else None,
@@ -399,7 +406,7 @@ def build_closed_positions(trades: list[dict], holdings: list[dict]) -> list[dic
         cycles = _replay_closed_cycles(sym, h, cur_qty, recs)
         if cycles:
             rows.extend(cycles)
-        elif cur_qty == 0:
+        elif abs(cur_qty) <= 1e-9:
             placeholders.append({
                 "symbol": sym, "name": h.get("name") or "",
                 "market": h.get("market") or "",

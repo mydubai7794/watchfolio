@@ -142,3 +142,22 @@ def test_orphan_symbol_holdings_row_deleted():
     assert rows[0]["symbol"] == "PCG"
     assert rows[0]["name"] == "PG&E"
     assert rows[0]["realized_pnl"] == 200.0
+
+
+def test_holding_no_records_qty_positive():
+    """qty>0 且无成交记录（手动持仓/基金行）：不抛异常、不产生任何行。"""
+    rows = ledger.build_closed_positions([], [_h("HK0000740297", 500,
+                                                 cost=7.5, name="基金",
+                                                 market="HKFUND")])
+    assert rows == []
+
+
+def test_mixed_closed_and_manual_holding():
+    """混合形态：已清仓 symbol 与 qty>0 无记录 symbol 共存互不干扰。"""
+    trades = [_tr("MU", "BUY", 10, 100, datetime(2026, 1, 5)),
+              _tr("MU", "SELL", 10, 120, datetime(2026, 2, 10))]
+    rows = ledger.build_closed_positions(
+        trades, [_h("MU", 0), _h("HK0000740297", 500, market="HKFUND")])
+    assert len(rows) == 1
+    assert rows[0]["symbol"] == "MU"
+    assert rows[0]["realized_pnl"] == 200.0
