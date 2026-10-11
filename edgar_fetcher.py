@@ -20,6 +20,8 @@ logger = logging.getLogger("qdii.edgar")
 
 TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers.json"
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
+COMPANYCONCEPT_URL = ("https://data.sec.gov/api/xbrl/companyconcept/"
+                      "CIK{cik:010d}/us-gaap/{concept}.json")
 ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc}/{doc}"
 EDGAR_MIN_INTERVAL = 2.0          # 请求最小间隔（秒）
 EDGAR_BACKOFFS = (2.0, 4.0, 8.0)  # 429/503 退避序列
@@ -272,6 +274,18 @@ async def fetch_form4_text(cik: int, accession: str, primary_doc: str,
                            ua: str) -> str | None:
     """Form 4 原始 XML 文本（404/失败 → None，数据缺不重试轰炸）。@author yys"""
     resp = await _edgar_get(form4_url(cik, accession, primary_doc), ua)
+    if resp is None or resp.status_code != 200:
+        return None
+    return resp.text
+
+
+async def fetch_companyconcept(cik: int,
+                               concept: str = "EarningsPerShareDiluted"
+                               ) -> str | None:
+    """单概念 XBRL 序列（年度 EPS 同比增速用；~10-45KB）。404/失败 None。@author yys"""
+    resp = await _edgar_get(
+        COMPANYCONCEPT_URL.format(cik=cik, concept=concept),
+        await _resolve_ua())
     if resp is None or resp.status_code != 200:
         return None
     return resp.text

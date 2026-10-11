@@ -497,6 +497,29 @@ async def fetch_quote_map(symbols: list[str]) -> dict[str, dict]:
     return out
 
 
+async def fetch_static_info(symbols: list[str]) -> list:
+    """批量标的静态信息（eps_ttm/bps/dividend_yield，券商已换算 USD/ADS
+    口径）。失败/不可用/退避期返回 []（ETF 字段为噪声由上层 asset_type
+    门控）。@author yys"""
+    if not _SDK_OK or token_invalid or not symbols:
+        return []
+    if time.monotonic() < _backoff_until:
+        return []
+    ctx = await _get_ctx()
+    if ctx is None:
+        return []
+    try:
+        infos = await _sdk_call(ctx.static_info,
+                                [f"{s}.US" for s in symbols])
+        _mark_success()
+        return infos or []
+    except asyncio.TimeoutError:
+        return []
+    except Exception as e:
+        _mark_failure(e)
+        return []
+
+
 async def _candles_raw(symbol: str) -> list:
     """单只日K（SDK 同步调用线程化）：最近 2 根、不复权。失败/不可用返回 []。"""
     if not _SDK_OK or token_invalid or not symbol:

@@ -620,3 +620,35 @@ class TestFetchOvernight:
         monkeypatch.setattr(ft, "_http_get", fake_http_get)
         result = asyncio.run(ft.fetch_overnight())
         assert set(result) == {"道琼斯", "纳斯达克", "标普500"}
+
+
+# ---------------------------------------------------------------------------
+# 静态信息批量（fetch_static_info）：估值因子层数据底座（eps_ttm/bps/股息率）
+# ---------------------------------------------------------------------------
+
+def test_fetch_static_info_success_and_failure(monkeypatch):
+    """成功：批量 .US 后缀调用 static_info 并原样返回；失败：异常记账后回 []。"""
+    from types import SimpleNamespace
+
+    async def fake_ctx():
+        # 实现在调用 _sdk_call 前会求值 ctx.static_info，替身须带该属性
+        return SimpleNamespace(static_info=lambda symbols: [])
+
+    async def fake_call(fn, *args):
+        assert args == (["NVDA.US", "BABA.US"],)
+        return [SimpleNamespace(symbol="NVDA.US", eps_ttm=8.0)]
+
+    with _LpState():   # 失败分支 _mark_failure 改模块级状态，按文件惯例隔离
+        monkeypatch.setattr(lp, "_SDK_OK", True)
+        monkeypatch.setattr(lp, "token_invalid", False)
+        monkeypatch.setattr(lp, "_backoff_until", 0.0)
+        monkeypatch.setattr(lp, "_get_ctx", fake_ctx)
+        monkeypatch.setattr(lp, "_sdk_call", fake_call)
+        infos = asyncio.run(lp.fetch_static_info(["NVDA", "BABA"]))
+        assert infos and infos[0].symbol == "NVDA.US"
+
+        async def fake_call_fail(fn, *args):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(lp, "_sdk_call", fake_call_fail)
+        assert asyncio.run(lp.fetch_static_info(["NVDA"])) == []

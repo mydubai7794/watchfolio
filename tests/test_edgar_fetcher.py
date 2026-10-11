@@ -575,3 +575,25 @@ def test_run_edgar_round_skips_processed_accession(monkeypatch):
     assert r["ok"] is True and r["new_tx"] == 0
     assert fetched == []                           # 不再拉 XML
     assert rec["saved"] == []                      # 不再插入
+
+
+def test_fetch_companyconcept_url_padding(monkeypatch):
+    """companyconcept URL 10 位补零 CIK + 默认概念名；穷尽失败 None 透传。"""
+    captured = []
+
+    async def fake_get(url, ua):
+        captured.append(url)
+        return _FakeResp(200, "{}")
+
+    monkeypatch.setattr(ef, "_edgar_get", fake_get)
+    monkeypatch.setattr(ef, "_resolve_ua", _async_ret("UA"))
+    r = asyncio.run(ef.fetch_companyconcept(1045810))
+    assert r == "{}"
+    assert captured == [
+        "https://data.sec.gov/api/xbrl/companyconcept/"
+        "CIK0001045810/us-gaap/EarningsPerShareDiluted.json"]
+
+    async def fake_none(url, ua):
+        return None
+    monkeypatch.setattr(ef, "_edgar_get", fake_none)
+    assert asyncio.run(ef.fetch_companyconcept(2120882)) is None
