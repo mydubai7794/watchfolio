@@ -2445,6 +2445,20 @@ async def kline(symbol: str, request: Request, range: int = 120, tf: str = "day"
                                   ("ma50", "ma200", "rsi14", "stop_level",
                                    "enough_history", "asof")} if ind else {}}
         payload.update(_kl_series(bars))
+        # 成交记录（买卖点标记/成交列表用；日期归一 YYYY-MM-DD 对齐日K轴，
+        # email_date 缺失回退 created_at，随 (symbol,tf) 60s 缓存一并落）
+        try:
+            _trows = await db.get_trades_by_symbol(symbol)
+        except Exception:
+            _trows = []
+
+        def _tdate(r):
+            d = r.get("email_date") or r.get("created_at")
+            return d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)[:10]
+
+        payload["trades"] = [
+            {"date": _tdate(r), "side": r["side"], "price": float(r["price"]),
+             "quantity": float(r["quantity"])} for r in _trows]
         _KLINE_CACHE[cache_key] = (time.monotonic(), payload)
         hit = _KLINE_CACHE[cache_key]
     p = hit[1]
@@ -2559,8 +2573,9 @@ async def portfolio_overview():
     try:
         _trades, _holdings = await _get_closed_ctx()
         data["closed"] = ledger.build_closed_positions(_trades, _holdings)
-    except Exception:
+    except Exception as e:
         data["closed"] = []
+        logger.warning("closed 块构建失败（本轮降级空数组）: %s", e)
     return data
 
 

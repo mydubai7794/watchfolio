@@ -157,6 +157,15 @@ import time
 import server
 
 
+@pytest.fixture(autouse=True)
+def _stub_trades_by_symbol(monkeypatch):
+    """kline 端点新增 get_trades_by_symbol 调用：全文件默认桩空，
+    防既有用例真实连库（需真实成交的用例自行 setattr 覆盖）。@author yys"""
+    async def fake_trades(sym):
+        return []
+    monkeypatch.setattr(server.db, "get_trades_by_symbol", fake_trades)
+
+
 def _client(monkeypatch, username="alert-user"):
     async def fake_get_session(t):
         # expires 必须为 float：鉴权中间件 _check_session 会做数值过期比较
@@ -189,6 +198,7 @@ def test_kline_endpoint(monkeypatch, fake_store):
                         {"ma50": 1.4, "ma200": 1.3, "rsi14": 55.0,
                          "stop_level": None, "hhv22": 2.0, "atr22": 0.1,
                          "enough_history": False, "asof": "2026-10-01"})
+    server._KLINE_CACHE.clear()          # 防前序用例同 key 缓存污染
     r = client.get("/api/kline/QQQ?range=90")
     assert r.status_code == 200
     data = r.json()

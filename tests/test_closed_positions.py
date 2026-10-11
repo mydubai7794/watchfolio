@@ -253,3 +253,31 @@ def test_overview_closed_db_error_degrades(monkeypatch):
     r = client.get("/api/portfolio/overview")
     assert r.status_code == 200
     assert r.json().get("closed") == []
+
+
+def test_kline_trades_payload(monkeypatch):
+    """kline 响应含 trades 数组（date=YYYY-MM-DD/side/price/quantity）。"""
+    async def fake_bars(sym, limit=None):
+        return [{"date": date(2026, 10, 1), "open": 1, "high": 2, "low": 0.5,
+                 "close": 1.5, "volume": 10}]
+
+    async def fake_rule(sym):
+        return None
+
+    async def fake_holdings(enabled_only=True):
+        return []
+
+    async def fake_trades(sym):
+        return [{"symbol": "QQQ", "side": "BUY", "quantity": 10, "price": 100.0,
+                 "email_date": datetime(2026, 9, 30, 10, 0),
+                 "created_at": datetime(2026, 9, 30, 11, 0)}]
+
+    monkeypatch.setattr(server.db, "get_daily_bars", fake_bars)
+    monkeypatch.setattr(server.db, "get_alert_rule", fake_rule)
+    monkeypatch.setattr(server.db, "get_holdings", fake_holdings)
+    monkeypatch.setattr(server.db, "get_trades_by_symbol", fake_trades)
+    server._KLINE_CACHE.clear()
+    client = _client(monkeypatch)
+    d = client.get("/api/kline/QQQ?tf=day&range=1000").json()
+    assert d["trades"] == [{"date": "2026-09-30", "side": "BUY",
+                            "price": 100.0, "quantity": 10.0}]
