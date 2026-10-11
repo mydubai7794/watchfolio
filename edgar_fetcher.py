@@ -23,6 +23,9 @@ SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
 ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc}/{doc}"
 EDGAR_MIN_INTERVAL = 2.0          # 请求最小间隔（秒）
 EDGAR_BACKOFFS = (2.0, 4.0, 8.0)  # 429/503 退避序列
+EDGAR_WATERMARK_LAG = 3           # 水位落库回撤天数：覆盖索引延迟与单标的当日
+                                   # 失败窗口；重放窗口内申报靠 accession 去重
+                                   # 挡重，零额外 XML 请求
 # SEC 公平访问政策要求 UA 声明联系方式（名称 + email）；默认值仅最后兜底，
 # 生产 UA 经 sys_config.EDGAR_UA 配置（网络层热取，见 _resolve_ua）
 DEFAULT_UA = "QDII Portfolio Monitor"
@@ -71,6 +74,8 @@ def parse_submissions_recent(text: str, form_filter: str | None = None) -> list[
                                      rec.get("filingDate") or [],
                                      rec.get("accessionNumber") or [],
                                      rec.get("primaryDocument") or []):
+        if not filed or not acc:
+            continue                  # 数组错位/缺失行跳过（filed 参与水位比较）
         if form_filter is None or form == form_filter:
             out.append({"form": form, "filed": filed,
                         "accession": acc, "primary_doc": doc})
@@ -268,8 +273,10 @@ async def fetch_form4_text(cik: int, accession: str, primary_doc: str,
 # ---------------------------------------------------------------------------
 
 async def run_edgar_round() -> dict:
-    """一轮完整处理。单标的失败跳过不中断；水位只在申报 XML 成功拉取后推进；
-    XML 拉取失败不推水位（次日自然重试，重复靠 uk_tx INSERT IGNORE 幂等）。@author yys"""
+    """一轮完整处理。单标的失败跳过不中断；水位只在申报 XML 成功拉取后推进，
+    落库时回撤 EDGAR_WATERMARK_LAG 天（全局水位取跨符号 max，单标的当日失败
+    时其窗口内申报靠回撤重放补齐，重复靠 accession 去重 + uk_tx INSERT IGNORE
+    幂等，零额外请求）。@author yys"""
     ua = await _resolve_ua()
     tmap = await get_ticker_map()
     if tmap is None:
@@ -343,7 +350,10 @@ async def run_edgar_round() -> dict:
             logger.warning("EDGAR 处理 %s 失败（跳过）: %s", symbol, e)
             stats["skipped"] += 1
     if max_filed > since:
-        await db.set_config("EDGAR_WATERMARK", max_filed, "EDGAR Form4 已处理水位")
+        safe = (datetime.strptime(max_filed, "%Y-%m-%d")
+                - timedelta(days=EDGAR_WATERMARK_LAG)).strftime("%Y-%m-%d")
+        await db.set_config("EDGAR_WATERMARK", safe,
+                            "EDGAR Form4 已处理水位（含回撤边际）")
     await db.set_config("EDGAR_LAST_OK",
                         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         "EDGAR 上轮成功时间")

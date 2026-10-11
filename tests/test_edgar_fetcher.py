@@ -1,6 +1,6 @@
 """edgar_fetcher 纯函数层测试（fixture 字符串，零网络）。@author yys"""
 import json
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import edgar_fetcher as ef
 
@@ -427,8 +427,8 @@ def test_run_edgar_round_classify_and_poll(monkeypatch):
     # 只有 stock 拉 Form 4；fpi/etf 零 Form 4 请求
     assert fetched == [(723125, "0000723125-26-000001")]
     assert len(rec["saved"]) == 2                  # FORM4_XML 两笔有效交易
-    # 水位推进到已处理的最大 filingDate
-    assert dict(rec["set_cfg"])["EDGAR_WATERMARK"] == "2026-10-08"
+    # 水位推进到已处理最大 filingDate 再回撤 3 天（安全边际）
+    assert dict(rec["set_cfg"])["EDGAR_WATERMARK"] == "2026-10-05"
     assert any(k == "EDGAR_LAST_OK" for k, _ in rec["set_cfg"])
 
 
@@ -446,9 +446,11 @@ def test_run_edgar_round_form4_fetch_fail_keeps_watermark(monkeypatch):
 
 
 def test_run_edgar_round_first_round_backfill_90d(monkeypatch):
+    recent = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    old = (datetime.now() - timedelta(days=120)).strftime("%Y-%m-%d")
     forms_mu = _subs_json(723125, [
-        ("4", "2026-10-08", "0000723125-26-000001"),
-        ("4", "2026-06-01", "0000723125-26-000000"),   # 90 天外：since 之前不拉
+        ("4", recent, "0000723125-26-000001"),
+        ("4", old, "0000723125-26-000000"),           # 90 天外：since 之前不拉
     ])
     holdings = [{"symbol": "MU", "market": "US", "asset_type": "stock"}]
     rec, cfg, fetched = _round_env(
@@ -456,8 +458,49 @@ def test_run_edgar_round_first_round_backfill_90d(monkeypatch):
         watermark=None)                            # 无水位 → 首轮回看 90 天
     r = asyncio.run(ef.run_edgar_round())
     assert r["ok"] is True
-    # 只有 2026-10-08（≥ today-90）被处理；2026-06-01 在窗口外不拉
+    # 只有 recent（≥ today-90）被处理；old 在窗口外不拉（动态日期防时间炸弹）
     assert fetched == [(723125, "0000723125-26-000001")]
+
+
+def test_run_edgar_round_watermark_rollback_replays_failed_symbol(monkeypatch):
+    """全局水位回撤边际：B 当轮 submissions 失败被跳过、A 推进水位（10-08 回撤
+    至 10-05），B 次日恢复后 10-06 申报仍落在重放窗口内被补拉，零漏申报。"""
+    import database as db
+
+    forms_mu = _subs_json(723125, [("4", "2026-10-08", "0000723125-26-000001")])
+    forms_baba = _subs_json(1577552, [("4", "2026-10-06", "x-baba-f4-1")])
+    holdings = [
+        {"symbol": "MU", "market": "US", "asset_type": "stock"},
+        {"symbol": "BABA", "market": "US", "asset_type": "stock"},
+    ]
+    form4 = {"0000723125-26-000001": FORM4_XML, "x-baba-f4-1": FORM4_XML}
+    rec, cfg, fetched = _round_env(
+        monkeypatch, holdings, {723125: forms_mu, 1577552: forms_baba},
+        form4, watermark="2026-10-01")
+
+    # 已入库 accession 集合随 save 累积（模拟真实 DB 幂等）
+    async def fake_accessions(sym, days=120):
+        return {r["accession"] for r in rec["saved"] if r["symbol"] == sym}
+
+    monkeypatch.setattr(db, "get_insider_accessions", fake_accessions)
+
+    async def fail_baba(cik, ua):
+        return None if cik == 1577552 else forms_mu
+
+    monkeypatch.setattr(ef, "fetch_submissions", fail_baba)
+    r1 = asyncio.run(ef.run_edgar_round())
+    assert r1["ok"] is True and r1["skipped"] == 1   # BABA 当轮失败跳过
+    assert fetched == [(723125, "0000723125-26-000001")]
+    assert dict(rec["set_cfg"])["EDGAR_WATERMARK"] == "2026-10-05"  # 10-08 回撤 3 天
+
+    async def ok_all(cik, ua):
+        return {723125: forms_mu, 1577552: forms_baba}[cik]
+
+    monkeypatch.setattr(ef, "fetch_submissions", ok_all)
+    r2 = asyncio.run(ef.run_edgar_round())
+    assert r2["ok"] is True and r2["new_tx"] == 2    # BABA 10-06 补拉成功
+    assert fetched == [(723125, "0000723125-26-000001"),
+                       (1577552, "x-baba-f4-1")]     # MU 已入库不再拉
 
 
 def test_run_edgar_round_skips_processed_accession(monkeypatch):
