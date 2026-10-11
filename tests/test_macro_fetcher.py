@@ -1,4 +1,6 @@
 """macro_fetcher 解析纯逻辑测试（fixture 字符串，零网络）。@author yys"""
+import asyncio
+
 import macro_fetcher as mf
 
 
@@ -52,4 +54,66 @@ def test_parse_cnn_fg():
 
 def test_fetchers_registry():
     assert {f.__name__ for f in mf.FETCHERS} == {
-        "fetch_buffett", "fetch_cape", "fetch_yield_spread", "fetch_fear_greed"}
+        "fetch_buffett", "fetch_cape", "fetch_yield_spread", "fetch_fear_greed",
+        "fetch_cpi_yoy", "fetch_credit_spread"}
+
+
+CPI_TEXT = "\n".join([
+    "DATE,CPIAUCSL",
+    "2025-08-01,.",                    # 无效行跳过
+    "2025-09-01,320.5",
+    "2025-10-01,320.8",
+    "2025-11-01,321.0",
+    "2025-12-01,322.1",
+    "2026-01-01,323.0",
+    "2026-02-01,324.0",
+    "2026-03-01,325.0",
+    "2026-04-01,326.0",
+    "2026-05-01,327.0",
+    "2026-06-01,328.0",
+    "2026-07-01,329.0",
+    "2026-08-01,330.0",
+    "2026-09-01,331.0",
+])
+
+
+def test_parse_fred_csv_tail():
+    tail = mf.parse_fred_csv_tail(CPI_TEXT, 14)
+    assert len(tail) == 13                 # '.' 行被跳过
+    assert tail[-1] == ("2026-09-01", 331.0)
+    assert tail[0] == ("2025-09-01", 320.5)
+    assert mf.parse_fred_csv_tail("DATE,X\n") == []
+
+
+def test_fetch_cpi_yoy(monkeypatch):
+    async def fake_get(url, headers=None, allow_proxy=True):
+        assert "CPIAUCSL" in url
+        return CPI_TEXT
+
+    monkeypatch.setattr(mf, "_get_text", fake_get)
+    r = asyncio.run(mf.fetch_cpi_yoy())
+    assert r["name"] == "cpi_yoy"
+    assert r["asof"] == "2026-09-01"
+    assert r["value"] == round((331.0 / 320.5 - 1) * 100, 2)
+    assert r["extra"]["year_ago"] == 320.5
+
+
+def test_fetch_cpi_yoy_insufficient_history(monkeypatch):
+    short = "DATE,CPIAUCSL\n" + "\n".join(f"2026-0{i}-01,{320 + i}" for i in range(1, 4))
+
+    async def fake_get(url, headers=None, allow_proxy=True):
+        return short
+
+    monkeypatch.setattr(mf, "_get_text", fake_get)
+    assert asyncio.run(mf.fetch_cpi_yoy()) is None
+
+
+def test_fetch_credit_spread(monkeypatch):
+    async def fake_get(url, headers=None, allow_proxy=True):
+        assert "BAMLH0A0HYM2" in url
+        return "DATE,BAMLH0A0HYM2\n2026-10-10,3.18\n"
+
+    monkeypatch.setattr(mf, "_get_text", fake_get)
+    r = asyncio.run(mf.fetch_credit_spread())
+    assert r == {"name": "credit_spread_hy", "asof": "2026-10-10",
+                 "value": 3.18, "extra": {}}

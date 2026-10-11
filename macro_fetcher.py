@@ -86,6 +86,24 @@ def parse_fred_csv(text: str) -> tuple[str, float] | None:
     return None
 
 
+def parse_fred_csv_tail(text: str, n: int = 14) -> list[tuple[str, float]]:
+    """FRED CSV → 尾部 n 行 [(date, value)]（升序，'.'/空值行跳过）。
+    CPIAUCSL 月度，14 行覆盖 12 个月前即可算同比。@author yys"""
+    out = []
+    for line in text.strip().splitlines()[1:]:
+        parts = line.strip().split(",")
+        if len(parts) != 2:
+            continue
+        d, v = parts
+        if v in (".", ""):
+            continue
+        try:
+            out.append((d, float(v)))
+        except ValueError:
+            continue
+    return out[-n:]
+
+
 def parse_multpl_cape(text: str) -> tuple[str, float] | None:
     """multpl by-year 表格 HTML → (最新日期, 值)；首数据行即最新，值列含 &#x2002; 实体。@author yys"""
     for row in re.findall(r"<tr[^>]*>(.*?)</tr>", text, re.S):
@@ -166,7 +184,32 @@ async def fetch_fear_greed() -> dict | None:
             "extra": {"source": "fallback_vix_pctl"}}
 
 
-FETCHERS = (fetch_buffett, fetch_cape, fetch_yield_spread, fetch_fear_greed)
+async def fetch_cpi_yoy() -> dict | None:
+    """CPI 同比 = CPIAUCSL 最新值 / 12 个月前值 − 1（FRED 月度，尾部 14 行）。@author yys"""
+    rows = parse_fred_csv_tail(await _get_text(FRED_CSV_URL.format(sid="CPIAUCSL")) or "")
+    if len(rows) < 13:               # 最新 + 12 个月前
+        return None
+    latest_d, latest_v = rows[-1]
+    year_ago_d, year_ago_v = rows[-13]
+    if year_ago_v <= 0:
+        return None
+    return {"name": "cpi_yoy", "asof": latest_d,
+            "value": round((latest_v / year_ago_v - 1.0) * 100.0, 2),
+            "extra": {"latest": latest_v, "year_ago": year_ago_v,
+                      "year_ago_asof": year_ago_d}}
+
+
+async def fetch_credit_spread() -> dict | None:
+    """高收益债信用利差 = BAMLH0A0HYM2（ICE BofA US HY OAS，pct）。@author yys"""
+    got = parse_fred_csv(await _get_text(FRED_CSV_URL.format(sid="BAMLH0A0HYM2")) or "")
+    if not got:
+        return None
+    return {"name": "credit_spread_hy", "asof": got[0],
+            "value": round(got[1], 3), "extra": {}}
+
+
+FETCHERS = (fetch_buffett, fetch_cape, fetch_yield_spread, fetch_fear_greed,
+            fetch_cpi_yoy, fetch_credit_spread)
 
 
 async def refresh_all():
