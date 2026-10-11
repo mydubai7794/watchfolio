@@ -2783,6 +2783,9 @@ async def _build_agent_context() -> dict:
                             "asof": str(row["asof"])[:10] if row else None}
             today = datetime.now().strftime("%Y-%m-%d")
             holdings = await db.get_holdings(enabled_only=True)
+            # 估值因子原始值一次取全表（≤20 行）：pe/pb/peg 不落库，注入时
+            # 用现价实时算。@author yys
+            vals = await db.get_valuations()
             for h in holdings:
                 if h.get("market") != "US":
                     continue
@@ -2809,6 +2812,36 @@ async def _build_agent_context() -> dict:
                             rows, today)
                     else:
                         f["insider_90d"] = None
+                    # 估值因子注入（估值层 Task5）：pe/pb/peg 用现价实时算；
+                    # reason 只由落库数据 + asset_type 推导——现价是注入瞬态，
+                    # 缺失仅让 pe/pb/peg 为 null，不改变 reason 口径。@author yys
+                    v = vals.get(sym) or {}
+                    v_eps = v.get("eps_ttm")
+                    v_bps = v.get("bps")
+                    v_g = v.get("growth_pct")
+                    v_price = ((_pf_ctx.get("quotes") or {}).get(sym)
+                               or {}).get("price")
+                    pe = round(v_price / v_eps, 2) \
+                        if v_price and v_eps and v_eps > 0 else None
+                    pb = round(v_price / v_bps, 2) \
+                        if v_price and v_bps and v_bps > 0 else None
+                    peg = round(pe / (v_g / 100.0), 2) \
+                        if pe is not None and v_g and v_g > 0 else None
+                    if at == "etf":
+                        v_reason = "fund"
+                    elif v_eps is None or v_bps is None:
+                        v_reason = "no_data"
+                    elif v_g is None or v_g <= 0:
+                        v_reason = "no_growth"
+                    else:
+                        v_reason = None
+                    f["valuation"] = {
+                        "pe_ttm": pe, "pb": pb, "peg": peg,
+                        "eps_ttm": v_eps, "bps": v_bps,
+                        "growth_pct": v_g,
+                        "dividend_yield": v.get("dividend_yield"),
+                        "reason": v_reason,
+                        "updated_at": v.get("updated_at")}
                     ctx["factors"][sym] = f
                 except Exception as e:
                     logger.warning("决策上下文 factor %s 失败（仅跳过该标的）: %s",

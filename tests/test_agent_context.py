@@ -4,6 +4,7 @@ import json
 import time
 from datetime import date, datetime, timedelta
 
+import pytest
 from fastapi.testclient import TestClient
 
 
@@ -65,6 +66,11 @@ def _env(monkeypatch):
     monkeypatch.setattr(server.db, "get_insider_tx", fake_insider)
     monkeypatch.setattr(server.db, "get_macro_latest", fake_macro_latest)
     monkeypatch.setattr(server.db, "get_config", fake_cfg)
+
+    async def fake_vals():
+        return {}          # 估值因子默认空（零连库；专用用例另行打桩）
+
+    monkeypatch.setattr(server.db, "get_valuations", fake_vals)
     monkeypatch.setattr(server, "market_cache",
                         [{"key": "US10Y", "price": 4.04}])
     monkeypatch.setitem(dbar.INDICATORS, "MU",
@@ -153,6 +159,67 @@ def test_overview_endpoint_injects_context(monkeypatch):
     r = client.get("/api/portfolio/overview")
     assert r.status_code == 200
     assert r.json()["context"] == {"spy": {"close": 600.0}}
+
+
+def test_agent_context_valuation_injection(monkeypatch):
+    """factors[symbol].valuation：pe/pb/peg 用现价实时算、reason 推导、
+    ETF fund 门控、null 安全。@author yys"""
+    server = _env(monkeypatch)
+
+    async def fake_holdings(enabled_only=True):
+        return [
+            {"symbol": "NVDA", "market": "US", "asset_type": "stock"},
+            {"symbol": "QQQ", "market": "US", "asset_type": "etf"},
+            {"symbol": "BABA", "market": "US", "asset_type": "fpi"},
+        ]
+
+    async def fake_vals():
+        return {
+            "NVDA": {"eps_ttm": 8.0, "bps": 9.5, "growth_pct": 66.67,
+                     "dividend_yield": 0.52,
+                     "updated_at": "2026-10-11 16:00:00"},
+            "QQQ": {"eps_ttm": None, "bps": None, "growth_pct": None,
+                    "dividend_yield": None,
+                    "updated_at": "2026-10-11 16:00:00"},
+            "BABA": {"eps_ttm": 4.39, "bps": 64.37, "growth_pct": -17.91,
+                     "dividend_yield": 1.03,
+                     "updated_at": "2026-10-11 16:00:00"},
+        }
+
+    monkeypatch.setattr(server.db, "get_holdings", fake_holdings)
+    monkeypatch.setattr(server.db, "get_valuations", fake_vals)
+    # 现价快照整体替换（参照 test_alert_api._setup_pf_ctx），teardown 自动还原
+    monkeypatch.setattr(server, "_pf_ctx",
+                        {"holdings": [], "quotes": {
+                            "NVDA": {"price": 160.0},
+                            "BABA": {"price": 140.0}},
+                         "cash_usd": 0.0})
+    ctx = asyncio.run(server._build_agent_context())
+    # NVDA：pe=160/8=20、pb=160/9.5≈16.84、peg=20/(66.67/100)=30
+    v_nvda = ctx["factors"]["NVDA"]["valuation"]
+    assert v_nvda["pe_ttm"] == pytest.approx(20.0, abs=0.01)
+    assert v_nvda["pb"] == pytest.approx(16.84, abs=0.01)
+    assert v_nvda["peg"] == pytest.approx(30.0, abs=0.01)
+    assert v_nvda["eps_ttm"] == 8.0
+    assert v_nvda["bps"] == pytest.approx(9.5, abs=0.01)
+    assert v_nvda["growth_pct"] == pytest.approx(66.67, abs=0.01)
+    assert v_nvda["dividend_yield"] == pytest.approx(0.52, abs=0.01)
+    assert v_nvda["reason"] is None
+    assert v_nvda["updated_at"] == "2026-10-11 16:00:00"
+    # QQQ：ETF fund 门控（数值/现价全缺 → pe/pb/peg 全 None）
+    v_qqq = ctx["factors"]["QQQ"]["valuation"]
+    assert v_qqq["pe_ttm"] is None
+    assert v_qqq["pb"] is None
+    assert v_qqq["peg"] is None
+    assert v_qqq["reason"] == "fund"
+    # BABA：growth≤0 → peg None、reason=no_growth；现价实时算 pe/pb
+    v_baba = ctx["factors"]["BABA"]["valuation"]
+    assert v_baba["pe_ttm"] == pytest.approx(31.89, abs=0.01)   # 140/4.39
+    assert v_baba["pb"] == pytest.approx(2.17, abs=0.01)        # 140/64.37
+    assert v_baba["peg"] is None
+    assert v_baba["reason"] == "no_growth"
+    # fpi 分支 insider 注记不受 valuation 块影响
+    assert ctx["factors"]["BABA"]["insider_note"] == "fpi_no_form4"
 
 
 def _async_ret(v):
