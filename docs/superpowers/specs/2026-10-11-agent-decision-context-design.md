@@ -53,7 +53,7 @@
 
 **限流契约（以稳为主）**：
 - 模块级全局单例节流：任何请求距上一次 ≥2.0s（不足先 sleep），全程串行，实际峰值 ≤0.5 req/s（上限 10 req/s 的 1/20）
-- HTTP 429/503：指数退避 2s→4s→8s，最多重试 2 次，仍失败该 URL 当轮放弃
+- HTTP 429/503：指数退避 2s→4s→8s，最多重试 3 次，仍失败该 URL 当轮放弃
 - 404 / 解析失败：返回 None 不重试（数据缺，非故障）
 - 网络异常：重试 1 次
 - 单 symbol 失败跳过继续（macro 循环 gaps 哲学），整轮失败仅 WARNING 不轰炸
@@ -62,7 +62,7 @@
 1. ticker map 7 天过期才刷（1 请求）
 2. 遍历 holdings（market=US、enabled=1）：
    - `asset_type IS NULL` → 探测：map 查 CIK（miss → 不写分类，记一次 WARNING）；拉 submissions recent.formType 集合，三类互斥、按优先级判定：含 `20-F` → `fpi`（BABA 自动收敛）；含 `10-K`/`10-Q` → `stock`；含 `N-1A`/`N-CSR`/`NPORT` → `etf`；三类都不含 → 保持 NULL 下轮再试；写回 holdings.asset_type
-   - `asset_type='stock'` → 拉 submissions，筛 formType=="4" 且 filingDate > 水位 → 逐个拉 XML 解析入库；首轮（无水位）回看 90 天初始化
+   - `asset_type='stock'` → 拉 submissions，筛 formType=="4" 且 filingDate ≥ 水位（用 ≥ 防同日迟报漏单，重复靠 uk_tx INSERT IGNORE 幂等去重）→ 逐个拉 XML 解析入库；首轮（无水位）回看 90 天初始化；XML 拉取失败的不推水位，次日自然重试
    - 其他（etf/fpi/none）→ 跳过，零请求
 3. 水位：`sys_config.EDGAR_WATERMARK`（ISO 日期，本轮成功处理的最新 filingDate；探测失败不推进）
 4. 8 只个股 × 每日 1 次 submissions + 新增 Form 4 若干 XML ≈ 10~15 请求/日，串行 2s 间隔整轮 <1 分钟
