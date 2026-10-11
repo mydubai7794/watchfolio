@@ -875,6 +875,7 @@ git commit -m "feat: edgar_fetcher网络层（≥2s串行节流+429退避2/4/8s+
 
 **Files:**
 - Modify: `edgar_fetcher.py`
+- Modify: `database.py`
 - Modify: `tests/test_edgar_fetcher.py`
 
 - [ ] **Step 1: 写失败测试（追加）**
@@ -917,6 +918,7 @@ def _round_env(monkeypatch, holdings, forms_by_cik, form4_texts, watermark=None)
     monkeypatch.setattr(db, "get_holdings", fake_holdings)
     monkeypatch.setattr(db, "set_holding_asset_type", fake_classify)
     monkeypatch.setattr(db, "save_insider_tx", fake_save)
+    monkeypatch.setattr(db, "get_insider_accessions", _async_ret(set()))
     monkeypatch.setattr(ef, "_resolve_ua", _async_ret("UA"))
     monkeypatch.setattr(ef, "_TICKER_MAP", {"MU": 723125, "BABA": 1577552,
                                             "SMH": 1234567})
@@ -998,14 +1000,50 @@ def test_run_edgar_round_first_round_backfill_90d(monkeypatch):
     assert r["ok"] is True
     # 只有 2026-10-08（≥ today-90）被处理；2026-06-01 在窗口外不拉
     assert fetched == [(723125, "0000723125-26-000001")]
+
+
+def test_run_edgar_round_skips_processed_accession(monkeypatch):
+    """已入库 accession（uk_tx 对 NULL price 不去重的补偿）不重复拉取/插入。"""
+    import database as db
+
+    forms_mu = _subs_json(723125, [("10-Q", "2026-10-05", "0000723125-26-000002"),
+                                   ("4", "2026-10-08", "0000723125-26-000001")])
+    holdings = [{"symbol": "MU", "market": "US", "asset_type": "stock"}]
+    rec, cfg, fetched = _round_env(
+        monkeypatch, holdings, {723125: forms_mu}, {"0000723125-26-000001": FORM4_XML},
+        watermark="2026-10-01")
+
+    async def fake_accessions(sym, days=120):
+        return {"0000723125-26-000001"}            # 该申报已入库
+
+    monkeypatch.setattr(db, "get_insider_accessions", fake_accessions)
+    r = asyncio.run(ef.run_edgar_round())
+    assert r["ok"] is True and r["new_tx"] == 0
+    assert fetched == []                           # 不再拉 XML
+    assert rec["saved"] == []                      # 不再插入
 ```
 
 - [ ] **Step 2: 跑测试确认失败**
 
 Run: `python3 -m pytest tests/test_edgar_fetcher.py -v -k run_edgar_round`
-Expected: 3 FAILED（`run_edgar_round` 不存在）
+Expected: 4 FAILED（`run_edgar_round` 不存在）
 
-- [ ] **Step 3: edgar_fetcher.py 追加每日轮实现**
+- [ ] **Step 3a: database.py 新增 get_insider_accessions（uk_tx 对 NULL price 不去重的补偿）**
+
+在 `get_insider_tx` 之后新增：
+
+```python
+async def get_insider_accessions(symbol: str, days: int = 120) -> set[str]:
+    """近 N 天已入库的申报编号集合（accession 级去重：uk_tx 唯一键含可 NULL
+    的 price 列，MySQL 唯一索引不对 NULL 去重，水位 >= 重放靠此防重复插入）。@author yys"""
+    rows = await execute_dict(
+        "SELECT DISTINCT accession FROM insider_tx WHERE symbol = %s AND "
+        "filed_date >= DATE_SUB(CURDATE(), INTERVAL %s DAY)",
+        (symbol, days))
+    return {r["accession"] for r in rows}
+```
+
+- [ ] **Step 3b: edgar_fetcher.py 追加每日轮实现**
 
 ```python
 # ---------------------------------------------------------------------------
@@ -1067,8 +1105,12 @@ async def run_edgar_round() -> dict:
                 if sub is None:
                     stats["skipped"] += 1
                     continue
+                # accession 级去重：uk_tx 唯一键含可 NULL 的 price 列（MySQL 唯一
+                # 索引不对 NULL 去重），水位 >= 重放会重复插入 NULL 价格行——
+                # 按已入库 accession 跳过，同时省掉重复 XML 请求
+                processed = await db.get_insider_accessions(symbol, days=120)
                 for f in parse_submissions_recent(sub, form_filter="4"):
-                    if f["filed"] >= since:
+                    if f["filed"] >= since and f["accession"] not in processed:
                         text = await fetch_form4_text(cik, f["accession"],
                                                       f["primary_doc"], ua)
                         if text is None:
@@ -1111,14 +1153,14 @@ async def edgar_daily_loop():
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `python3 -m pytest tests/test_edgar_fetcher.py -v`
-Expected: 16 PASSED
+Run: `python3 -m pytest tests/test_edgar_fetcher.py tests/test_edgar_db.py -v`
+Expected: 17 PASSED（edgar_fetcher）+ 4 PASSED（edgar_db，含本任务新增 helper 后不回归）
 
 - [ ] **Step 5: 提交**
 
 ```bash
-git add edgar_fetcher.py tests/test_edgar_fetcher.py
-git commit -m "feat: edgar每日轮（启动即跑+23:30，自动分类/增量Form4/水位安全推进，决策上下文Task4）"
+git add edgar_fetcher.py database.py tests/test_edgar_fetcher.py
+git commit -m "feat: edgar每日轮（启动即跑+23:30，自动分类/增量Form4/accession去重/水位安全推进，决策上下文Task4）"
 ```
 
 ---
