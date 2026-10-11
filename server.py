@@ -2825,7 +2825,9 @@ async def _build_agent_context() -> dict:
                         if v_price and v_eps and v_eps > 0 else None
                     pb = round(v_price / v_bps, 2) \
                         if v_price and v_bps and v_bps > 0 else None
-                    peg = round(pe / (v_g / 100.0), 2) \
+                    # PEG 量纲：growth_pct 为百分数数值（66.67=66.67%），
+                    # 标准 PEG = P/E ÷ 增速百分数数值（PE=20、增速20% → 1.0）
+                    peg = round(pe / v_g, 2) \
                         if pe is not None and v_g and v_g > 0 else None
                     if at == "etf":
                         v_reason = "fund"

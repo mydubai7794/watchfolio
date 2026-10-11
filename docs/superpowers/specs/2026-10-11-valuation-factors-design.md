@@ -59,9 +59,10 @@
   **不落库 pe/pb/peg 与 reason**——现价每轮变，落库即过时；reason 由注入层
   根据落库数据 + asset_type 实时推导（2026-10-11 实施修订：表无 reason 列）。
 - `_build_agent_context` 注入时实时算：
-  `pe = price / eps_ttm`、`pb = price / bps`、`peg = pe / (growth_pct / 100)`
-  （price 取 market_cache 现价；eps_ttm>0、bps>0、growth_pct>0 各自防御，
-  缺哪个哪个为 null）。
+  `pe = price / eps_ttm`、`pb = price / bps`、
+  `peg = pe / growth_pct`（growth_pct 为百分数数值，标准 PEG 量纲：
+  P/E=20、增速 20% → PEG=1.0；price 取 market_cache 现价；
+  eps_ttm>0、bps>0、growth_pct>0 各自防御，缺哪个哪个为 null）。
 - PEG 口径：trailing（TTM P/E ÷ 最近完整财年 EPS 同比），`reason` 无需额外
   标注口径——meta 已含数据源信息。
 

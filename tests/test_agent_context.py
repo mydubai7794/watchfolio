@@ -205,11 +205,11 @@ def test_agent_context_valuation_injection(monkeypatch):
                             "BABA": {"price": 140.0}},
                          "cash_usd": 0.0})
     ctx = asyncio.run(server._build_agent_context())
-    # NVDA：pe=160/8=20、pb=160/9.5≈16.84、peg=20/(66.67/100)=30
+    # NVDA：pe=160/8=20、pb=160/9.5≈16.84、peg=20/66.67≈0.30（PEG=P/E÷增速百分数）
     v_nvda = ctx["factors"]["NVDA"]["valuation"]
     assert v_nvda["pe_ttm"] == pytest.approx(20.0, abs=0.01)
     assert v_nvda["pb"] == pytest.approx(16.84, abs=0.01)
-    assert v_nvda["peg"] == pytest.approx(30.0, abs=0.01)
+    assert v_nvda["peg"] == pytest.approx(0.30, abs=0.01)
     assert v_nvda["eps_ttm"] == 8.0
     assert v_nvda["bps"] == pytest.approx(9.5, abs=0.01)
     assert v_nvda["growth_pct"] == pytest.approx(66.67, abs=0.01)
