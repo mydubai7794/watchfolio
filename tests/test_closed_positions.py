@@ -179,7 +179,7 @@ class TestTradeQueries:
         run(db.get_all_trades())
         assert "FROM trade_records" in cap["sql"]
         assert "COALESCE(email_date, created_at)" in cap["sql"]   # NULL 日期回退
-        assert "ORDER BY" in cap["sql"]
+        assert "ORDER BY COALESCE(email_date, created_at), id" in cap["sql"]  # id 二级排序
         assert cap["args"] is None
 
     def test_get_trades_by_symbol_sql(self, monkeypatch):
@@ -194,4 +194,62 @@ class TestTradeQueries:
         assert "FROM trade_records" in cap["sql"]
         assert "WHERE symbol = %s" in cap["sql"]
         assert "COALESCE(email_date, created_at)" in cap["sql"]
+        assert "ORDER BY COALESCE(email_date, created_at), id" in cap["sql"]  # id 二级排序
         assert cap["args"] == ("MU",)
+
+
+# ---------------------------------------------------------------------------
+# API：overview closed 块（TestClient 打桩，同 test_alert_api._client 模式）
+# ---------------------------------------------------------------------------
+
+def _client(monkeypatch):
+    async def fake_get_session(t):
+        return {"username": "u", "expires": time.time() + 3600}
+    monkeypatch.setattr(server.db, "get_session", fake_get_session)
+    c = TestClient(server.app)
+    c.cookies.set("session_token", "tok")
+    return c
+
+
+def _reset_closed_cache(monkeypatch):
+    monkeypatch.setattr(server, "_closed_ctx_cache",
+                        {"ts": 0.0, "trades": None, "holdings": None})
+
+
+def test_overview_closed_block(monkeypatch):
+    """overview 注入 closed 块：周期行结构/数值正确（回放口径）。"""
+    async def fake_trades():
+        return [_tr("MU", "BUY", 10, 100, datetime(2026, 1, 5)),
+                _tr("MU", "SELL", 10, 120, datetime(2026, 2, 10))]
+
+    async def fake_holdings(enabled_only=False):
+        return [_h("MU", 0)]
+
+    monkeypatch.setattr(server.db, "get_all_trades", fake_trades)
+    monkeypatch.setattr(server.db, "get_holdings", fake_holdings)
+    _reset_closed_cache(monkeypatch)
+    client = _client(monkeypatch)
+    r = client.get("/api/portfolio/overview")
+    assert r.status_code == 200
+    closed = r.json().get("closed")
+    assert closed and closed[0]["symbol"] == "MU"
+    assert closed[0]["realized_pnl"] == 200.0
+    assert closed[0]["exit_avg"] == 120.0
+    assert closed[0]["exit_date"] == "2026-02-10"
+
+
+def test_overview_closed_db_error_degrades(monkeypatch):
+    """closed 上下文 DB 异常 → 降级空数组，不 500（同 recent_trades 模式）。"""
+    async def boom():
+        raise RuntimeError("db down")
+
+    async def fake_holdings(enabled_only=False):
+        return []
+
+    monkeypatch.setattr(server.db, "get_all_trades", boom)
+    monkeypatch.setattr(server.db, "get_holdings", fake_holdings)
+    _reset_closed_cache(monkeypatch)
+    client = _client(monkeypatch)
+    r = client.get("/api/portfolio/overview")
+    assert r.status_code == 200
+    assert r.json().get("closed") == []

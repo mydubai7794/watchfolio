@@ -2554,6 +2554,13 @@ async def portfolio_overview():
         data["recent_trades"] = await db.get_recent_trades(10)
     except Exception:
         data["recent_trades"] = []
+    # 已清仓周期列表（trade_records 回放推导；留痕数据随 60s 缓存 eventual
+    # 生效，不进 SSE 推送载荷——前端沿用 recent_trades 保活合并模式）
+    try:
+        _trades, _holdings = await _get_closed_ctx()
+        data["closed"] = ledger.build_closed_positions(_trades, _holdings)
+    except Exception:
+        data["closed"] = []
     return data
 
 
@@ -2617,6 +2624,23 @@ async def _get_nav_ctx() -> tuple[list[dict], list[dict]]:
     daily, events = await db.get_portfolio_daily(3650), await db.get_ledger_events()
     _nav_ctx_cache.update(ts=now, daily=daily, events=events)
     return daily, events
+
+
+# 已清仓上下文缓存（60s：全量 trades + holdings；周期重放纯内存微秒级，
+# 缓存只为省 overview 高频轮询下的重复 DB 读）
+_closed_ctx_cache = {"ts": 0.0, "trades": None, "holdings": None}
+
+
+async def _get_closed_ctx() -> tuple[list[dict], list[dict]]:
+    """已清仓周期重放上下文：全量成交 + 全量持仓（60s 缓存，新成交 60s 内
+    eventual 生效）。@author yys"""
+    now = time.time()
+    if _closed_ctx_cache["trades"] is not None and \
+            now - _closed_ctx_cache["ts"] < 60:
+        return _closed_ctx_cache["trades"], _closed_ctx_cache["holdings"]
+    trades, holdings = await db.get_all_trades(), await db.get_holdings()
+    _closed_ctx_cache.update(ts=now, trades=trades, holdings=holdings)
+    return trades, holdings
 
 
 @app.get("/api/portfolio/nav")
