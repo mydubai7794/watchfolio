@@ -1,6 +1,6 @@
 """edgar_fetcher 纯函数层测试（fixture 字符串，零网络）。@author yys"""
 import json
-from datetime import date
+from datetime import date, datetime
 
 import edgar_fetcher as ef
 
@@ -148,3 +148,147 @@ def test_form4_url_strips_xsl_prefix():
         "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000001/primary_doc.xml"
     assert ef.form4_url(1045810, "0001045810-26-000001",
                         None).endswith("/primary_doc.xml")            # None 防御兜底
+
+
+# ---------------------------------------------------------------------------
+# 网络层：节流/退避/UA（monkeypatch httpx + 冻结时钟，零真实网络）
+# ---------------------------------------------------------------------------
+import asyncio
+
+import httpx
+
+
+class _FakeResp:
+    def __init__(self, code, text="ok"):
+        self.status_code = code
+        self.text = text
+
+
+def _patch_client(monkeypatch, responder):
+    calls = []
+
+    class FakeClient:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url):
+            calls.append(url)
+            return responder(url)
+
+    monkeypatch.setattr(ef.httpx, "AsyncClient", FakeClient)
+    return calls
+
+
+def test_edgar_get_throttle_and_backoff(monkeypatch):
+    sleeps = []
+
+    async def fake_sleep(s):
+        sleeps.append(round(s, 1))
+
+    monkeypatch.setattr(ef.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(ef.time, "monotonic", lambda: 100.0)   # 时钟冻结
+    monkeypatch.setattr(ef, "_last_req_ts", 100.0)             # 上次请求恰在当前时刻
+    codes = iter([429, 429, 200])
+    calls = _patch_client(monkeypatch, lambda url: _FakeResp(next(codes)))
+    resp = asyncio.run(ef._edgar_get("https://x", "UA"))
+    assert resp.status_code == 200
+    assert len(calls) == 3
+    # 冻结时钟下每次 gap=2.0；退避序列 2.0/4.0
+    assert sleeps == [2.0, 2.0, 2.0, 4.0, 2.0]
+
+
+def test_edgar_get_503_exhausted(monkeypatch):
+    async def fake_sleep(s):
+        pass
+
+    monkeypatch.setattr(ef.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(ef.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(ef, "_last_req_ts", 100.0)
+    calls = _patch_client(monkeypatch, lambda url: _FakeResp(503))
+    assert asyncio.run(ef._edgar_get("https://x", "UA")) is None
+    assert len(calls) == 4                       # 首试 + 3 次退避重试
+
+
+def test_edgar_get_network_error_retries_once(monkeypatch):
+    async def fake_sleep(s):
+        pass
+
+    monkeypatch.setattr(ef.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(ef.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(ef, "_last_req_ts", 100.0)
+    calls = []
+
+    class FlakyClient:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url):
+            calls.append(url)
+            raise httpx.ConnectError("boom")
+
+    monkeypatch.setattr(ef.httpx, "AsyncClient", FlakyClient)
+    assert asyncio.run(ef._edgar_get("https://x", "UA")) is None
+    assert len(calls) == 2                       # 网络异常仅重试 1 次
+
+
+def test_resolve_ua_from_config(monkeypatch):
+    import database as db
+
+    async def fake_cfg(key):
+        return "QDII-Portfolio admin@example.com" if key == "EDGAR_UA" else None
+
+    monkeypatch.setattr(db, "get_config", fake_cfg)
+    assert asyncio.run(ef._resolve_ua()) == "QDII-Portfolio admin@example.com"
+
+    async def fake_cfg_empty(key):
+        return None
+
+    monkeypatch.setattr(db, "get_config", fake_cfg_empty)
+    assert asyncio.run(ef._resolve_ua()) == ef.DEFAULT_UA
+
+
+def test_get_ticker_map_cache_and_refresh(monkeypatch):
+    import database as db
+
+    monkeypatch.setattr(ef, "_TICKER_MAP", None)   # 冷启动起点，测试自包含
+    cfg = {"EDGAR_TICKER_MAP_TS": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    set_calls = []
+
+    async def fake_cfg(key):
+        return cfg.get(key)
+
+    async def fake_set(key, value, remark=""):
+        set_calls.append((key, value))
+
+    monkeypatch.setattr(db, "get_config", fake_cfg)
+    monkeypatch.setattr(db, "set_config", fake_set)
+    monkeypatch.setattr(ef, "_resolve_ua", _async_ret("UA"))
+
+    # 冷启动（内存空）→ 拉一次并落时间戳
+    _patch_client(monkeypatch, lambda url: _FakeResp(
+        200, json.dumps({"0": {"cik_str": 1, "ticker": "MU", "title": "x"}})))
+    m1 = asyncio.run(ef.get_ticker_map())
+    assert m1 == {"MU": 1}
+    assert set_calls and set_calls[0][0] == "EDGAR_TICKER_MAP_TS"
+    # 内存已有且时间戳新鲜 → 不再发请求
+    calls = _patch_client(monkeypatch, lambda url: _FakeResp(500))
+    assert asyncio.run(ef.get_ticker_map()) == {"MU": 1}
+    assert calls == []
+
+
+def _async_ret(v):
+    async def _f(*a, **kw):
+        return v
+    return _f

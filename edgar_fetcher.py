@@ -158,3 +158,95 @@ def build_insider_summary(rows: list[dict], today: str) -> dict | None:
             sells += 1
     return {"net_shares": net_shares, "net_value_usd": round(net_value, 2),
             "buys": buys, "sells": sells, "tx_count": len(sel), "since": cutoff}
+
+
+# ---------------------------------------------------------------------------
+# 网络层：全局节流 + 退避 + 拉取函数（全程串行，以稳为主）
+# ---------------------------------------------------------------------------
+
+_last_req_ts = 0.0                # 模块级节流状态（monotonic）
+_TICKER_MAP: dict[str, int] | None = None   # symbol(大写) -> cik
+
+
+async def _resolve_ua() -> str:
+    """UA 从 sys_config.EDGAR_UA 热取（缺省无域名占位；真实联系方式库配置，
+    域名属敏感值禁入代码）。@author yys"""
+    try:
+        ua = await db.get_config("EDGAR_UA")
+        if ua:
+            return ua
+    except Exception:
+        pass
+    return DEFAULT_UA
+
+
+async def _edgar_get(url: str, ua: str) -> httpx.Response | None:
+    """限流 GET：距上次请求 ≥EDGAR_MIN_INTERVAL；429/503 按 EDGAR_BACKOFFS
+    退避重试；网络异常仅重试 1 次；穷尽返回 None（调用方按数据缺处理）。@author yys"""
+    global _last_req_ts
+    last_err = ""
+    net_retried = False
+    for attempt in range(len(EDGAR_BACKOFFS) + 1):
+        gap = _last_req_ts + EDGAR_MIN_INTERVAL - time.monotonic()
+        if gap > 0:
+            await asyncio.sleep(gap)
+        _last_req_ts = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True,
+                                         headers={"User-Agent": ua}) as client:
+                resp = await client.get(url)
+            if resp.status_code not in (429, 503):
+                return resp
+            last_err = f"HTTP {resp.status_code}"
+        except Exception as e:
+            last_err = repr(e)
+            if net_retried:
+                break
+            net_retried = True
+        if attempt < len(EDGAR_BACKOFFS):
+            await asyncio.sleep(EDGAR_BACKOFFS[attempt])
+    logger.warning("EDGAR GET 失败 %s: %s", url, last_err)
+    return None
+
+
+async def _map_fresh() -> bool:
+    """sys_config.EDGAR_TICKER_MAP_TS 是否 7 天内。@author yys"""
+    ts = await db.get_config("EDGAR_TICKER_MAP_TS")
+    if not ts:
+        return False
+    try:
+        return (datetime.now() - datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")).days < 7
+    except ValueError:
+        return False
+
+
+async def get_ticker_map() -> dict[str, int] | None:
+    """ticker→CIK 全量映射：内存缓存 + 时间戳 7 天过期（重启重拉一次可接受）。
+    拉取失败保留旧缓存兜底。@author yys"""
+    global _TICKER_MAP
+    if _TICKER_MAP is not None and await _map_fresh():
+        return _TICKER_MAP
+    resp = await _edgar_get(TICKER_MAP_URL, await _resolve_ua())
+    if resp is not None and resp.status_code == 200:
+        _TICKER_MAP = parse_ticker_map(resp.text)
+        await db.set_config("EDGAR_TICKER_MAP_TS",
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "EDGAR ticker映射刷新时间")
+    return _TICKER_MAP
+
+
+async def fetch_submissions(cik: int, ua: str) -> str | None:
+    """公司申报索引 JSON 文本（非 200/网络穷尽 → None）。@author yys"""
+    resp = await _edgar_get(SUBMISSIONS_URL.format(cik=cik), ua)
+    if resp is None or resp.status_code != 200:
+        return None
+    return resp.text
+
+
+async def fetch_form4_text(cik: int, accession: str, primary_doc: str,
+                           ua: str) -> str | None:
+    """Form 4 原始 XML 文本（404/失败 → None，数据缺不重试轰炸）。@author yys"""
+    resp = await _edgar_get(form4_url(cik, accession, primary_doc), ua)
+    if resp is None or resp.status_code != 200:
+        return None
+    return resp.text
