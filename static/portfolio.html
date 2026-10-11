@@ -153,11 +153,15 @@ table.holdings { width: 100%; border-collapse: collapse; }
 .approx-tag { font-style: normal; font-size: 11px; color: var(--txt3); margin-left: 4px; }
 
 /* ---- K线弹层成交列表：方向色与 --up/--down 同源（红涨绿跌） @author yys ---- */
+/* td/th 规则带 .kline-modal 前缀：特异性 0-2-1 压过同源序靠后的 .modal th/td（0-1-1）
+   通用弹窗表格规则，否则 padding/字号/font-weight 被级联覆盖成死样式，还会意外
+   吃进 border-bottom；nowrap 为有意保留（短列内容防窄屏挤压换行） */
 .kl-trades { margin-top: 10px; border-top: 1px solid var(--bg); padding-top: 8px; }
 .kl-trades h4 { margin: 0 0 6px; font-size: 12px; color: var(--txt2); font-weight: 600; }
-.kl-trades table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.kl-trades td, .kl-trades th { padding: 3px 8px; text-align: left; }
-.kl-trades th { color: var(--txt2); font-weight: 500; }
+.kline-modal .kl-trades table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.kline-modal .kl-trades td, .kline-modal .kl-trades th { padding: 3px 8px; text-align: left;
+  font-size: 12px; border-bottom: none; white-space: nowrap; }
+.kline-modal .kl-trades th { color: var(--txt2); font-weight: 500; }
 .kl-trades .t-side { font-weight: 600; }
 .kl-trades .t-buy { color: var(--up); }
 .kl-trades .t-sell { color: var(--down); }
@@ -2178,6 +2182,7 @@ const KL = {
   sym: '', tf: 'day', data: {},        // tf -> {bars, rsi_series, macd_series, kdj_series, marks, volume_mode, _at}
   off: 0, count: 120,                  // 可见窗口：全量尾部锚定，off=从可见起点到全量尾部的偏移
   ind: 'rsi', drag: null, pinch: null, tipIdx: -1,
+  _tradesSig: '',                      // 成交列表渲染签名（klRenderTrades 守卫，内容相关才重建）
 };
 
 /**
@@ -2211,6 +2216,7 @@ async function openKline(sym) {
   document.getElementById('klInfo').textContent = '加载中…';
   // 打开即清空上一只标的的残图/浮层：加载中/失败等任何中间态不得残留旧数据
   klClearCanvas();
+  document.getElementById('klTrades').hidden = true;   // 换标的瞬态：隐藏上一只的成交列表（klRenderTrades 换数后重渲染）
   document.getElementById('klineMask').classList.add('show');
   try {
     await klApply('day');
@@ -2321,18 +2327,25 @@ function klRender() {
 
 /**
  * 成交列表：每笔买卖 + 相对最新收盘的至今涨跌幅（trades 来自 /api/kline payload）。
- * 无成交记录隐藏容器；末根收盘取当前周期全量 bars 尾根（分时=最新桶），null 安全。@author yys
+ * 无成交记录隐藏容器；末根收盘取当前周期全量 bars 尾根（分时=最新桶），null 安全。
+ * 签名守卫：klRender 触发源含未合帧的拖动/悬浮（每秒可达数百次），而列表内容只依赖
+ * 标的/周期/笔数/尾根收盘、与视口无关——签名不变直接跳过；trades 数组引用每次 klRender
+ * 都是新字面量不可作签名，故用内容相关字符串（仅当调用链 klRender→本函数，trades 恒已赋值）。
+ * @author yys
  */
 function klRenderTrades() {
   const box = document.getElementById('klTrades');
   if (!box) return;
   const trades = KL.trades || [];
-  if (!trades.length) { box.hidden = true; return; }
-  box.hidden = false;
   const d = KL.data[KL.tf];
   const bars = (d && d.bars) || [];
   const last = bars.length ? bars[bars.length - 1] : null;
   const lastPx = last ? +last.close : null;
+  const sig = KL.sym + '|' + KL.tf + '|' + trades.length + '|' + lastPx;
+  if (KL._tradesSig === sig) return;   // 内容未变：悬浮/拖动/缩放路径幂等跳过
+  KL._tradesSig = sig;                 // 记录前置：hidden 早退分支同样入签名，后续帧不重复写 DOM
+  if (!trades.length) { box.hidden = true; return; }
+  box.hidden = false;
   const rows = trades.map(t => {
     const chg = (lastPx && +t.price) ? (lastPx - +t.price) / +t.price * 100 : null;
     const sideCls = t.side === 'BUY' ? 't-buy' : 't-sell';
