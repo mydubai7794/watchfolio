@@ -140,6 +140,9 @@
   QDII_IMAP_USER/QDII_IMAP_PASSWORD、QDII_LP_APP_KEY/APP_SECRET/ACCESS_TOKEN。
 - 真实 IP/域名/运维命令见 `AGENTS.local.md`（不入库）。
 - 提交前门禁：`python3 scripts/check_secrets.py`。
+- **push 前必查泄露**：远程仓库在 GitHub，push 即公开/上云——push 前必须跑
+  check_secrets 门禁 + 人工复核 diff 无个人秘钥/真实 IP/域名/凭证/token
+  （qdii.env、AGENTS.local.md、.mcp.json、ledger_seed.py 永不入库）。
 - MCP 配置：`.mcp.json` 含数据库真实连接值、已 gitignore；仓库内提供
   `.mcp.json.example` 占位模板，复制为 `.mcp.json` 并填入真实值即可。
 
