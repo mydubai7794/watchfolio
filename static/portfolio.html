@@ -399,6 +399,16 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
     <div class="macro-grid" id="macroGrid"></div>
   </section>
 
+  <!-- 决策上下文：facts-only 因子面板（SPY基准/利率/CPI/信用利差/广度，日更粒度，
+       与外部 Agent 接口同源 60s 缓存） -->
+  <section class="card pad">
+    <div class="card-head">
+      <div class="card-title">决策上下文</div>
+      <div class="card-note">日更粒度 · facts only · 供外部 Agent 决策</div>
+    </div>
+    <div class="macro-grid" id="ctxGrid"></div>
+  </section>
+
   <!-- 资产走势：tab 胶囊组 + 信息条 + 无轴图表 -->
   <section class="card pad">
     <div class="card-head">
@@ -472,12 +482,15 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
           <th class="sortable" onclick="sortBy('today_pnl')">今日盈亏 <span class="arrow" id="ar_today_pnl"></span></th>
           <th class="sortable" onclick="sortBy('position_pnl')">持仓盈亏 <span class="arrow" id="ar_position_pnl"></span></th>
           <th class="sortable" onclick="sortBy('position_pnl_pct')">盈亏比例 <span class="arrow" id="ar_position_pnl_pct"></span></th>
+          <th>RSI14</th>
+          <th>vs SPY(20d)</th>
+          <th>内部人90d</th>
           <th class="sortable" onclick="sortBy('cost_price')">成本价 <span class="arrow" id="ar_cost_price"></span></th>
           <th class="sortable" onclick="sortBy('quantity')">数量 <span class="arrow" id="ar_quantity"></span></th>
         </tr></thead>
         <tbody>
           <!-- 首屏骨架占位：overview 返回后由 renderPositions 整体替换 -->
-          <tr><td colspan="9" style="padding:12px 0 0"><div class="skel" style="height:88px"></div></td></tr>
+          <tr><td colspan="12" style="padding:12px 0 0"><div class="skel" style="height:88px"></div></td></tr>
         </tbody>
       </table>
       <div class="mobile-list" id="mobileList">
@@ -755,6 +768,40 @@ function renderMacro(d) {
   });
   if (!box.children.length) box.innerHTML = '<div class="macro-asof">暂无数据</div>';
 }
+
+// ===== 决策上下文（facts only，overview.context 同源 60s 缓存）=====
+// @author yys
+function ctxVal(v, suffix) {
+  return v == null ? '--' : (v > 0 ? '+' : '') + fmt(v) + (suffix || '');
+}
+function renderContext(d) {
+  const box = document.getElementById('ctxGrid');
+  if (!box) return;
+  const c = d && d.context;
+  if (!c) {
+    box.innerHTML = '<div class="empty" style="grid-column:1/-1">暂无决策上下文数据</div>';
+    return;
+  }
+  const spy = c.spy, br = c.breadth, cs = c.credit_spread_hy,
+        cpi = c.cpi_yoy, u10 = c.us10y;
+  const cells = [
+    ['SPY 基准', spy ? `${fmt(spy.close)}<span class="macro-asof"> · ${spy.asof}</span>` : '--',
+     spy && spy.chg_pct_1d != null ? `<span class="${cls(spy.chg_pct_1d)}">${ctxVal(spy.chg_pct_1d, '%')}</span>` : ''],
+    ['US 10Y', u10 && u10.price != null ? fmt(u10.price, 2) + '%'
+      : (u10 && u10.dgs10_fred != null ? fmt(u10.dgs10_fred, 2) + '%' : '--'),
+     u10 && u10.asof ? `<span class="macro-asof">${u10.asof}</span>` : ''],
+    ['CPI 同比', cpi ? ctxVal(cpi.value, '%') : '--',
+     cpi ? `<span class="macro-asof">${cpi.asof}</span>` : ''],
+    ['信用利差 HY OAS', cs ? fmt(cs.value, 2) + '%' : '--',
+     cs ? `<span class="macro-asof">${cs.asof}</span>` : ''],
+    ['市场广度 RSP/SPY', br ? fmt(br.rsp_spy_ratio, 4) : '--',
+     br && br.chg_pct_5d != null ? `5日 <span class="${cls(br.chg_pct_5d)}">${ctxVal(br.chg_pct_5d, '%')}</span>` : ''],
+  ];
+  box.innerHTML = cells.map(([t, v, s]) =>
+    `<div class="macro-cell"><div class="macro-head">${t}</div>` +
+    `<div class="macro-val">${v}</div><div class="macro-asof">${s || ''}</div></div>`
+  ).join('');
+}
 // sparkline：2px 折线 + 15%→0 渐变填充 + 悬浮时间/价格浮层。
 // data 兼容两种格式：库内分时 [ts,price] 对（ts 为 UTC naive 字符串，浮层显示
 // 北京时间）与 fx_spark 纯价格序列（USDHKD 近5日日线，无时间戳只显价格）
@@ -820,6 +867,7 @@ function sortBy(key) {
   sortDir = (sortKey === key) ? -sortDir : -1;   // 同键 toggle 方向，新键默认降序
   sortKey = key;
   renderPositions(lastOverview);
+  renderContext(lastOverview);
 }
 function updateSortArrows() {
   Object.keys(SORTABLE).forEach(k => {
@@ -883,7 +931,7 @@ function renderPositions(d) {
     const hadClosed = (d.closed || []).length > 0;
     const emptyTxt = hadClosed ? '已全部清仓，展开下方「已清仓」分区查看'
       : '暂无持仓，点击右上角「编辑持仓」添加';
-    tbody.innerHTML = `<tr><td colspan="9" class="empty">${emptyTxt}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="12" class="empty">${emptyTxt}</td></tr>`;
     mlist.innerHTML = `<div class="empty">${emptyTxt}</div>`;
     return;
   }
@@ -901,6 +949,18 @@ function renderPositions(d) {
     // 现价 + 夜盘增量徽标（盘后/夜盘时段且字段齐备才显示）
     const priceHtml = p.price ? fmt(p.price, p.market==='HKFUND'?4:2) : '--';
     const nb = nightBadge(p, session, nightOf(d).window);
+    // 决策上下文因子列（仅美股有值；基金/港股显示 —）
+    const f = (d.context && d.context.factors && d.context.factors[p.symbol]) || null;
+    const rsiHtml = f && f.rsi14 != null ? fmt(f.rsi14, 1) : '—';
+    const relHtml = f && f.spy_rel_20d_pct != null
+      ? `<span class="${cls(f.spy_rel_20d_pct)}">${ctxVal(f.spy_rel_20d_pct, '%')}</span>` : '—';
+    let insHtml = '—';
+    if (f && f.insider_note === 'fpi_no_form4') insHtml = 'FPI';
+    else if (f && f.insider_90d) {
+      const v = f.insider_90d.net_value_usd;
+      insHtml = v == null ? `${f.insider_90d.buys}/${f.insider_90d.sells}笔`
+        : `<span class="${cls(v)}">${sign(v)}$${fmt(Math.abs(v) / 1000, 1)}k</span>`;
+    }
     const tr = document.createElement('tr');
     tr.innerHTML = `<td><div>${esc(p.name||p.symbol)}${tags}</div><div class="sym"><span class="sym-link" data-sym="${esc(p.symbol)}" title="查看日K">${esc(p.symbol)}</span><span class="rule-btn" data-sym="${esc(p.symbol)}" title="策略设置">⚙</span> ${esc(sub)}</div></td>
       <td class="p-price"><span class="pv">${priceHtml}</span>${nb}</td>
@@ -909,6 +969,7 @@ function renderPositions(d) {
       <td class="${cls(p.today_pnl)}">${p.today_pnl===null?'--':sign(p.today_pnl)+'$'+fmt(Math.abs(p.today_pnl))}</td>
       <td class="${cls(p.position_pnl)}">${p.position_pnl===null?'--':sign(p.position_pnl)+'$'+fmt(Math.abs(p.position_pnl))}</td>
       <td class="${cls(p.position_pnl_pct)}">${p.position_pnl_pct===null?'--':sign(p.position_pnl_pct)+fmt(p.position_pnl_pct)+'%'}</td>
+      <td>${rsiHtml}</td><td>${relHtml}</td><td>${insHtml}</td>
       <td>${fmt(p.cost_price)}</td><td>${fmt(p.quantity,0)}</td>`;
     tbody.appendChild(tr);
     // 移动端卡片：行1 名称+tags | 现价+涨跌幅；行2 三段 Micro（市值·数量·成本 | 今日 | 持仓）
@@ -1083,6 +1144,7 @@ function renderOverview(d) {
 
   renderMarket(d);
   renderPositions(d);
+  renderContext(d);
   renderClosed(d);
   drawAnalysis(d);
   // overview 到达即触发分时重绘：baseTotalCache 已更新，消除最长 30s 轮询空窗的口径偏差
