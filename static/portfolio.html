@@ -568,6 +568,11 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
       <button class="kline-close" onclick="closeKline()">×</button>
     </div>
     <div class="kline-tip" id="klTip" hidden></div>
+    <div class="kline-intabs kline-marks" id="klMarkToggles">
+      <button data-mk="levels">档位</button>
+      <button data-mk="fib">Fib</button>
+      <button data-mk="guard">止损/22日高</button>
+    </div>
     <canvas id="klMain"></canvas>
     <canvas id="klVol"></canvas>
     <div class="kline-intabs" id="klIndTabs">
@@ -2182,8 +2187,36 @@ const KL = {
   sym: '', tf: 'day', data: {},        // tf -> {bars, rsi_series, macd_series, kdj_series, marks, volume_mode, _at}
   off: 0, count: 120,                  // 可见窗口：全量尾部锚定，off=从可见起点到全量尾部的偏移
   ind: 'rsi', drag: null, pinch: null, tipIdx: -1,
+  toggles: {levels: false, fib: false, guard: false},  // 标注线组开关：默认全关，localStorage 记忆
   _tradesSig: '',                      // 成交列表渲染签名（klRenderTrades 守卫，内容相关才重建）
 };
+
+/**
+ * 标注线组开关加载：localStorage 持久化（key klMarkToggles，JSON 三布尔对象）。
+ * 形状校验失败/隐私模式抛异常 → 保持默认全关，无报错。@author yys
+ */
+function klLoadToggles() {
+  try {
+    const v = JSON.parse(localStorage.getItem('klMarkToggles') || '');
+    if (v && typeof v === 'object' && typeof v.levels === 'boolean' &&
+        typeof v.fib === 'boolean' && typeof v.guard === 'boolean') {
+      KL.toggles = {levels: v.levels, fib: v.fib, guard: v.guard};
+    }
+  } catch (e) { /* localStorage 不可用/值损坏：保持默认全关 */ }
+  klSyncToggles();
+}
+
+/** 三个开关按钮选中态与 KL.toggles 同步。@author yys */
+function klSyncToggles() {
+  document.querySelectorAll('#klMarkToggles button').forEach(b =>
+    b.classList.toggle('on', !!KL.toggles[b.dataset.mk]));
+}
+
+/** 开关状态写回 localStorage（隐私模式写失败静默降级为内存态）。@author yys */
+function klSaveToggles() {
+  try { localStorage.setItem('klMarkToggles', JSON.stringify(KL.toggles)); }
+  catch (e) { /* 写失败忽略 */ }
+}
 
 /**
  * 拉取指定周期 K线（客户端 60s 缓存，命中不重发；_at 为取数时间戳）。
@@ -2369,7 +2402,8 @@ function klGeom(W, count) {
 }
 
 /**
- * 主图：蜡烛（红涨绿跌）+ 右侧价格轴 + 底部日期 + 成本/档位/止损/22日高标注虚线
+ * 主图：蜡烛（红涨绿跌）+ 右侧价格轴 + 底部日期 + 档位/止损/22日高标注虚线
+ * （按组开关选中才画，KL.toggles；成本线已移 klTip 悬浮显示）
  * + 日K均线叠加（MA50/MA200）+ 斐波那契回撤档位线（仅 day 周期有 overlays）
  * + 悬浮十字竖线（date：日/周/月=YYYY-MM-DD，分时=北京时间 MM-DD HH:MM）。@author yys
  */
@@ -2381,17 +2415,22 @@ function klDrawMain(bars, marks, ov) {
   const { pad, cw, x } = klGeom(W, bars.length);
   let lo = Math.min(...bars.map(b => +b.low));
   let hi = Math.max(...bars.map(b => +b.high));
+  // 标注线按组开关门控（默认全关，localStorage 记忆）；成本线不画图（klTip 悬浮显示）；
+  // y 轴 lo/hi 由下方 lines.forEach 拉伸——lines 只含可见线，隐藏组不撑开图面
   const lines = [];
-  if (marks.cost != null) lines.push(['成本', +marks.cost, '#E6A23C']);
-  (marks.levels || []).forEach(v => lines.push(
+  if (KL.toggles.levels) (marks.levels || []).forEach(v => lines.push(
     [(v.pct > 0 ? '+' : '') + v.pct + '%', +v.price, v.pct > 0 ? DOWN_COLOR : TXT2]));
-  if (marks.stop_level != null) lines.push(['止损', +marks.stop_level, UP_COLOR]);
-  if (marks.hhv22 != null) lines.push(['22日高', +marks.hhv22, '#2A6CF0']);
-  const fib = ov && ov.fib;
-  if (fib && fib.levels) {
-    [['Fib38.2', fib.levels['382']], ['Fib50', fib.levels['500']],
-     ['Fib61.8', fib.levels['618']]]
-      .forEach(([nm, p]) => { if (p != null) lines.push([nm, +p, '#8E9ABF']); });
+  if (KL.toggles.guard) {
+    if (marks.stop_level != null) lines.push(['止损', +marks.stop_level, UP_COLOR]);
+    if (marks.hhv22 != null) lines.push(['22日高', +marks.hhv22, '#2A6CF0']);
+  }
+  if (KL.toggles.fib) {
+    const fib = ov && ov.fib;
+    if (fib && fib.levels) {
+      [['Fib38.2', fib.levels['382']], ['Fib50', fib.levels['500']],
+       ['Fib61.8', fib.levels['618']]]
+        .forEach(([nm, p]) => { if (p != null) lines.push([nm, +p, '#8E9ABF']); });
+    }
   }
   lines.forEach(([, p]) => { lo = Math.min(lo, p); hi = Math.max(hi, p); });
   const span = (hi - lo) || 1;
@@ -2728,7 +2767,8 @@ function klIdxAt(e) {
 
 /**
  * 悬浮信息浮层：时间戳 + OHLC + 涨跌幅（相对前一桶，首根不显示）+ 量/tick数
- * + 当前位置 RSI/MACD/KDJ 值；屏幕边缘自动翻转防溢出。@author yys
+ * + 成本（有持仓成本的标的才显示，原主图成本线移此）+ 当前位置 RSI/MACD/KDJ 值；
+ * 屏幕边缘自动翻转防溢出。@author yys
  */
 function klShowTip(e, idx) {
   const s = klSlice();
@@ -2748,6 +2788,7 @@ function klShowTip(e, idx) {
     '低 ' + fmt2(b.low) + '　收 ' + fmt2(b.close) +
     (pct == null ? '' : '（' + (pct >= 0 ? '+' : '') + pct.toFixed(2) + '%）') + '<br>' +
     (d.volume_mode === 'ticks' ? 'tick数 ' : '量 ') + (+b.volume).toLocaleString() + '<br>' +
+    (d.marks && d.marks.cost != null ? '成本 ' + fmt2(d.marks.cost) + '<br>' : '') +
     'RSI ' + fmt2(r) + '　MACD ' + fmt2((m.dif || [])[start + idx]) +
     '/' + fmt2((m.dea || [])[start + idx]) + '<br>' +
     'KDJ ' + fmt2((k.k || [])[start + idx]) + '/' + fmt2((k.d || [])[start + idx]) +
@@ -2769,6 +2810,17 @@ function klHideTip() {
 
 // 弹层初始化：事件只绑一次（脚本在 DOM 之后执行，元素均已就绪）
 if (!window._klBound) { klBindEvents(); window._klBound = true; }
+
+// 标注线组开关：点击切换 → 重绘（klRender 对空数据早退，弹层未开时安全）；状态写 localStorage
+document.getElementById('klMarkToggles').addEventListener('click', e => {
+  const b = e.target.closest('button');
+  if (!b || !KL.toggles.hasOwnProperty(b.dataset.mk)) return;
+  KL.toggles[b.dataset.mk] = !KL.toggles[b.dataset.mk];
+  b.classList.toggle('on', KL.toggles[b.dataset.mk]);
+  klSaveToggles();
+  klRender();
+});
+klLoadToggles();
 
 // 持仓行内联入口事件委托：symbol → 日K弹层、⚙ → 策略弹层（桌面表格与移动卡片通用）
 document.addEventListener('click', e => {
