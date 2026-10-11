@@ -46,7 +46,8 @@ K线弹层主图右侧标注虚线 5 组全叠加（成本/止损/22日高/加�
 
 ### 3.2 CSS
 
-`.kline-marks` 一条规则：`margin: 6px 0 2px;`（对齐 .kline-intabs 305 行节奏）。
+不新增规则——按钮行复用 `.kline-intabs` 类（flex 布局/按钮样式/`.on` 选中态/
+`margin: 6px 0 2px` 均由 294-305 行既有规则提供）；`kline-marks` 类仅作语义锚点。
 
 ### 3.3 JS
 
