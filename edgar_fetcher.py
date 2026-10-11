@@ -261,3 +261,108 @@ async def fetch_form4_text(cik: int, accession: str, primary_doc: str,
     if resp is None or resp.status_code != 200:
         return None
     return resp.text
+
+
+# ---------------------------------------------------------------------------
+# 每日轮：刷映射 → 未探测分类 → stock 轮询 Form 4 → 推进水位
+# ---------------------------------------------------------------------------
+
+async def run_edgar_round() -> dict:
+    """一轮完整处理。单标的失败跳过不中断；水位只在申报 XML 成功拉取后推进；
+    XML 拉取失败不推水位（次日自然重试，重复靠 uk_tx INSERT IGNORE 幂等）。@author yys"""
+    ua = await _resolve_ua()
+    tmap = await get_ticker_map()
+    if tmap is None:
+        logger.warning("EDGAR ticker 映射不可用，本轮顺延")
+        return {"ok": False, "reason": "ticker_map"}
+
+    watermark = await db.get_config("EDGAR_WATERMARK")
+    if watermark:
+        since = watermark
+    else:
+        since = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
+
+    holdings = await db.get_holdings(enabled_only=True)
+    stats = {"classified": 0, "polled": 0, "new_tx": 0, "skipped": 0}
+    max_filed = since
+    for h in holdings:
+        if h.get("market") != "US":
+            continue
+        symbol = h["symbol"]
+        at = h.get("asset_type")
+        sub = None
+        try:
+            cik = tmap.get(symbol.upper())
+            if not at:
+                if cik is None:
+                    logger.warning("EDGAR 探测: %s 无 CIK 映射（未分类，下轮再试）",
+                                   symbol)
+                    stats["skipped"] += 1
+                    continue
+                sub = await fetch_submissions(cik, ua)
+                if sub is None:
+                    stats["skipped"] += 1
+                    continue
+                atype = classify_asset_type(
+                    [f["form"] for f in parse_submissions_recent(sub)])
+                if atype is None:
+                    logger.warning("EDGAR 探测: %s 申报类型无法归类，下轮再试", symbol)
+                    stats["skipped"] += 1
+                    continue
+                await db.set_holding_asset_type(symbol, atype)
+                logger.info("EDGAR 分类: %s → %s", symbol, atype)
+                stats["classified"] += 1
+                at = atype
+            if at == "stock":
+                if cik is None:
+                    stats["skipped"] += 1
+                    continue
+                if sub is None:
+                    sub = await fetch_submissions(cik, ua)
+                if sub is None:
+                    stats["skipped"] += 1
+                    continue
+                # accession 级去重：uk_tx 唯一键含可 NULL 的 price 列（MySQL 唯一
+                # 索引不对 NULL 去重），水位 >= 重放会重复插入 NULL 价格行——
+                # 按已入库 accession 跳过，同时省掉重复 XML 请求
+                processed = await db.get_insider_accessions(symbol, days=120)
+                for f in parse_submissions_recent(sub, form_filter="4"):
+                    if f["filed"] >= since and f["accession"] not in processed:
+                        text = await fetch_form4_text(cik, f["accession"],
+                                                      f["primary_doc"], ua)
+                        if text is None:
+                            continue              # 拉取失败不推水位，次日重试
+                        rows = parse_form4_xml(text, symbol, str(cik),
+                                               f["accession"], f["filed"])
+                        if rows:
+                            await db.save_insider_tx(rows)
+                            stats["new_tx"] += len(rows)
+                        max_filed = max(max_filed, f["filed"])
+                stats["polled"] += 1
+        except Exception as e:
+            logger.warning("EDGAR 处理 %s 失败（跳过）: %s", symbol, e)
+            stats["skipped"] += 1
+    if max_filed > since:
+        await db.set_config("EDGAR_WATERMARK", max_filed, "EDGAR Form4 已处理水位")
+    await db.set_config("EDGAR_LAST_OK",
+                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "EDGAR 上轮成功时间")
+    logger.info("EDGAR 轮完成: %s", stats)
+    return {"ok": True, **stats}
+
+
+async def edgar_daily_loop():
+    """后台任务：启动即跑一次，此后每日北京时间 23:30（错峰 22:35 ledger-fx /
+    22:40 macro / 07:00 日K）。@author yys"""
+    while True:
+        try:
+            await run_edgar_round()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.exception("EDGAR 循环异常: %s", e)
+        now = datetime.now()
+        target = now.replace(hour=23, minute=30, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        await asyncio.sleep((target - now).total_seconds())

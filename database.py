@@ -1064,6 +1064,16 @@ async def get_insider_tx(symbol: str, days: int = 90) -> list[dict]:
         (symbol, days))
 
 
+async def get_insider_accessions(symbol: str, days: int = 120) -> set[str]:
+    """近 N 天已入库的申报编号集合（accession 级去重：uk_tx 唯一键含可 NULL
+    的 price 列，MySQL 唯一索引不对 NULL 去重，水位 >= 重放靠此防重复插入）。@author yys"""
+    rows = await execute_dict(
+        "SELECT DISTINCT accession FROM insider_tx WHERE symbol = %s AND "
+        "filed_date >= DATE_SUB(CURDATE(), INTERVAL %s DAY)",
+        (symbol, days))
+    return {r["accession"] for r in rows}
+
+
 async def update_holding_names(naming: dict[str, str]) -> int:
     """回写行情接口返回的名称。
 

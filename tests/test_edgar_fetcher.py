@@ -338,3 +338,144 @@ def test_get_ticker_map_bad_payload_not_poisoned(monkeypatch):
     monkeypatch.setattr(db, "get_config", fake_cfg_stale)
     _patch_client(monkeypatch, lambda url: _FakeResp(500))
     assert asyncio.run(ef.get_ticker_map()) == {"MU": 1}
+
+
+# ---------------------------------------------------------------------------
+# 每日轮：探测分类 + Form 4 增量 + 水位（全部打桩零网络）
+# ---------------------------------------------------------------------------
+
+
+def _round_env(monkeypatch, holdings, forms_by_cik, form4_texts, watermark=None):
+    """打桩 db 与网络层，返回记录器。forms_by_cik: {cik: submissions_json文本}。"""
+    import database as db
+
+    cfg = {"EDGAR_WATERMARK": watermark,
+           "EDGAR_TICKER_MAP_TS": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    cfg = {k: v for k, v in cfg.items() if v is not None}
+    rec = {"classified": [], "saved": [], "set_cfg": []}
+
+    async def fake_cfg(key):
+        return cfg.get(key)
+
+    async def fake_set(key, value, remark=""):
+        cfg[key] = value
+        rec["set_cfg"].append((key, value))
+
+    async def fake_holdings(enabled_only=True):
+        return holdings
+
+    async def fake_classify(symbol, at):
+        rec["classified"].append((symbol, at))
+
+    async def fake_save(rows):
+        rec["saved"].extend(rows)
+        return len(rows)
+
+    monkeypatch.setattr(db, "get_config", fake_cfg)
+    monkeypatch.setattr(db, "set_config", fake_set)
+    monkeypatch.setattr(db, "get_holdings", fake_holdings)
+    monkeypatch.setattr(db, "set_holding_asset_type", fake_classify)
+    monkeypatch.setattr(db, "save_insider_tx", fake_save)
+    monkeypatch.setattr(db, "get_insider_accessions", _async_ret(set()))
+    monkeypatch.setattr(ef, "_resolve_ua", _async_ret("UA"))
+    monkeypatch.setattr(ef, "_TICKER_MAP", {"MU": 723125, "BABA": 1577552,
+                                            "SMH": 1234567})
+    fetched = []
+
+    async def fake_sub(cik, ua):
+        return forms_by_cik.get(cik)
+
+    async def fake_form4(cik, accession, doc, ua):
+        fetched.append((cik, accession))
+        return form4_texts.get(accession)
+
+    monkeypatch.setattr(ef, "fetch_submissions", fake_sub)
+    monkeypatch.setattr(ef, "fetch_form4_text", fake_form4)
+    return rec, cfg, fetched
+
+
+def _subs_json(cik, forms):
+    return json.dumps({"cik": cik, "filings": {"recent": {
+        "accessionNumber": [f[2] for f in forms],
+        "filingDate": [f[1] for f in forms],
+        "formType": [f[0] for f in forms],
+        "primaryDocument": ["primary_doc.xml"] * len(forms),
+    }}})
+
+
+def test_run_edgar_round_classify_and_poll(monkeypatch):
+    forms_mu = _subs_json(723125, [
+        ("10-Q", "2026-10-05", "0000723125-26-000002"),
+        ("4", "2026-10-08", "0000723125-26-000001"),
+    ])
+    forms_baba = _subs_json(1577552, [("20-F", "2026-06-30", "x-baba-1")])
+    forms_smh = _subs_json(1234567, [("N-CSR", "2026-09-30", "x-smh-1")])
+    holdings = [
+        {"symbol": "MU", "market": "US", "asset_type": None},      # 待探测→stock
+        {"symbol": "BABA", "market": "US", "asset_type": None},    # 待探测→fpi
+        {"symbol": "SMH", "market": "US", "asset_type": None},     # 待探测→etf
+        {"symbol": "HK0000740297", "market": "HKFUND", "asset_type": None},
+    ]
+    form4 = {"0000723125-26-000001": FORM4_XML}
+    rec, cfg, fetched = _round_env(
+        monkeypatch, holdings,
+        {723125: forms_mu, 1577552: forms_baba, 1234567: forms_smh},
+        form4, watermark="2026-10-01")
+    r = asyncio.run(ef.run_edgar_round())
+    assert r["ok"] is True
+    assert rec["classified"] == [("MU", "stock"), ("BABA", "fpi"), ("SMH", "etf")]
+    # 只有 stock 拉 Form 4；fpi/etf 零 Form 4 请求
+    assert fetched == [(723125, "0000723125-26-000001")]
+    assert len(rec["saved"]) == 2                  # FORM4_XML 两笔有效交易
+    # 水位推进到已处理的最大 filingDate
+    assert dict(rec["set_cfg"])["EDGAR_WATERMARK"] == "2026-10-08"
+    assert any(k == "EDGAR_LAST_OK" for k, _ in rec["set_cfg"])
+
+
+def test_run_edgar_round_form4_fetch_fail_keeps_watermark(monkeypatch):
+    forms_mu = _subs_json(723125, [("10-Q", "2026-10-05", "0000723125-26-000002"),
+                                   ("4", "2026-10-08", "0000723125-26-000001")])
+    holdings = [{"symbol": "MU", "market": "US", "asset_type": "stock"}]
+    rec, cfg, fetched = _round_env(
+        monkeypatch, holdings, {723125: forms_mu}, {},
+        watermark="2026-10-01")                    # form4_texts 空 → XML 拉取失败
+    r = asyncio.run(ef.run_edgar_round())
+    assert r["ok"] is True and r["new_tx"] == 0
+    # 拉取失败的申报不推水位 → 次日重试
+    assert not any(k == "EDGAR_WATERMARK" for k, _ in rec["set_cfg"])
+
+
+def test_run_edgar_round_first_round_backfill_90d(monkeypatch):
+    forms_mu = _subs_json(723125, [
+        ("4", "2026-10-08", "0000723125-26-000001"),
+        ("4", "2026-06-01", "0000723125-26-000000"),   # 90 天外：since 之前不拉
+    ])
+    holdings = [{"symbol": "MU", "market": "US", "asset_type": "stock"}]
+    rec, cfg, fetched = _round_env(
+        monkeypatch, holdings, {723125: forms_mu}, {"0000723125-26-000001": FORM4_XML},
+        watermark=None)                            # 无水位 → 首轮回看 90 天
+    r = asyncio.run(ef.run_edgar_round())
+    assert r["ok"] is True
+    # 只有 2026-10-08（≥ today-90）被处理；2026-06-01 在窗口外不拉
+    assert fetched == [(723125, "0000723125-26-000001")]
+
+
+def test_run_edgar_round_skips_processed_accession(monkeypatch):
+    """已入库 accession（uk_tx 对 NULL price 不去重的补偿）不重复拉取/插入。"""
+    import database as db
+
+    forms_mu = _subs_json(723125, [("10-Q", "2026-10-05", "0000723125-26-000002"),
+                                   ("4", "2026-10-08", "0000723125-26-000001")])
+    holdings = [{"symbol": "MU", "market": "US", "asset_type": "stock"}]
+    rec, cfg, fetched = _round_env(
+        monkeypatch, holdings, {723125: forms_mu}, {"0000723125-26-000001": FORM4_XML},
+        watermark="2026-10-01")
+
+    async def fake_accessions(sym, days=120):
+        return {"0000723125-26-000001"}            # 该申报已入库
+
+    monkeypatch.setattr(db, "get_insider_accessions", fake_accessions)
+    r = asyncio.run(ef.run_edgar_round())
+    assert r["ok"] is True and r["new_tx"] == 0
+    assert fetched == []                           # 不再拉 XML
+    assert rec["saved"] == []                      # 不再插入

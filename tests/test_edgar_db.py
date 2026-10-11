@@ -100,6 +100,23 @@ def test_get_insider_tx_window(monkeypatch):
     assert cap["args"] == ("MU", 90)
 
 
+def test_get_insider_accessions_distinct(monkeypatch):
+    import database as db
+
+    cap = {}
+
+    async def fake_exec_dict(sql, args=None, _pool=None):
+        cap["sql"], cap["args"] = sql, args
+        return [{"accession": "a-1"}, {"accession": "a-1"}, {"accession": "a-2"}]
+
+    monkeypatch.setattr(db, "execute_dict", fake_exec_dict)
+    out = asyncio.run(db.get_insider_accessions("MU", days=120))
+    assert out == {"a-1", "a-2"}
+    assert "DISTINCT accession" in cap["sql"]
+    assert "FROM insider_tx" in cap["sql"]
+    assert cap["args"] == ("MU", 120)
+
+
 def test_set_holding_asset_type(monkeypatch):
     import database as db
 
