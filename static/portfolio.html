@@ -785,15 +785,15 @@ function renderContext(d) {
   const spy = c.spy, br = c.breadth, cs = c.credit_spread_hy,
         cpi = c.cpi_yoy, u10 = c.us10y;
   const cells = [
-    ['SPY 基准', spy ? `${fmt(spy.close)}<span class="macro-asof"> · ${spy.asof}</span>` : '--',
+    ['SPY 基准', spy ? `${fmt(spy.close)}<span class="macro-asof"> · ${esc(spy.asof)}</span>` : '--',
      spy && spy.chg_pct_1d != null ? `<span class="${cls(spy.chg_pct_1d)}">${ctxVal(spy.chg_pct_1d, '%')}</span>` : ''],
     ['US 10Y', u10 && u10.price != null ? fmt(u10.price, 2) + '%'
       : (u10 && u10.dgs10_fred != null ? fmt(u10.dgs10_fred, 2) + '%' : '--'),
-     u10 && u10.asof ? `<span class="macro-asof">${u10.asof}</span>` : ''],
+     u10 && u10.asof ? `<span class="macro-asof">${esc(u10.asof)}</span>` : ''],
     ['CPI 同比', cpi ? ctxVal(cpi.value, '%') : '--',
-     cpi ? `<span class="macro-asof">${cpi.asof}</span>` : ''],
+     cpi ? `<span class="macro-asof">${esc(cpi.asof)}</span>` : ''],
     ['信用利差 HY OAS', cs ? fmt(cs.value, 2) + '%' : '--',
-     cs ? `<span class="macro-asof">${cs.asof}</span>` : ''],
+     cs ? `<span class="macro-asof">${esc(cs.asof)}</span>` : ''],
     ['市场广度 RSP/SPY', br ? fmt(br.rsp_spy_ratio, 4) : '--',
      br && br.chg_pct_5d != null ? `5日 <span class="${cls(br.chg_pct_5d)}">${ctxVal(br.chg_pct_5d, '%')}</span>` : ''],
   ];
