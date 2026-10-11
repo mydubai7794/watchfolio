@@ -151,9 +151,19 @@ def parse_form4_xml(text: str, symbol: str, cik: str, accession: str,
     return rows
 
 
+_OPEN_BUY_CODES = {"P"}    # 公开市场买入（市场惯例口径：InsiderAlpha 等同款）
+_OPEN_SELL_CODES = {"S"}   # 公开市场卖出
+
+
 def build_insider_summary(rows: list[dict], today: str) -> dict | None:
-    """近 90 天净买入聚合（纯函数，rows 为 DB 行）：net_shares/net_value_usd/
-    buys/sells/tx_count/since；value 缺失按 0 计；空窗口返回 None。@author yys"""
+    """近 90 天公开市场净买入聚合（纯函数，rows 为 DB 行）：
+    net_shares/net_value_usd/buys/sells/tx_count/since；value 缺失按 0 计；
+    空窗口返回 None。
+
+    口径（2026-10-11 对账修正）：只计 P（公开市场买）/S（公开市场卖）；
+    授予A/行权M/赠与G/税务代扣F/转换C 等非主动交易只进 tx_count，
+    不计入买卖与净额——此前把 Acquired（获得方）全算买入，RSU 授予
+    误计 buys。@author yys"""
     cutoff = (datetime.strptime(today, "%Y-%m-%d") - timedelta(days=90)) \
         .strftime("%Y-%m-%d")
     sel = [r for r in rows if str(r.get("filed_date"))[:10] >= cutoff]
@@ -163,15 +173,19 @@ def build_insider_summary(rows: list[dict], today: str) -> dict | None:
     net_value = 0.0
     buys = sells = 0
     for r in sel:
-        sign = 1 if r["action"] == "A" else -1
+        code = str(r.get("tx_code") or "").upper()
+        if r["action"] == "A" and code in _OPEN_BUY_CODES:
+            sign = 1
+            buys += 1
+        elif r["action"] == "D" and code in _OPEN_SELL_CODES:
+            sign = -1
+            sells += 1
+        else:
+            continue
         net_shares += sign * int(r["shares"])
         v = r.get("value_usd")
         if v is not None:
             net_value += sign * float(v)
-        if r["action"] == "A":
-            buys += 1
-        else:
-            sells += 1
     return {"net_shares": net_shares, "net_value_usd": round(net_value, 2),
             "buys": buys, "sells": sells, "tx_count": len(sel), "since": cutoff}
 

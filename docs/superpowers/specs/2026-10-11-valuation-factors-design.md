@@ -27,6 +27,10 @@
   `SecurityStaticInfo`，decimal 需转 float；负值/零语义见 §3.3）。
 - **BABA 实测**：eps_ttm=4.39、bps=64.37（USD/ADS 口径，券商已完成 CNY→USD、
   普通股→ADS 换算）——P/E、P/B 直接 `price/eps_ttm`、`price/bps`，无需任何换算。
+- **dividend_yield 字段实为每股 TTM 股息金额（USD）非百分比**（2026-10-11
+  对账修正：NVDA 落库 0.52 = $0.52/股，0.01+0.01+0.25+0.25，真实股息率
+  = 0.52/现价 ≈ 0.23%）——注入层 `÷现价 ×100` 换算真实股息率，列名沿用
+  长桥 SDK 字段名。
 - **ETF 字段是噪声，必须门控**：实测 QQQ eps_ttm=-88.5（UIT 会计值）、SMH 全 0。
   门控规则（优先级从上到下，注入层 reason 推导口径，批2审查后与实现一致）：
   1. `asset_type == 'etf'` → `reason='fund'`（落库侧 ETF 行置 None 覆盖脏值）；

@@ -2838,11 +2838,18 @@ async def _build_agent_context() -> dict:
                         v_reason = "no_growth"
                     else:
                         v_reason = None
+                    # 长桥 dividend_yield 字段实为每股 TTM 股息金额（USD）
+                    # 而非百分比（2026-10-11 对账修正：NVDA 0.52=$0.52/股，
+                    # 0.01+0.01+0.25+0.25）——注入时 ÷现价 ×100 换算真实
+                    # 股息率；现价缺失或无股息置 null。@author yys
+                    v_dy = v.get("dividend_yield")
+                    dy_pct = round(v_dy / v_price * 100, 2) \
+                        if v_dy and v_price and v_price > 0 else None
                     f["valuation"] = {
                         "pe_ttm": pe, "pb": pb, "peg": peg,
                         "eps_ttm": v_eps, "bps": v_bps,
                         "growth_pct": v_g,
-                        "dividend_yield": v.get("dividend_yield"),
+                        "dividend_yield": dy_pct,
                         "reason": v_reason,
                         "updated_at": v.get("updated_at")}
                     ctx["factors"][sym] = f

@@ -139,19 +139,27 @@ def test_parse_form4_xml():
 def test_build_insider_summary():
     today = "2026-10-11"
     rows = [
-        {"filed_date": date(2026, 10, 1), "action": "A", "shares": 141000,
-         "value_usd": 19035000.0},
-        {"filed_date": date(2026, 9, 20), "action": "D", "shares": 5000,
-         "value_usd": 700000.0},
-        {"filed_date": date(2026, 1, 1), "action": "A", "shares": 999999,
-         "value_usd": 9999999.0},                # 90 天窗口外剔除
-        {"filed_date": date(2026, 8, 1), "action": "A", "shares": 1000,
-         "value_usd": None},                     # 金额缺失按 0 计
+        {"filed_date": date(2026, 10, 1), "action": "A", "tx_code": "P",
+         "shares": 141000, "value_usd": 19035000.0},      # 公开市场买
+        {"filed_date": date(2026, 9, 20), "action": "D", "tx_code": "S",
+         "shares": 5000, "value_usd": 700000.0},          # 公开市场卖
+        {"filed_date": date(2026, 9, 15), "action": "A", "tx_code": "A",
+         "shares": 30000, "value_usd": 8000000.0},        # RSU 授予：只计 tx_count
+        {"filed_date": date(2026, 9, 17), "action": "D", "tx_code": "G",
+         "shares": 438000, "value_usd": 99000000.0},      # 赠与：只计 tx_count
+        {"filed_date": date(2026, 9, 17), "action": "D", "tx_code": "F",
+         "shares": 45728, "value_usd": 10000000.0},       # 税务代扣：只计 tx_count
+        {"filed_date": date(2026, 1, 1), "action": "A", "tx_code": "P",
+         "shares": 999999, "value_usd": 9999999.0},       # 90 天窗口外剔除
+        {"filed_date": date(2026, 8, 1), "action": "A", "tx_code": "P",
+         "shares": 1000, "value_usd": None},              # 金额缺失按 0 计
     ]
     s = ef.build_insider_summary(rows, today)
+    # 只有 P/S 计净额（授予/赠与/代扣 2026-10-11 对账修正前误计）
     assert s["net_shares"] == 141000 - 5000 + 1000
     assert s["net_value_usd"] == 19035000.0 - 700000.0
-    assert s["buys"] == 2 and s["sells"] == 1 and s["tx_count"] == 3
+    assert s["buys"] == 2 and s["sells"] == 1
+    assert s["tx_count"] == 6                 # 窗口内全部申报（含 A/G/F）
     assert s["since"] == "2026-07-13"
     assert ef.build_insider_summary([], today) is None
 

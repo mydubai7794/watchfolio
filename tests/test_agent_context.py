@@ -40,9 +40,9 @@ def _env(monkeypatch):
             return []
         return [
             {"filed_date": date.today() - timedelta(days=10), "action": "A",
-             "shares": 141000, "value_usd": 19035000.0},
+             "tx_code": "P", "shares": 141000, "value_usd": 19035000.0},
             {"filed_date": date.today() - timedelta(days=21), "action": "D",
-             "shares": 5000, "value_usd": 700000.0},
+             "tx_code": "S", "shares": 5000, "value_usd": 700000.0},
         ]
 
     async def fake_macro_latest():
@@ -213,7 +213,8 @@ def test_agent_context_valuation_injection(monkeypatch):
     assert v_nvda["eps_ttm"] == 8.0
     assert v_nvda["bps"] == pytest.approx(9.5, abs=0.01)
     assert v_nvda["growth_pct"] == pytest.approx(66.67, abs=0.01)
-    assert v_nvda["dividend_yield"] == pytest.approx(0.52, abs=0.01)
+    # 股息率：落库为每股TTM股息USD（0.52=$0.52/股），注入÷现价×100 换算
+    assert v_nvda["dividend_yield"] == pytest.approx(0.325, abs=0.01)
     assert v_nvda["reason"] is None
     assert v_nvda["updated_at"] == "2026-10-11 16:00:00"
     # QQQ：ETF fund 门控（数值/现价全缺 → pe/pb/peg 全 None）
@@ -228,6 +229,8 @@ def test_agent_context_valuation_injection(monkeypatch):
     assert v_baba["pb"] == pytest.approx(2.17, abs=0.01)        # 140/64.37
     assert v_baba["peg"] is None
     assert v_baba["reason"] == "no_growth"
+    # 股息率换算：1.03 USD/股 ÷ 140 现价 = 0.74%
+    assert v_baba["dividend_yield"] == pytest.approx(0.74, abs=0.01)
     # fpi 分支 insider 注记不受 valuation 块影响
     assert ctx["factors"]["BABA"]["insider_note"] == "fpi_no_form4"
     # DRAM：长桥 0 落库（非 None）→ no_data 而非 no_growth（Important-1 锚）
@@ -239,6 +242,8 @@ def test_agent_context_valuation_injection(monkeypatch):
     assert v_g["pe_ttm"] is None and v_g["pb"] is None and v_g["peg"] is None
     assert v_g["eps_ttm"] == 6.0 and v_g["growth_pct"] == 10.0
     assert v_g["reason"] is None
+    # dps=0 无股息 + 现价缺失 → 股息率 null
+    assert v_g["dividend_yield"] is None
 
 
 def _async_ret(v):
