@@ -33,7 +33,7 @@ SUBMISSIONS_JSON = json.dumps({
         "accessionNumber": ["0001045810-26-000001", "0001045810-26-000002",
                             "0001045810-26-000003"],
         "filingDate": ["2026-10-08", "2026-10-05", "2026-09-30"],
-        "formType": ["4", "10-Q", "4"],
+        "form": ["4", "10-Q", "4"],
         "primaryDocument": ["xslF345X05/primary_doc.xml", "nvda-10q.htm",
                             "primary_doc.xml"],
     }}})
@@ -47,6 +47,23 @@ def test_parse_submissions_recent():
     assert form4[0]["accession"] == "0001045810-26-000001"
     assert form4[0]["primary_doc"] == "xslF345X05/primary_doc.xml"
     assert ef.parse_submissions_recent('{"filings":{}}') == []
+
+
+def test_parse_submissions_recent_real_sec_schema():
+    """回归：SEC 真实键名为 form（2026-10-11 线上首轮全 skip 的根因，
+    fixture 曾以 formType 自证通过）；错误键名解析必须为空以防再犯。"""
+    body = json.dumps({"filings": {"recent": {
+        "form": ["10-Q", "4"],
+        "filingDate": ["2026-10-05", "2026-10-08"],
+        "accessionNumber": ["a-1", "a-2"],
+        "primaryDocument": ["d1.xml", "d2.xml"],
+    }}})
+    rows = ef.parse_submissions_recent(body)
+    assert [r["form"] for r in rows] == ["10-Q", "4"]
+    assert ef.parse_submissions_recent(json.dumps(
+        {"filings": {"recent": {"formType": ["4"],
+                                "filingDate": ["2026-10-08"],
+                                "accessionNumber": ["a-1"]}}})) == []
 
 
 FORM4_XML = """<?xml version="1.0"?>
@@ -398,7 +415,7 @@ def _subs_json(cik, forms):
     return json.dumps({"cik": cik, "filings": {"recent": {
         "accessionNumber": [f[2] for f in forms],
         "filingDate": [f[1] for f in forms],
-        "formType": [f[0] for f in forms],
+        "form": [f[0] for f in forms],
         "primaryDocument": ["primary_doc.xml"] * len(forms),
     }}})
 
@@ -430,6 +447,42 @@ def test_run_edgar_round_classify_and_poll(monkeypatch):
     # 水位推进到已处理最大 filingDate 再回撤 3 天（安全边际）
     assert dict(rec["set_cfg"])["EDGAR_WATERMARK"] == "2026-10-05"
     assert any(k == "EDGAR_LAST_OK" for k, _ in rec["set_cfg"])
+
+
+def test_run_edgar_round_excludes_same_name_symbol(monkeypatch):
+    """F（射频识别业务代号）严禁映射到 SEC 同名汽车类发行人：排除标记
+    none，第二轮不再重写；其余标的正常轮询。"""
+    forms_mu = _subs_json(723125, [("10-Q", "2026-10-05", "0000723125-26-000002"),
+                                   ("4", "2026-10-08", "0000723125-26-000001")])
+    holdings = [
+        {"symbol": "F", "market": "US", "asset_type": None},
+        {"symbol": "MU", "market": "US", "asset_type": "stock"},
+    ]
+    form4 = {"0000723125-26-000001": FORM4_XML}
+    rec, cfg, fetched = _round_env(
+        monkeypatch, holdings, {723125: forms_mu}, form4,
+        watermark="2026-10-01")
+    r = asyncio.run(ef.run_edgar_round())
+    assert r["ok"] is True
+    assert rec["classified"] == [("F", "none")]   # 排除标记，不进 stats
+    assert fetched == [(723125, "0000723125-26-000001")]  # MU 正常拉 Form 4
+    # 第二轮（F 已 none）不再重写、不发请求
+    rec["classified"].clear()
+    holdings[0]["asset_type"] = "none"
+    asyncio.run(ef.run_edgar_round())
+    assert rec["classified"] == []
+
+
+def test_run_edgar_round_cik_override_for_etf(monkeypatch):
+    """QQQ 不在 company_tickers 映射时经 _CIK_OVERRIDES 解析并分类 etf。"""
+    forms = _subs_json(1067839, [("NPORT-P", "2026-10-01", "x-qqq-1")])
+    holdings = [{"symbol": "QQQ", "market": "US", "asset_type": None}]
+    rec, cfg, fetched = _round_env(monkeypatch, holdings, {1067839: forms},
+                                   {}, watermark="2026-10-01")
+    r = asyncio.run(ef.run_edgar_round())
+    assert r["ok"] is True
+    assert rec["classified"] == [("QQQ", "etf")]
+    assert fetched == []                          # etf 不拉 Form 4
 
 
 def test_run_edgar_round_form4_fetch_fail_keeps_watermark(monkeypatch):

@@ -30,6 +30,15 @@ EDGAR_WATERMARK_LAG = 3           # 水位落库回撤天数：覆盖索引延�
 # 生产 UA 经 sys_config.EDGAR_UA 配置（网络层热取，见 _resolve_ua）
 DEFAULT_UA = "QDII Portfolio Monitor"
 
+# 同名实体错配排除：SEC 的 F 是同名汽车类发行人，与持仓 F（射频识别业务
+# 代号，见项目 AGENTS.md）非同一实体，SEC 内幕数据不适用 → 首轮标记 none
+# （人工排除语义，阻断每日重试与错配数据落库）
+_EDGAR_EXCLUDE = {"F"}
+# company_tickers.json 仅含个股类发行人，ETF 无映射；QQQ 例外补充经官方
+# 接口实证的信任 CIK（Invesco QQQ Trust, Series 1，NPORT-P 申报、无 10-K/Q），
+# 其余 ETF 保持未探测态每日重试
+_CIK_OVERRIDES = {"QQQ": 1067839}
+
 
 def parse_ticker_map(text: str) -> dict[str, int]:
     """company_tickers.json → {ticker大写: cik}；坏行跳过。@author yys"""
@@ -70,7 +79,7 @@ def parse_submissions_recent(text: str, form_filter: str | None = None) -> list[
     except (json.JSONDecodeError, AttributeError):
         return []
     out = []
-    for form, filed, acc, doc in zip(rec.get("formType") or [],
+    for form, filed, acc, doc in zip(rec.get("form") or [],
                                      rec.get("filingDate") or [],
                                      rec.get("accessionNumber") or [],
                                      rec.get("primaryDocument") or []):
@@ -296,10 +305,16 @@ async def run_edgar_round() -> dict:
         if h.get("market") != "US":
             continue
         symbol = h["symbol"]
+        if symbol.upper() in _EDGAR_EXCLUDE:
+            if not h.get("asset_type"):
+                await db.set_holding_asset_type(symbol, "none")
+                logger.info("EDGAR 排除: %s（SEC 同名实体错配，标记 none）",
+                            symbol)
+            continue
         at = h.get("asset_type")
         sub = None
         try:
-            cik = tmap.get(symbol.upper())
+            cik = tmap.get(symbol.upper()) or _CIK_OVERRIDES.get(symbol.upper())
             if not at:
                 if cik is None:
                     logger.warning("EDGAR 探测: %s 无 CIK 映射（未分类，下轮再试）",
