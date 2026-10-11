@@ -5,6 +5,7 @@ import pytest
 from types import SimpleNamespace
 
 import database as db
+import valuation
 import longport_fetcher
 import edgar_fetcher
 
@@ -39,3 +40,99 @@ def test_upsert_valuation_static_and_get(monkeypatch):
     rows = asyncio.run(db.get_valuations())
     assert rows["NVDA"]["eps_ttm"] == 8.0
     assert rows["NVDA"]["growth_pct"] == 66.67
+
+
+# ---------------------------------------------------------------------------
+# 纯函数：normalize_static_info / parse_eps_growth（实测锚定 fixture）
+# ---------------------------------------------------------------------------
+
+def test_normalize_static_info():
+    infos = [
+        SimpleNamespace(symbol="NVDA.US", eps_ttm=8.0033, bps=9.5014,
+                        dividend_yield=0.52),
+        SimpleNamespace(symbol="BABA.US", eps_ttm=4.3942, bps=64.3653,
+                        dividend_yield=1.03),
+        SimpleNamespace(symbol="SMH.US", eps_ttm=0, bps=0, dividend_yield=0),
+    ]
+    out = valuation.normalize_static_info(infos)
+    assert out["NVDA"] == {"eps_ttm": 8.0033, "bps": 9.5014,
+                           "dividend_yield": 0.52}
+    assert out["BABA"]["eps_ttm"] == 4.3942
+    assert out["SMH"]["eps_ttm"] == 0.0          # 保留原值，门控在上层
+    assert "QQQ" not in out                      # 静默空（未返回标的）自然缺
+    assert valuation.normalize_static_info(None) == {}
+    # Decimal 与 None 防御
+    from decimal import Decimal
+    out2 = valuation.normalize_static_info([
+        SimpleNamespace(symbol="X.US", eps_ttm=Decimal("1.5"), bps=None,
+                        dividend_yield=None)])
+    assert out2["X"] == {"eps_ttm": 1.5, "bps": None, "dividend_yield": None}
+
+
+NVDA_CC = json.dumps({"units": {"USD/shares": [
+    {"start": "2023-01-30", "end": "2024-01-28", "val": 1.19,
+     "form": "10-K", "fp": "FY", "filed": "2024-02-21"},
+    {"start": "2024-01-29", "end": "2025-01-26", "val": 2.94,
+     "form": "10-K", "fp": "FY", "filed": "2025-02-26"},
+    {"start": "2024-01-29", "end": "2025-01-26", "val": 2.94,
+     "form": "10-K", "fp": "FY", "filed": "2025-02-26"},   # 重复申报行
+    {"start": "2025-01-27", "end": "2026-01-25", "val": 4.90,
+     "form": "10-K", "fp": "FY", "filed": "2026-02-25"},
+    {"start": "2025-01-27", "end": "2026-04-26", "val": 3.5,
+     "form": "10-Q", "fp": "Q1", "filed": "2026-05-28"},   # 季度值须被过滤
+]}})
+
+BABA_CC = json.dumps({"units": {
+    "CNY/shares": [
+        {"start": "2023-04-01", "end": "2024-03-31", "val": 6.94,
+         "form": "20-F", "fp": "FY", "filed": "2024-06-01"},
+        {"start": "2024-04-01", "end": "2025-03-31", "val": 6.7,
+         "form": "20-F", "fp": "FY", "filed": "2025-06-01"},
+        {"start": "2025-04-01", "end": "2026-03-31", "val": 5.5,
+         "form": "20-F", "fp": "FY", "filed": "2026-06-01"},
+    ],
+    "USD/shares": [
+        {"start": "2024-04-01", "end": "2025-03-31", "val": 0.92,
+         "form": "20-F", "fp": "FY", "filed": "2025-06-01"},
+        {"start": "2025-04-01", "end": "2026-03-31", "val": 0.80,
+         "form": "20-F", "fp": "FY", "filed": "2026-06-01"},
+    ]}})
+
+CCJ_CC = json.dumps({"units": {"USD/shares": [
+    {"start": "2024-01-01", "end": "2024-12-31", "val": 0.34,
+     "form": "40-F", "fp": "FY", "filed": "2025-03-01"},
+    {"start": "2025-01-01", "end": "2025-12-31", "val": 0.42,
+     "form": "40-F", "fp": "FY", "filed": "2026-03-01"},
+]}})
+
+
+def test_parse_eps_growth():
+    # NVDA：重复行去重 + 季度混入过滤 → 4.90/2.94-1
+    assert valuation.parse_eps_growth(NVDA_CC) == pytest.approx(66.667, abs=0.01)
+    # BABA：主币种 = 行数最多的 unit（CNY 3 行 > USD 2 行）→ 原币同比
+    assert valuation.parse_eps_growth(BABA_CC) == pytest.approx(-17.91, abs=0.01)
+    # 40-F 申报人有效
+    assert valuation.parse_eps_growth(CCJ_CC) == pytest.approx(23.53, abs=0.01)
+    # 财年不足两个 / v1=0 / 坏 JSON / None
+    one_fy = json.dumps({"units": {"USD/shares": [
+        {"start": "2025-01-01", "end": "2025-12-31", "val": 1.0,
+         "form": "10-K", "fp": "FY", "filed": "2026-02-01"}]}})
+    assert valuation.parse_eps_growth(one_fy) is None
+    zero_base = json.dumps({"units": {"USD/shares": [
+        {"start": "2024-01-01", "end": "2024-12-31", "val": 0,
+         "form": "10-K", "fp": "FY", "filed": "2025-02-01"},
+        {"start": "2025-01-01", "end": "2025-12-31", "val": 1.0,
+         "form": "10-K", "fp": "FY", "filed": "2026-02-01"}]}})
+    assert valuation.parse_eps_growth(zero_base) is None
+    assert valuation.parse_eps_growth("not json") is None
+    assert valuation.parse_eps_growth(None) is None
+    # 同财年重复行取 filed 最大（后申报修正值优先；修正申报行取白名单内
+    # 同财年后申报的 10-K 行——保守口径不含 10-K/A）
+    corrected = json.dumps({"units": {"USD/shares": [
+        {"start": "2024-01-01", "end": "2024-12-31", "val": 1.0,
+         "form": "10-K", "fp": "FY", "filed": "2025-02-01"},
+        {"start": "2024-01-01", "end": "2024-12-31", "val": 1.2,
+         "form": "10-K", "fp": "FY", "filed": "2025-04-01"},
+        {"start": "2025-01-01", "end": "2025-12-31", "val": 2.4,
+         "form": "10-K", "fp": "FY", "filed": "2026-02-01"}]}})
+    assert valuation.parse_eps_growth(corrected) == pytest.approx(100.0, abs=0.01)
