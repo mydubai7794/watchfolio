@@ -1569,7 +1569,7 @@ async def init_macro_tables():
         """
         CREATE TABLE IF NOT EXISTS macro_indicators (
             id          BIGINT AUTO_INCREMENT PRIMARY KEY,
-            name        VARCHAR(32) NOT NULL COMMENT 'buffett/cape/yield_2s10s/fear_greed',
+            name        VARCHAR(32) NOT NULL COMMENT 'buffett/cape/yield_2s10s/fear_greed/cpi_yoy/credit_spread_hy',
             asof        DATE NOT NULL,
             value       DOUBLE NOT NULL,
             extra       TEXT COMMENT 'JSON 扩展（rating/source/分子分母等）',
@@ -1741,7 +1741,7 @@ async def upsert_macro_indicator(name: str, asof: str, value: float,
 
 
 async def get_macro_latest() -> list[dict]:
-    """四项宏观指标各自最新一行。@author yys"""
+    """各宏观指标（FETCHERS 注册的全部系列）各自最新一行。@author yys"""
     return await execute_dict(
         "SELECT m.name, m.asof, m.value, m.extra FROM macro_indicators m "
         "JOIN (SELECT name, MAX(asof) mx FROM macro_indicators GROUP BY name) t "

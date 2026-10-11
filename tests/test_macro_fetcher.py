@@ -60,6 +60,7 @@ def test_fetchers_registry():
 
 CPI_TEXT = "\n".join([
     "DATE,CPIAUCSL",
+    "2025-07-01,320.2",                # 使 rows[-13] ≠ rows[0]，锁索引语义
     "2025-08-01,.",                    # 无效行跳过
     "2025-09-01,320.5",
     "2025-10-01,320.8",
@@ -79,9 +80,9 @@ CPI_TEXT = "\n".join([
 
 def test_parse_fred_csv_tail():
     tail = mf.parse_fred_csv_tail(CPI_TEXT, 14)
-    assert len(tail) == 13                 # '.' 行被跳过
+    assert len(tail) == 14                 # '.' 行被跳过（15 数据行）
     assert tail[-1] == ("2026-09-01", 331.0)
-    assert tail[0] == ("2025-09-01", 320.5)
+    assert tail[0] == ("2025-07-01", 320.2)
     assert mf.parse_fred_csv_tail("DATE,X\n") == []
 
 
@@ -96,6 +97,7 @@ def test_fetch_cpi_yoy(monkeypatch):
     assert r["asof"] == "2026-09-01"
     assert r["value"] == round((331.0 / 320.5 - 1) * 100, 2)
     assert r["extra"]["year_ago"] == 320.5
+    assert r["extra"]["year_ago_asof"] == "2025-09-01"   # rows[-13] 精确锁定
 
 
 def test_fetch_cpi_yoy_insufficient_history(monkeypatch):

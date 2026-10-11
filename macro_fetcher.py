@@ -70,25 +70,14 @@ async def _get_text(url: str, headers: dict | None = None,
 
 
 def parse_fred_csv(text: str) -> tuple[str, float] | None:
-    """FRED CSV → (最新日期, 值)；'.' 与空值行跳过（自后向前找最新有效行）。@author yys"""
-    lines = [l.strip() for l in text.strip().splitlines()]
-    for line in reversed(lines[1:]):          # 跳过表头
-        parts = line.split(",")
-        if len(parts) != 2:
-            continue
-        d, v = parts
-        if v in (".", ""):
-            continue
-        try:
-            return d, float(v)
-        except ValueError:
-            continue
-    return None
+    """FRED CSV → (最新日期, 值)；'.' 与空值行跳过。@author yys"""
+    rows = parse_fred_csv_tail(text, 1)
+    return rows[-1] if rows else None
 
 
 def parse_fred_csv_tail(text: str, n: int = 14) -> list[tuple[str, float]]:
-    """FRED CSV → 尾部 n 行 [(date, value)]（升序，'.'/空值行跳过）。
-    CPIAUCSL 月度，14 行覆盖 12 个月前即可算同比。@author yys"""
+    """FRED CSV → 尾部 n 个有效行 [(date, value)]（升序，'.'/空值/坏行跳过）。
+    CPIAUCSL 月度取 14：留余量保证含最新 + 12 个月前共 13 个有效行。@author yys"""
     out = []
     for line in text.strip().splitlines()[1:]:
         parts = line.strip().split(",")
@@ -213,7 +202,7 @@ FETCHERS = (fetch_buffett, fetch_cape, fetch_yield_spread, fetch_fear_greed,
 
 
 async def refresh_all():
-    """四指标串行刷新落库（间隔 2s；单项失败不中断）。@author yys"""
+    """六指标串行刷新落库（间隔 2s；单项失败不中断）。@author yys"""
     for i, fn in enumerate(FETCHERS):
         if i:
             await asyncio.sleep(2.0)
