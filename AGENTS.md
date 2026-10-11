@@ -128,7 +128,17 @@
   days 自首观测日起计），尾部现金流按末点原始 NAV 折份额后再实时覆盖；`/api/portfolio/nav` range
   仅裁 series 窗口、TWR 恒全历史；overview 顶层 nav 块与 cny 块相互独立降级；
   60s `_nav_ctx_cache` 缓存日线+事件（补录事件 60s 内 eventual 生效）。
-  前端 CNY 卡片副行 ` · TWR ±x.xx%`、走势图「市值|净值」双模式。
+   前端 CNY 卡片副行 ` · TWR ±x.xx%`、走势图「市值|净值」双模式。
+- **已清仓口径（2026-10-11）**：清仓标的 holdings 行保留（qty=0 不删），
+  前端主表只渲染 qty>0，qty==0 沉「已清仓」折叠分区；周期由
+  `ledger.build_closed_positions`（trade_records 全量回放 + holdings 数量
+  锚点反推期初 q0，归零切周期）纯计算推导，60s `_closed_ctx_cache`，
+  overview 端点注入 `closed` 块（不进 SSE 载荷，前端保活合并同
+  recent_trades）；realized = Σ卖额 − Σ买额 − 期初成本（期初 = q0 × 当前
+  cost_price 近似，approx 打标）；卖出后涨跌幅前端用 positions 现价 join
+  (现价−exit_avg)/exit_avg；K线 `/api/kline` payload 带 trades（日期
+  YYYY-MM-DD 对齐日K轴），弹层日K画 B▲红/S▼绿 标记 + 成交列表（每笔至今
+  涨跌幅）。零新增外部请求（清仓标的 enabled 保持 1 搭腾讯批总线）。
 
 ## 密钥与敏感配置
 
