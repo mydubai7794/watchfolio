@@ -200,7 +200,7 @@ async def fetch_cpi_yoy() -> dict | None:
 
 
 async def fetch_credit_spread() -> dict | None:
-    """高收益债信用利差 = BAMLH0A0HYM2（ICE BofA US HY OAS，pct）。@author yys"""
+    """高收益债信用利差 = FRED 序列 BAMLH0A0HYM2（美国高收益债 OAS，pct）。@author yys"""
     got = parse_fred_csv(await _get_text(FRED_CSV_URL.format(sid="BAMLH0A0HYM2")) or "")
     if not got:
         return None
