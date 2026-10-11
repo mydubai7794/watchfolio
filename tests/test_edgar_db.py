@@ -67,7 +67,7 @@ def test_save_insider_tx_insert_ignore_and_null_passthrough(monkeypatch):
     rows = [
         {"symbol": "MU", "cik": "723125", "accession": "0000723125-26-000001",
          "filed_date": "2026-10-08", "trade_date": "2026-10-07",
-         "reporter": "SUNNY ERIC", "title": "EVP", "action": "A",
+         "reporter": "SUNNY ERIC", "action": "A",
          "tx_code": "P", "shares": 10000, "price": 110.5, "value_usd": 1105000.0},
         {"symbol": "MU", "cik": "723125", "accession": "0000723125-26-000002",
          "filed_date": "2026-10-08", "trade_date": None,
@@ -77,6 +77,7 @@ def test_save_insider_tx_insert_ignore_and_null_passthrough(monkeypatch):
     n = asyncio.run(db.save_insider_tx(rows))
     assert n == 2
     assert "INSERT IGNORE INTO insider_tx" in pool.conn.cur.sqls[0]
+    assert pool.conn.cur.many[0][6] == ""          # title 缺失→空串
     assert pool.conn.cur.many[0][10] == 110.5      # price 列
     assert pool.conn.cur.many[1][10] is None       # price NULL 原样透传
     assert pool.conn.cur.many[1][11] is None       # value_usd NULL 原样透传

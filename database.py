@@ -336,6 +336,31 @@ async def init_tables():
     )
     await _alter_add_holdings_asset_type(pool)
 
+    # ---- insider_tx (SEC Form 4 内部人交易，EDGAR 官方源) ----
+    await execute(
+        """
+        CREATE TABLE IF NOT EXISTS insider_tx (
+            id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+            symbol      VARCHAR(20)  NOT NULL COMMENT '持仓代码',
+            cik         VARCHAR(16)  NOT NULL COMMENT 'SEC CIK',
+            accession   VARCHAR(32)  NOT NULL COMMENT '申报编号(带连字符)',
+            filed_date  DATE NOT NULL COMMENT '申报日',
+            trade_date  DATE NULL COMMENT '成交日',
+            reporter    VARCHAR(128) NOT NULL COMMENT '申报人',
+            title       VARCHAR(128) NOT NULL DEFAULT '' COMMENT '职务',
+            action      CHAR(1) NOT NULL COMMENT 'A=acquire买入 D=dispose卖出',
+            tx_code     VARCHAR(8)  NOT NULL DEFAULT '' COMMENT '交易代码 P/S/G/A/F等原样保留',
+            shares      BIGINT NOT NULL COMMENT '股数',
+            price       DECIMAL(12,4) NULL COMMENT '成交价(缺失为NULL)',
+            value_usd   DECIMAL(16,2) NULL COMMENT '金额USD(=shares*price)',
+            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uk_tx (accession, reporter, action, shares, price),
+            KEY idx_symbol_date (symbol, filed_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='SEC Form 4 内部人交易(EDGAR官方源)'
+        """,
+        _pool=pool,
+    )
+
     # ---- portfolio_ticks (组合市值采样) ----
     await execute(
         """
@@ -1010,7 +1035,9 @@ async def set_holding_asset_type(symbol: str, asset_type: str) -> int:
 
 
 async def save_insider_tx(rows: list[dict]) -> int:
-    """批量写入 Form 4 交易行（INSERT IGNORE 撞 uk_tx 幂等；price/value 允许 NULL）。@author yys"""
+    """批量写入 Form 4 交易行（INSERT IGNORE 撞 uk_tx 幂等；price/value 允许 NULL）。
+    rows 必填键：symbol/cik/accession/filed_date/reporter/action/shares；
+    可选键：trade_date/title/tx_code/price/value_usd。@author yys"""
     if not rows:
         return 0
     pool = await get_pool()
@@ -1539,31 +1566,6 @@ async def init_macro_tables():
             created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE KEY uq_name_asof (name, asof)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='宏观估值指标日频快照'
-        """,
-        _pool=pool,
-    )
-
-    # ---- insider_tx (SEC Form 4 内部人交易，EDGAR 官方源) ----
-    await execute(
-        """
-        CREATE TABLE IF NOT EXISTS insider_tx (
-            id          BIGINT AUTO_INCREMENT PRIMARY KEY,
-            symbol      VARCHAR(16)  NOT NULL COMMENT '持仓代码',
-            cik         VARCHAR(16)  NOT NULL COMMENT 'SEC CIK',
-            accession   VARCHAR(32)  NOT NULL COMMENT '申报编号(带连字符)',
-            filed_date  DATE NOT NULL COMMENT '申报日',
-            trade_date  DATE NULL COMMENT '成交日',
-            reporter    VARCHAR(128) NOT NULL COMMENT '申报人',
-            title       VARCHAR(128) NOT NULL DEFAULT '' COMMENT '职务',
-            action      CHAR(1) NOT NULL COMMENT 'A=acquire买入 D=dispose卖出',
-            tx_code     VARCHAR(8)  NOT NULL DEFAULT '' COMMENT '交易代码 P/S/G/A/F等原样保留',
-            shares      BIGINT NOT NULL COMMENT '股数',
-            price       DECIMAL(12,4) NULL COMMENT '成交价(缺失为NULL)',
-            value_usd   DECIMAL(16,2) NULL COMMENT '金额USD(=shares*price)',
-            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-            UNIQUE KEY uk_tx (accession, reporter, action, shares, price),
-            KEY idx_symbol_date (symbol, filed_date)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='SEC Form 4 内部人交易(EDGAR官方源)'
         """,
         _pool=pool,
     )
