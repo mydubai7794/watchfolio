@@ -161,3 +161,37 @@ def test_mixed_closed_and_manual_holding():
     assert len(rows) == 1
     assert rows[0]["symbol"] == "MU"
     assert rows[0]["realized_pnl"] == 200.0
+
+
+# ---------------------------------------------------------------------------
+# database 查询 SQL 形状（打桩 execute_dict，零连库）
+# ---------------------------------------------------------------------------
+
+class TestTradeQueries:
+    def test_get_all_trades_sql(self, monkeypatch):
+        cap = {}
+
+        async def fake_ed(sql, args=None, _pool=None):
+            cap["sql"], cap["args"] = sql, args
+            return []
+
+        monkeypatch.setattr(db, "execute_dict", fake_ed)
+        run(db.get_all_trades())
+        assert "FROM trade_records" in cap["sql"]
+        assert "COALESCE(email_date, created_at)" in cap["sql"]   # NULL 日期回退
+        assert "ORDER BY" in cap["sql"]
+        assert cap["args"] is None
+
+    def test_get_trades_by_symbol_sql(self, monkeypatch):
+        cap = {}
+
+        async def fake_ed(sql, args=None, _pool=None):
+            cap["sql"], cap["args"] = sql, args
+            return []
+
+        monkeypatch.setattr(db, "execute_dict", fake_ed)
+        run(db.get_trades_by_symbol("MU"))
+        assert "FROM trade_records" in cap["sql"]
+        assert "WHERE symbol = %s" in cap["sql"]
+        assert "COALESCE(email_date, created_at)" in cap["sql"]
+        assert cap["args"] == ("MU",)

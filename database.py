@@ -1293,6 +1293,32 @@ async def get_recent_trades(limit: int = 20) -> list[dict]:
     return rows
 
 
+async def get_all_trades() -> list[dict]:
+    """trade_records 全量（时间升序，已清仓周期回放用）。
+
+    排序 COALESCE(email_date, created_at)：email_date 缺失的记录按落库时间
+    兜底参与排序，保证回放时间线单调。@author yys
+    """
+    rows = await execute_dict(
+        "SELECT * FROM trade_records "
+        "ORDER BY COALESCE(email_date, created_at), id")
+    for r in rows:
+        r["quantity"] = float(r["quantity"])
+        r["price"] = float(r["price"])
+    return rows
+
+
+async def get_trades_by_symbol(symbol: str) -> list[dict]:
+    """单 symbol 成交记录（时间升序，K线卖点标记/成交列表用）。@author yys"""
+    rows = await execute_dict(
+        "SELECT * FROM trade_records WHERE symbol = %s "
+        "ORDER BY COALESCE(email_date, created_at), id", (symbol,))
+    for r in rows:
+        r["quantity"] = float(r["quantity"])
+        r["price"] = float(r["price"])
+    return rows
+
+
 # ---------------------------------------------------------------------------
 # Ledger events (记账事件流)
 # ---------------------------------------------------------------------------
