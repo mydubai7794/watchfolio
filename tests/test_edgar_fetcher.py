@@ -292,3 +292,49 @@ def _async_ret(v):
     async def _f(*a, **kw):
         return v
     return _f
+
+
+def test_edgar_get_no_wait_when_idle(monkeypatch):
+    sleeps = []
+
+    async def fake_sleep(s):
+        sleeps.append(round(s, 1))
+
+    monkeypatch.setattr(ef.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(ef.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(ef, "_last_req_ts", 50.0)              # 距上次已 50s
+    calls = _patch_client(monkeypatch, lambda url: _FakeResp(200))
+    resp = asyncio.run(ef._edgar_get("https://x", "UA"))
+    assert resp.status_code == 200
+    assert calls == ["https://x"]
+    assert sleeps == []                                        # gap≤0 不等待
+
+
+def test_get_ticker_map_bad_payload_not_poisoned(monkeypatch):
+    import database as db
+
+    monkeypatch.setattr(ef, "_TICKER_MAP", None)   # 冷启动起点，测试自包含
+    set_calls = []
+
+    async def fake_cfg(key):
+        return None
+
+    async def fake_set(key, value, remark=""):
+        set_calls.append((key, value))
+
+    monkeypatch.setattr(db, "get_config", fake_cfg)
+    monkeypatch.setattr(db, "set_config", fake_set)
+    monkeypatch.setattr(ef, "_resolve_ua", _async_ret("UA"))
+    # 200 + 坏 JSON → 空解析不落缓存不落时间戳（防 7 天毒化），返回 None
+    _patch_client(monkeypatch, lambda url: _FakeResp(200, "not-json"))
+    assert asyncio.run(ef.get_ticker_map()) is None
+    assert set_calls == []
+    # 旧缓存 + 时间戳过期 + 拉取 500 → 旧缓存兜底返回
+    monkeypatch.setattr(ef, "_TICKER_MAP", {"MU": 1})
+
+    async def fake_cfg_stale(key):
+        return "2020-01-01 00:00:00" if key == "EDGAR_TICKER_MAP_TS" else None
+
+    monkeypatch.setattr(db, "get_config", fake_cfg_stale)
+    _patch_client(monkeypatch, lambda url: _FakeResp(500))
+    assert asyncio.run(ef.get_ticker_map()) == {"MU": 1}

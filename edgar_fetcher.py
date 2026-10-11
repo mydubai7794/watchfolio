@@ -166,6 +166,7 @@ def build_insider_summary(rows: list[dict], today: str) -> dict | None:
 
 _last_req_ts = 0.0                # 模块级节流状态（monotonic）
 _TICKER_MAP: dict[str, int] | None = None   # symbol(大写) -> cik
+_EDGAR_LOCK = asyncio.Lock()      # 全局串行锁：多协程并发进 _edgar_get 时仍保证间隔
 
 
 async def _resolve_ua() -> str:
@@ -181,30 +182,35 @@ async def _resolve_ua() -> str:
 
 
 async def _edgar_get(url: str, ua: str) -> httpx.Response | None:
-    """限流 GET：距上次请求 ≥EDGAR_MIN_INTERVAL；429/503 按 EDGAR_BACKOFFS
-    退避重试；网络异常仅重试 1 次；穷尽返回 None（调用方按数据缺处理）。@author yys"""
+    """限流 GET（_EDGAR_LOCK 串行化）：距上次请求 ≥EDGAR_MIN_INTERVAL；429/503
+    按 EDGAR_BACKOFFS 退避重试；网络异常仅重试 1 次；穷尽返回 None（调用方按
+    数据缺处理）。@author yys"""
     global _last_req_ts
     last_err = ""
     net_retried = False
-    for attempt in range(len(EDGAR_BACKOFFS) + 1):
-        gap = _last_req_ts + EDGAR_MIN_INTERVAL - time.monotonic()
-        if gap > 0:
-            await asyncio.sleep(gap)
-        _last_req_ts = time.monotonic()
-        try:
-            async with httpx.AsyncClient(timeout=20, follow_redirects=True,
-                                         headers={"User-Agent": ua}) as client:
-                resp = await client.get(url)
-            if resp.status_code not in (429, 503):
-                return resp
-            last_err = f"HTTP {resp.status_code}"
-        except Exception as e:
-            last_err = repr(e)
-            if net_retried:
-                break
-            net_retried = True
-        if attempt < len(EDGAR_BACKOFFS):
-            await asyncio.sleep(EDGAR_BACKOFFS[attempt])
+    async with _EDGAR_LOCK:
+        for attempt in range(len(EDGAR_BACKOFFS) + 1):
+            gap = _last_req_ts + EDGAR_MIN_INTERVAL - time.monotonic()
+            if gap > 0:
+                await asyncio.sleep(gap)
+            _last_req_ts = time.monotonic()
+            try:
+                async with httpx.AsyncClient(timeout=20, follow_redirects=True,
+                                             headers={"User-Agent": ua}) as client:
+                    resp = await client.get(url)
+                if resp.status_code not in (429, 503):
+                    if resp.status_code != 200:
+                        logger.warning("EDGAR 非200 %s: HTTP %s",
+                                       url, resp.status_code)
+                    return resp
+                last_err = f"HTTP {resp.status_code}"
+            except Exception as e:
+                last_err = repr(e)
+                if net_retried:
+                    break
+                net_retried = True
+            if attempt < len(EDGAR_BACKOFFS):
+                await asyncio.sleep(EDGAR_BACKOFFS[attempt])
     logger.warning("EDGAR GET 失败 %s: %s", url, last_err)
     return None
 
@@ -228,10 +234,15 @@ async def get_ticker_map() -> dict[str, int] | None:
         return _TICKER_MAP
     resp = await _edgar_get(TICKER_MAP_URL, await _resolve_ua())
     if resp is not None and resp.status_code == 200:
-        _TICKER_MAP = parse_ticker_map(resp.text)
-        await db.set_config("EDGAR_TICKER_MAP_TS",
-                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "EDGAR ticker映射刷新时间")
+        parsed = parse_ticker_map(resp.text)
+        if parsed:                       # 空 map（坏 JSON/拦截页）不落缓存不锁 7 天
+            _TICKER_MAP = parsed
+            await db.set_config("EDGAR_TICKER_MAP_TS",
+                                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "EDGAR ticker映射刷新时间")
+        else:
+            logger.warning("EDGAR ticker map 解析为空（%d 字节），保留旧缓存",
+                           len(resp.text))
     return _TICKER_MAP
 
 
