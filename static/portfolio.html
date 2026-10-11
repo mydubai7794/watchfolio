@@ -2217,6 +2217,7 @@ async function openKline(sym) {
   // 打开即清空上一只标的的残图/浮层：加载中/失败等任何中间态不得残留旧数据
   klClearCanvas();
   document.getElementById('klTrades').hidden = true;   // 换标的瞬态：隐藏上一只的成交列表（klRenderTrades 换数后重渲染）
+  KL._tradesSig = '';   // 签名世界边界：重开/换标的后强制走全量渲染恢复 hidden——同标的重拉 payload 内容可能逐字符相同，守卫不重置会跳过 hidden=false 致列表消失
   document.getElementById('klineMask').classList.add('show');
   try {
     await klApply('day');
@@ -2329,8 +2330,9 @@ function klRender() {
  * 成交列表：每笔买卖 + 相对最新收盘的至今涨跌幅（trades 来自 /api/kline payload）。
  * 无成交记录隐藏容器；末根收盘取当前周期全量 bars 尾根（分时=最新桶），null 安全。
  * 签名守卫：klRender 触发源含未合帧的拖动/悬浮（每秒可达数百次），而列表内容只依赖
- * 标的/周期/笔数/尾根收盘、与视口无关——签名不变直接跳过；trades 数组引用每次 klRender
- * 都是新字面量不可作签名，故用内容相关字符串（仅当调用链 klRender→本函数，trades 恒已赋值）。
+ * 标的/周期/笔数/尾根收盘、与视口无关——签名不变直接跳过；不采用 trades 数组引用作签名：
+ * 引用相等会漏掉内容等价但引用不同的帧（每次 klRender 重新赋值），引用稳定时也只覆盖部分
+ * 场景，内容相关字符串才逐帧一致（仅当调用链 klRender→本函数，trades 恒已赋值）。
  * @author yys
  */
 function klRenderTrades() {
