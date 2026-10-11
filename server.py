@@ -2708,8 +2708,12 @@ agent_router = APIRouter(prefix="/api/agent",
 
 
 # 决策上下文缓存（60s：SPY/RSP 日K + 宏观 + insider 全量聚合；agent 与
-# overview 双端点共用，避免高频轮询下的重复 DB 读——「少请求多数据」）
+# overview 双端点共用，避免高频轮询下的重复 DB 读——「少请求多数据」；
+# in-flight 锁防并发 miss 双建）
 _agent_ctx_cache = {"ts": 0.0, "ctx": None}
+_agent_ctx_lock = asyncio.Lock()
+_EDGAR_STALE_SEC = 36 * 3600      # EDGAR 上轮成功超此时长视为失效（日更+迟到容忍）
+_CTX_BARS_LIMIT = 25              # 日K取最近 N 根（rel/ratio 20d 需 21，留余量）
 
 
 def _pct_change(series: list[float], n: int) -> float | None:
@@ -2728,87 +2732,103 @@ def _ratio_series(bars_a: list[dict], bars_b: list[dict]) -> list[float]:
 
 
 async def _build_agent_context() -> dict:
-    """决策上下文聚合（60s 缓存）：facts only，缺数逐项 null 降级不阻塞主体。@author yys"""
+    """决策上下文聚合（60s 缓存 + in-flight 去重）：facts only，缺数逐项
+    null 降级不阻塞主体；单标的坏数据仅丢自身 factor 不殃及全体。@author yys"""
     now = time.time()
     if _agent_ctx_cache["ctx"] is not None and now - _agent_ctx_cache["ts"] < 60:
         return _agent_ctx_cache["ctx"]
-    ctx: dict = {"spy": None, "us10y": None, "credit_spread_hy": None,
-                 "cpi_yoy": None, "breadth": None, "factors": {}, "meta": {}}
-    try:
-        spy_bars = await db.get_daily_bars("SPY")
-        rsp_bars = await db.get_daily_bars("RSP")
-        spy_closes = [float(b["close"]) for b in spy_bars] if spy_bars else []
-        if spy_bars:
-            ctx["spy"] = {"close": spy_closes[-1],
-                          "asof": str(spy_bars[-1]["date"])[:10],
-                          "chg_pct_1d": _pct_change(spy_closes, 1)}
-        if spy_bars and rsp_bars:
-            ratios = _ratio_series(rsp_bars, spy_bars)
-            if ratios:
-                ctx["breadth"] = {
-                    "rsp_spy_ratio": round(ratios[-1], 6),
-                    "chg_pct_5d": _pct_change(ratios, 5),
-                    "chg_pct_20d": _pct_change(ratios, 20),
-                }
-        latest = {r["name"]: r for r in await db.get_macro_latest()}
+    async with _agent_ctx_lock:
+        now = time.time()
+        if _agent_ctx_cache["ctx"] is not None \
+                and now - _agent_ctx_cache["ts"] < 60:
+            return _agent_ctx_cache["ctx"]
+        ctx: dict = {"spy": None, "us10y": None, "credit_spread_hy": None,
+                     "cpi_yoy": None, "breadth": None, "factors": {}, "meta": {}}
+        try:
+            spy_bars = await db.get_daily_bars("SPY", limit=_CTX_BARS_LIMIT)
+            rsp_bars = await db.get_daily_bars("RSP", limit=_CTX_BARS_LIMIT)
+            spy_closes = [float(b["close"]) for b in spy_bars] if spy_bars else []
+            if spy_bars:
+                ctx["spy"] = {"close": spy_closes[-1],
+                              "asof": str(spy_bars[-1]["date"])[:10],
+                              "chg_pct_1d": _pct_change(spy_closes, 1)}
+            if spy_bars and rsp_bars:
+                ratios = _ratio_series(rsp_bars, spy_bars)
+                if ratios:
+                    ctx["breadth"] = {
+                        "rsp_spy_ratio": round(ratios[-1], 6),
+                        "chg_pct_5d": _pct_change(ratios, 5),
+                        "chg_pct_20d": _pct_change(ratios, 20),
+                    }
+            latest = {r["name"]: r for r in await db.get_macro_latest()}
 
-        def _macro_val(name):
-            r = latest.get(name)
-            return None if not r else {"value": float(r["value"]),
-                                       "asof": str(r["asof"])[:10]}
+            def _macro_val(name):
+                r = latest.get(name)
+                return None if not r else {"value": float(r["value"]),
+                                           "asof": str(r["asof"])[:10]}
 
-        ctx["credit_spread_hy"] = _macro_val("credit_spread_hy")
-        ctx["cpi_yoy"] = _macro_val("cpi_yoy")
-        us10y_price = next((m.get("price") for m in (market_cache or [])
-                            if m.get("key") == "US10Y" and m.get("price")), None)
-        dgs10 = None
-        row = latest.get("yield_2s10s")
-        if row:
-            try:
-                extra = json.loads(row["extra"]) if row.get("extra") else {}
-                dgs10 = extra.get("dgs10")
-            except Exception:
-                dgs10 = None
-        ctx["us10y"] = {"price": us10y_price, "dgs10_fred": dgs10,
-                        "asof": str(row["asof"])[:10] if row else None}
-        today = datetime.now().strftime("%Y-%m-%d")
-        holdings = await db.get_holdings(enabled_only=True)
-        for h in holdings:
-            if h.get("market") != "US":
-                continue
-            sym = h["symbol"]
-            at = h.get("asset_type")
-            ind = daily_bars.get_indicators(sym) or {}
-            bars = await db.get_daily_bars(sym)
-            closes = [float(b["close"]) for b in bars]
-            rel = None
-            if len(closes) >= 21 and len(spy_closes) >= 21:
-                rel = round(_pct_change(closes, 20) - _pct_change(spy_closes, 20), 2)
-            f = {"rsi14": ind.get("rsi14"), "spy_rel_20d_pct": rel,
-                 "asset_type": at}
-            if at == "fpi":
-                f["insider_90d"] = None
-                f["insider_note"] = "fpi_no_form4"
-            elif at == "stock":
-                rows = await db.get_insider_tx(sym)
-                f["insider_90d"] = edgar_fetcher.build_insider_summary(rows, today)
-            else:
-                f["insider_90d"] = None
-            ctx["factors"][sym] = f
-        last_ok = await db.get_config("EDGAR_LAST_OK")
-        edgar_ok = False
-        if last_ok:
-            try:
-                edgar_ok = (datetime.now() - datetime.strptime(
-                    last_ok, "%Y-%m-%d %H:%M:%S")).total_seconds() < 36 * 3600
-            except ValueError:
-                pass
-        ctx["meta"] = {"edgar_ok": edgar_ok, "edgar_last_ok": last_ok,
-                       "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-    except Exception as e:
-        logger.warning("决策上下文构建失败（本轮降级）: %s", e)
-    _agent_ctx_cache.update(ts=now, ctx=ctx)
-    return ctx
+            ctx["credit_spread_hy"] = _macro_val("credit_spread_hy")
+            ctx["cpi_yoy"] = _macro_val("cpi_yoy")
+            us10y_price = next((m.get("price") for m in (market_cache or [])
+                                if m.get("key") == "US10Y" and m.get("price")), None)
+            dgs10 = None
+            row = latest.get("yield_2s10s")
+            if row:
+                try:
+                    extra = json.loads(row["extra"]) if row.get("extra") else {}
+                    dgs10 = extra.get("dgs10")
+                except Exception:
+                    dgs10 = None
+            ctx["us10y"] = {"price": us10y_price, "dgs10_fred": dgs10,
+                            "asof": str(row["asof"])[:10] if row else None}
+            today = datetime.now().strftime("%Y-%m-%d")
+            holdings = await db.get_holdings(enabled_only=True)
+            for h in holdings:
+                if h.get("market") != "US":
+                    continue
+                try:
+                    sym = h["symbol"]
+                    at = h.get("asset_type")
+                    ind = daily_bars.get_indicators(sym) or {}
+                    bars = await db.get_daily_bars(sym, limit=_CTX_BARS_LIMIT)
+                    closes = [float(b["close"]) for b in bars]
+                    rel = None
+                    if len(closes) >= 21 and len(spy_closes) >= 21:
+                        p1 = _pct_change(closes, 20)
+                        p2 = _pct_change(spy_closes, 20)
+                        if p1 is not None and p2 is not None:
+                            rel = round(p1 - p2, 2)
+                    f = {"rsi14": ind.get("rsi14"), "spy_rel_20d_pct": rel,
+                         "asset_type": at}
+                    if at == "fpi":
+                        f["insider_90d"] = None
+                        f["insider_note"] = "fpi_no_form4"
+                    elif at == "stock":
+                        rows = await db.get_insider_tx(sym)
+                        f["insider_90d"] = edgar_fetcher.build_insider_summary(
+                            rows, today)
+                    else:
+                        f["insider_90d"] = None
+                    ctx["factors"][sym] = f
+                except Exception as e:
+                    logger.warning("决策上下文 factor %s 失败（仅跳过该标的）: %s",
+                                   h.get("symbol"), e)
+            last_ok = await db.get_config("EDGAR_LAST_OK")
+            edgar_ok = False
+            if last_ok:
+                try:
+                    edgar_ok = (datetime.now() - datetime.strptime(
+                        last_ok, "%Y-%m-%d %H:%M:%S")).total_seconds() \
+                        < _EDGAR_STALE_SEC
+                except ValueError:
+                    pass
+            ctx["meta"] = {"edgar_ok": edgar_ok, "edgar_last_ok": last_ok,
+                           "generated_at": datetime.now().strftime(
+                               "%Y-%m-%d %H:%M:%S")}
+        except Exception as e:
+            logger.warning("决策上下文构建失败（本轮降级）: %s", e)
+        _agent_ctx_cache.update(ts=now, ctx=ctx)
+        return ctx
 
 
 @agent_router.get("/portfolio")

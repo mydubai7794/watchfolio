@@ -8,9 +8,10 @@ from fastapi.testclient import TestClient
 
 
 def _bars(n, base=100.0):
-    """n 根日K，close 递增 1%。"""
-    return [{"date": date(2026, 9, 1 + i % 28), "open": base, "high": base,
-             "low": base, "close": round(base * (1.01 ** i), 4), "volume": 1}
+    """n 根日K（日期连续），close 递增 1%。"""
+    return [{"date": date(2026, 9, 1) + timedelta(days=i), "open": base,
+             "high": base, "low": base, "close": round(base * (1.01 ** i), 4),
+             "volume": 1}
             for i in range(n)]
 
 
@@ -37,10 +38,10 @@ def _env(monkeypatch):
         if sym != "MU":
             return []
         return [
-            {"filed_date": date(2026, 10, 1), "action": "A", "shares": 141000,
-             "value_usd": 19035000.0},
-            {"filed_date": date(2026, 9, 20), "action": "D", "shares": 5000,
-             "value_usd": 700000.0},
+            {"filed_date": date.today() - timedelta(days=10), "action": "A",
+             "shares": 141000, "value_usd": 19035000.0},
+            {"filed_date": date.today() - timedelta(days=21), "action": "D",
+             "shares": 5000, "value_usd": 700000.0},
         ]
 
     async def fake_macro_latest():
@@ -81,7 +82,8 @@ def test_build_agent_context(monkeypatch):
     assert ctx["spy"]["chg_pct_1d"] == 1.0
     # 广度：RSP/SPY 首日对齐比值
     assert ctx["breadth"]["rsp_spy_ratio"] == round(100.0 / 500.0, 6)
-    assert ctx["breadth"]["chg_pct_5d"] is not None
+    assert ctx["breadth"]["chg_pct_5d"] == 0.0        # 比值恒定 → 零变化
+    assert ctx["breadth"]["chg_pct_20d"] == 0.0
     # US10Y 双源
     assert ctx["us10y"]["price"] == 4.04
     assert ctx["us10y"]["dgs10_fred"] == 4.05
