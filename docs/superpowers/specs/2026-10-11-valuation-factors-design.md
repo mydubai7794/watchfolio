@@ -28,10 +28,11 @@
 - **BABA 实测**：eps_ttm=4.39、bps=64.37（USD/ADS 口径，券商已完成 CNY→USD、
   普通股→ADS 换算）——P/E、P/B 直接 `price/eps_ttm`、`price/bps`，无需任何换算。
 - **ETF 字段是噪声，必须门控**：实测 QQQ eps_ttm=-88.5（UIT 会计值）、SMH 全 0。
-  门控规则（优先级从上到下）：
-  1. `asset_type == 'etf'` → `reason='fund'`，整行跳过；
+  门控规则（优先级从上到下，注入层 reason 推导口径，批2审查后与实现一致）：
+  1. `asset_type == 'etf'` → `reason='fund'`（落库侧 ETF 行置 None 覆盖脏值）；
   2. `eps_ttm <= 0 or bps <= 0`（含 None/缺标的）→ `reason='no_data'`
-     （保护 asset_type 仍为 NULL 的个股如 CCJ 正常通过，拦截 ETF 噪声）。
+     （保护 asset_type 仍为 NULL 的个股如 CCJ 正常通过，拦截长桥 0 值噪声）；
+  3. `growth_pct is None or <= 0` → `reason='no_growth'`。
 - 静默空陷阱（踩坑记录 §2.5）：返回集合缺 symbol 不报错——按返回集合 join，
   缺失标的自然落入 no_data。
 
@@ -54,8 +55,9 @@
 
 ### 3.3 PEG 与计算时点（关键决策）
 
-- **落库只存慢变原始值**（eps_ttm/bps/growth_pct/dividend_yield/reason），
-  **不落库 pe/pb/peg**——现价每轮变，落库即过时。
+- **落库只存慢变原始值**（eps_ttm/bps/growth_pct/dividend_yield），
+  **不落库 pe/pb/peg 与 reason**——现价每轮变，落库即过时；reason 由注入层
+  根据落库数据 + asset_type 实时推导（2026-10-11 实施修订：表无 reason 列）。
 - `_build_agent_context` 注入时实时算：
   `pe = price / eps_ttm`、`pb = price / bps`、`peg = pe / (growth_pct / 100)`
   （price 取 market_cache 现价；eps_ttm>0、bps>0、growth_pct>0 各自防御，
@@ -72,10 +74,9 @@ CREATE TABLE IF NOT EXISTS holding_valuations (
   bps            DECIMAL(16,6) NULL,
   growth_pct     DECIMAL(10,4) NULL COMMENT '最近两个完整财年EPS同比%（原币）',
   dividend_yield DECIMAL(8,4)  NULL,
-  reason         VARCHAR(24)   NULL COMMENT 'fund/no_data/no_cik/no_growth；全有值时NULL',
   updated_at     DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP
                                 ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (symbol)
+  PRIMARY KEY(symbol)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='估值因子原始值（长桥日更+EDGAR周更）';
 ```
 

@@ -2,7 +2,7 @@
 import asyncio
 import json
 import pytest
-from datetime import datetime, timedelta
+from datetime import datetime
 from types import SimpleNamespace
 
 import database as db
@@ -241,17 +241,46 @@ def test_run_valuation_round_full(monkeypatch):
 
 
 def test_run_valuation_round_growth_throttle(monkeypatch):
-    """非周一且 TS 距今 1 天 → 不拉增速（省请求），static 正常。"""
-    yesterday = (datetime.now() - timedelta(days=1)).strftime(
-        "%Y-%m-%d %H:%M:%S")
+    """非周一且 TS 距今 1 天 → 不拉增速（省请求），static 正常。
+    假时钟固定周三 12:00，杜绝周一运行时 weekday()==0 恒真的 flaky
+    （批2审查 Important-3）。"""
+    class _FakeDt(datetime):
+        @staticmethod
+        def now():
+            return datetime(2026, 10, 14, 12, 0, 0)   # 周三
+    monkeypatch.setattr(valuation, "datetime", _FakeDt)
     infos = [SimpleNamespace(symbol="NVDA.US", eps_ttm=8.0, bps=9.5,
                              dividend_yield=0.52)]
     rec, cfg = _v_env(monkeypatch, _HOLDINGS[:1], infos, {},
-                      growth_ts=yesterday)
+                      growth_ts="2026-10-13 12:00:00")   # 假时钟前一天
     stats = asyncio.run(valuation.run_valuation_round())
     assert rec["static"] == [("NVDA", 8.0, 9.5, 0.52)]
     assert rec["growth"] == []                     # 节流期内零增速请求
     assert stats["growth_runs"] is False
+
+
+def test_run_valuation_round_tmap_none(monkeypatch):
+    """增速门控开启但 EDGAR 映射不可用（None）：跳过增速不炸循环，
+    static 正常落库（批2审查 Important-2 回归锚）。"""
+    class _FakeDt(datetime):
+        @staticmethod
+        def now():
+            return datetime(2026, 10, 14, 12, 0, 0)   # 周三
+    monkeypatch.setattr(valuation, "datetime", _FakeDt)
+    infos = [SimpleNamespace(symbol="NVDA.US", eps_ttm=8.0, bps=9.5,
+                             dividend_yield=0.52)]
+    rec, cfg = _v_env(monkeypatch, _HOLDINGS[:1], infos, {},
+                      growth_ts="2026-10-13 12:00:00")
+    # 覆写：TS 已 1 天但强制 run_growth（映射失败场景在门控开启时才触发）
+    monkeypatch.setattr(valuation, "GROWTH_INTERVAL_SEC", 0)
+    async def fake_map():
+        return None
+    monkeypatch.setattr(edgar_fetcher, "get_ticker_map", fake_map)
+    stats = asyncio.run(valuation.run_valuation_round())
+    assert rec["static"] == [("NVDA", 8.0, 9.5, 0.52)]
+    assert rec["growth"] == []                     # 映射不可用零增速请求
+    assert stats["rows"] == 1
+    assert "VALUATION_GROWTH_TS" not in rec["set_cfg"]   # 水位未推进
 
 
 def test_run_valuation_round_no_cik(monkeypatch):

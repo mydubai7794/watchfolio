@@ -171,6 +171,8 @@ def test_agent_context_valuation_injection(monkeypatch):
             {"symbol": "NVDA", "market": "US", "asset_type": "stock"},
             {"symbol": "QQQ", "market": "US", "asset_type": "etf"},
             {"symbol": "BABA", "market": "US", "asset_type": "fpi"},
+            {"symbol": "DRAM", "market": "US", "asset_type": None},
+            {"symbol": "GOOGL", "market": "US", "asset_type": "stock"},
         ]
 
     async def fake_vals():
@@ -184,6 +186,14 @@ def test_agent_context_valuation_injection(monkeypatch):
             "BABA": {"eps_ttm": 4.39, "bps": 64.37, "growth_pct": -17.91,
                      "dividend_yield": 1.03,
                      "updated_at": "2026-10-11 16:00:00"},
+            # 长桥完全无数据标的：0 落库形态 → no_data（批2审查 Important-1）
+            "DRAM": {"eps_ttm": 0.0, "bps": 0.0, "growth_pct": None,
+                     "dividend_yield": 0.0,
+                     "updated_at": "2026-10-11 16:00:00"},
+            # eps/bps 有效但现价缺失：估值倍数 null、reason 不变（注入瞬态契约）
+            "GOOGL": {"eps_ttm": 6.0, "bps": 20.0, "growth_pct": 10.0,
+                      "dividend_yield": 0.0,
+                      "updated_at": "2026-10-11 16:00:00"},
         }
 
     monkeypatch.setattr(server.db, "get_holdings", fake_holdings)
@@ -220,6 +230,15 @@ def test_agent_context_valuation_injection(monkeypatch):
     assert v_baba["reason"] == "no_growth"
     # fpi 分支 insider 注记不受 valuation 块影响
     assert ctx["factors"]["BABA"]["insider_note"] == "fpi_no_form4"
+    # DRAM：长桥 0 落库（非 None）→ no_data 而非 no_growth（Important-1 锚）
+    v_dram = ctx["factors"]["DRAM"]["valuation"]
+    assert v_dram["pe_ttm"] is None and v_dram["pb"] is None
+    assert v_dram["reason"] == "no_data"
+    # GOOGL：eps/bps/growth 有效但无现价 → 倍数全 null、reason=None、键恒在
+    v_g = ctx["factors"]["GOOGL"]["valuation"]
+    assert v_g["pe_ttm"] is None and v_g["pb"] is None and v_g["peg"] is None
+    assert v_g["eps_ttm"] == 6.0 and v_g["growth_pct"] == 10.0
+    assert v_g["reason"] is None
 
 
 def _async_ret(v):

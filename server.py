@@ -2829,7 +2829,8 @@ async def _build_agent_context() -> dict:
                         if pe is not None and v_g and v_g > 0 else None
                     if at == "etf":
                         v_reason = "fund"
-                    elif v_eps is None or v_bps is None:
+                    elif v_eps is None or v_bps is None \
+                            or v_eps <= 0 or v_bps <= 0:
                         v_reason = "no_data"
                     elif v_g is None or v_g <= 0:
                         v_reason = "no_growth"

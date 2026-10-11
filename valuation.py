@@ -110,7 +110,13 @@ async def run_valuation_round() -> dict:
                 or age > GROWTH_INTERVAL_SEC
         except ValueError:
             run_growth = True
-    tmap = await edgar_fetcher.get_ticker_map() if run_growth else {}
+    tmap: dict = {}
+    if run_growth:
+        tmap = await edgar_fetcher.get_ticker_map() or {}
+        if not tmap:
+            # 映射不可用（拉取失败且无缓存）与 run_edgar_round 同款兜底：
+            # 本轮跳过增速，水位不推进，下轮自动重试。@author yys
+            logger.warning("EDGAR ticker 映射不可用，本轮跳过增速")
     growth_written = False
     for h in us:
         sym = h["symbol"]
