@@ -148,6 +148,9 @@ table.holdings { width: 100%; border-collapse: collapse; }
 .holdings td { font-size: 14px; line-height: 1.2; }
 .holdings tbody tr:last-child td { border-bottom: none; }
 .holdings tbody tr:hover td { background: var(--bg); }
+/* 已清仓分区：表头整体可点折叠 + 「成本近似」小标 */
+.closed-head { cursor: pointer; user-select: none; }
+.approx-tag { font-style: normal; font-size: 11px; color: var(--txt3); margin-left: 4px; }
 th.sortable { cursor: pointer; }
 th.sortable:hover { color: var(--txt); }
 .arrow { font-size: 9px; color: var(--accent); }
@@ -469,6 +472,24 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
         <div class="skel" style="height:56px;margin:10px 0"></div>
         <div class="skel" style="height:56px;margin:10px 0"></div>
       </div>
+    </div>
+  </section>
+
+  <!-- 已清仓分区：qty==0 标的（周期回放推导，默认折叠） -->
+  <section class="card pad" id="closedCard" hidden>
+    <div class="card-head closed-head" id="closedHead">
+      <div class="card-title">已清仓 <span class="pill tag" id="closedCount">0</span></div>
+      <div class="card-note">卖出后视角 · 点击展开/收起</div>
+    </div>
+    <div class="table-wrap" id="closedBody" hidden>
+      <table class="holdings">
+        <thead><tr>
+          <th>名称/代码</th><th>清仓时间</th><th>持有天数</th><th>清仓均价</th>
+          <th>已实现盈亏</th><th>现价</th><th>卖出后涨跌幅</th><th></th>
+        </tr></thead>
+        <tbody id="closedTable"></tbody>
+      </table>
+      <div class="mobile-list" id="closedMobile"></div>
     </div>
   </section>
 
@@ -821,7 +842,8 @@ function nightOf(d) {
 function renderPositions(d) {
   if (!d) return;
   const session = d.session || 'closed';
-  const positions = (d.positions || []).slice();
+  // 主表只渲染持仓中（qty>0）；qty==0 已清仓行移交 renderClosed 分区
+  const positions = (d.positions || []).filter(p => (p.quantity || 0) > 0);
   // null（无行情 stale 行）恒沉底：与排序方向无关始终排尾。
   // 升序(null→+Infinity) / 降序(null→-Infinity)，保证与末元素相减后沿 sortDir 排尾；双 null 相等
   positions.sort((a, b) => {
@@ -884,6 +906,61 @@ function renderPositions(d) {
     mlist.appendChild(mc);
   });
 }
+
+// ---- 已清仓分区：closed 周期行 + positions 现价 join（卖出后涨跌幅）----
+// 折叠状态为内存态（刷新回默认收起）；现价随 overview/SSE positions 实时刷新
+// @author yys
+let closedOpen = false;
+
+function renderClosed(d) {
+  const rows = d.closed || [];
+  const card = document.getElementById('closedCard');
+  if (!rows.length) { card.hidden = true; return; }
+  card.hidden = false;
+  document.getElementById('closedCount').textContent = rows.length;
+  document.getElementById('closedBody').hidden = !closedOpen;
+  const priceMap = {};
+  (d.positions || []).forEach(p => { if (p.price) priceMap[p.symbol] = p.price; });
+  const tbody = document.getElementById('closedTable');
+  const mlist = document.getElementById('closedMobile');
+  tbody.innerHTML = ''; mlist.innerHTML = '';
+  rows.forEach(c => {
+    const noRec = !!c.no_records;
+    const price = priceMap[c.symbol];
+    const postChg = (price && c.exit_avg) ? (price - c.exit_avg) / c.exit_avg * 100 : null;
+    const pnlHtml = noRec ? '--'
+      : sign(c.realized_pnl) + '$' + fmt(Math.abs(c.realized_pnl))
+        + ' <em class="' + cls(c.realized_pct) + '">(' + sign(c.realized_pct) + fmt(c.realized_pct) + '%)</em>'
+        + (c.approx ? '<i class="approx-tag">成本近似</i>' : '');
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td><div>${esc(c.name || c.symbol)}${noRec ? '<span class="pill tag tag-stale">无成交记录</span>' : ''}</div><div class="sym"><span class="sym-link" data-sym="${esc(c.symbol)}" title="查看日K">${esc(c.symbol)}</span></div></td>
+      <td>${c.exit_date || '--'}</td>
+      <td>${c.hold_days != null ? c.hold_days : '--'}</td>
+      <td>${c.exit_avg != null ? fmt(c.exit_avg) : '--'}</td>
+      <td class="${cls(c.realized_pnl)}">${pnlHtml}</td>
+      <td>${price ? fmt(price) : '--'}</td>
+      <td class="${cls(postChg)}">${postChg == null ? '--' : sign(postChg) + fmt(postChg) + '%'}</td>
+      <td></td>`;
+    tbody.appendChild(tr);
+    const mc = document.createElement('div');
+    mc.className = 'm-card';
+    mc.innerHTML = `<div class="m-top"><span class="m-name">${esc(c.name || c.symbol)}${noRec ? '<span class="pill tag tag-stale">无成交记录</span>' : ''}</span>
+        <span class="m-quote ${cls(postChg)}">${postChg == null ? '--' : sign(postChg) + fmt(postChg) + '%'}</span></div>
+      <div class="m-meta">
+        <span><span class="sym-link" data-sym="${esc(c.symbol)}" title="查看日K">${esc(c.symbol)}</span></span>
+        <span class="m-div"></span>
+        <span>${c.exit_date || '--'}${c.hold_days != null ? ' · ' + c.hold_days + '天' : ''} · 均价 ${c.exit_avg != null ? fmt(c.exit_avg) : '--'}</span>
+        <span class="m-div"></span>
+        <span>已实现 <b class="${cls(c.realized_pnl)}">${noRec ? '--' : sign(c.realized_pnl) + '$' + fmt(Math.abs(c.realized_pnl))}${c.approx ? '（成本近似）' : ''}</b></span>
+      </div>`;
+    mlist.appendChild(mc);
+  });
+}
+
+document.getElementById('closedHead').addEventListener('click', () => {
+  closedOpen = !closedOpen;
+  document.getElementById('closedBody').hidden = !closedOpen;
+});
 
 function renderOverview(d) {
   if (!d || !d.ok && !d.positions) return;
@@ -982,6 +1059,7 @@ function renderOverview(d) {
 
   renderMarket(d);
   renderPositions(d);
+  renderClosed(d);
   drawAnalysis(d);
   // overview 到达即触发分时重绘：baseTotalCache 已更新，消除最长 30s 轮询空窗的口径偏差
   if (isIntradayMode() && chartData && chartData.length) { drawChart(); }
@@ -2667,6 +2745,8 @@ esAlert.addEventListener('overview', ev => {
     if (d.nav === undefined && lastOverview && lastOverview.nav) d.nav = lastOverview.nav;
     if (d.recent_trades === undefined && lastOverview && lastOverview.recent_trades)
       d.recent_trades = lastOverview.recent_trades;
+    if (d.closed === undefined && lastOverview && lastOverview.closed)
+      d.closed = lastOverview.closed;
     cashData = d.cash || cashData;
     renderOverview(d);
   } catch (e) { /* overview 事件解析失败不影响主流程 */ }
