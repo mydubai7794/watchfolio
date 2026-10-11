@@ -7,7 +7,7 @@
 - 保活转出（transfer→external）面值单列，不进恒等式不产生损益。
 """
 import logging
-from datetime import date
+from datetime import date, datetime
 
 import httpx
 
@@ -294,3 +294,128 @@ async def fetch_ecb_rates(start: str, end: str,
             last_err = str(e)
     logger.warning("ECB 参考价拉取失败(%s..%s): %s", start, end, last_err)
     return []
+
+
+# ---------------------------------------------------------------------------
+# 已清仓周期推导（trade_records 回放，纯计算无 IO）
+# ---------------------------------------------------------------------------
+
+def _dt_or_none(v):
+    """宽容取 datetime：datetime 原样 / date 补零点 / ISO 字符串截前 10 解析。"""
+    if v is None or isinstance(v, datetime):
+        return v
+    if isinstance(v, date):
+        return datetime(v.year, v.month, v.day)
+    try:
+        return datetime.fromisoformat(str(v)[:10])
+    except ValueError:
+        return None
+
+
+def _replay_closed_cycles(sym: str, meta: dict, cur_qty: float,
+                          recs: list[dict]) -> list[dict]:
+    """单 symbol 数量轨迹回放（build_closed_positions 内部辅助）。
+
+    锚点反推期初：q0 = cur_qty − Σ(BUY) + Σ(SELL)；q0>0 = email 记录前的
+    手工录入期初（期初成本 q0×cost_price 近似，首周期 approx）；q0<0（手工
+    改量/删行失真）钳 0 且首周期打 approx。数量每次归零 → 周期闭合：
+    realized = Σ卖额 − (Σ买额 + 期初成本)。@author yys
+    """
+    net = sum(float(t["quantity"]) * (1 if t["side"] == "BUY" else -1)
+              for t in recs)
+    q0 = cur_qty - net
+    anchor_approx = q0 > 1e-9
+    if q0 < -1e-9:
+        q0 = 0.0
+        anchor_approx = True
+    qty = q0
+    first_cycle = q0 <= 0            # q0>0 时首个周期已由期初开启
+    basis = q0 * float(meta.get("cost_price") or 0) if q0 > 0 else 0.0
+    start = _dt_or_none(recs[0].get("email_date") or recs[0].get("created_at")) \
+        if q0 > 0 else None
+    sell_amt = sell_qty = 0.0
+    cyc_approx = anchor_approx
+    out: list[dict] = []
+    for t in recs:
+        q, p = float(t["quantity"]), float(t["price"])
+        dt = _dt_or_none(t.get("email_date") or t.get("created_at"))
+        if t["side"] == "BUY":
+            if start is None:        # 新周期首笔（上一周期已闭合）
+                cyc_approx = anchor_approx if first_cycle else False
+                first_cycle = False
+                start, basis, sell_amt, sell_qty = dt, 0.0, 0.0, 0.0
+            qty += q
+            basis += q * p
+        else:                        # SELL
+            qty -= q
+            sell_amt += q * p
+            sell_qty += q
+            if qty < -1e-9:          # 轨迹失真防御：钳制归零
+                qty = 0.0
+                cyc_approx = True
+            if abs(qty) <= 1e-9:
+                qty = 0.0
+                realized = sell_amt - basis
+                exit_avg = sell_amt / sell_qty if sell_qty > 0 else None
+                out.append({
+                    "symbol": sym,
+                    "name": meta.get("name") or "",
+                    "market": meta.get("market") or "",
+                    "exit_date": dt.date().isoformat() if dt else None,
+                    "hold_days": (dt.date() - start.date()).days
+                                 if dt and start else None,
+                    "exit_qty": round(sell_qty, 4),
+                    "exit_avg": round(exit_avg, 4) if exit_avg else None,
+                    "realized_pnl": round(realized, 2),
+                    "realized_pct": round(realized / basis * 100, 2)
+                                    if basis > 0 else None,
+                    "approx": bool(cyc_approx),
+                })
+                # 周期状态复位（first_cycle 消耗语义：期初已开启则此处不再置位）
+                start, basis, sell_amt, sell_qty = None, 0.0, 0.0, 0.0
+                cyc_approx = False
+    return out
+
+
+def build_closed_positions(trades: list[dict], holdings: list[dict]) -> list[dict]:
+    """由 trade_records 回放推导已清仓周期列表（round trip）+ 无成交占位行。
+
+    口径（spec 2026-10-11 §3）：锚点反推期初数量、数量归零切周期、
+    realized = Σ卖额 − Σ买额 − 期初成本（期初成本 = q0 × 当前 cost_price 近似）。
+    trades 须按时间升序（get_all_trades 的 COALESCE 排序已保证）。
+    返回：周期行按 exit_date 倒序在前；qty==0 且无周期的 holdings 行输出
+    占位行（no_records=True、盈亏字段 None）沉底。@author yys
+    """
+    by_symbol: dict[str, list[dict]] = {}
+    for t in trades:
+        by_symbol.setdefault(t["symbol"], []).append(t)
+
+    rows: list[dict] = []
+    placeholders: list[dict] = []
+    for h in holdings:
+        sym = h["symbol"]
+        recs = by_symbol.pop(sym, [])
+        cur_qty = float(h["quantity"] or 0)
+        cycles = _replay_closed_cycles(sym, h, cur_qty, recs)
+        if cycles:
+            rows.extend(cycles)
+        elif cur_qty == 0:
+            placeholders.append({
+                "symbol": sym, "name": h.get("name") or "",
+                "market": h.get("market") or "",
+                "exit_date": None, "hold_days": None, "exit_qty": None,
+                "exit_avg": None, "realized_pnl": None, "realized_pct": None,
+                "approx": False, "no_records": True})
+
+    # holdings 行已删除（历史手动清理）但有成交的 symbol：按 q0=0 回放，
+    # 名称/市场取末条记录
+    for sym, recs in by_symbol.items():
+        if not recs:
+            continue
+        last = recs[-1]
+        meta = {"name": last.get("name") or "", "market": last.get("market") or "",
+                "cost_price": 0}
+        rows.extend(_replay_closed_cycles(sym, meta, 0.0, recs))
+
+    rows.sort(key=lambda r: r["exit_date"] or "", reverse=True)
+    return rows + placeholders
