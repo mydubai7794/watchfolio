@@ -123,6 +123,18 @@ async def _alter_add_rec_columns(pool):
             if "Duplicate column" not in str(e):
                 logger.warning("ALTER TABLE history_ticks ADD COLUMN %s 失败: %s", col, e)
 
+async def _alter_add_holdings_asset_type(pool):
+    """为 holdings 添加 asset_type 列（幂等；存量表靠此迁移，新表建表已含）。@author yys"""
+    try:
+        await execute(
+            "ALTER TABLE holdings ADD COLUMN `asset_type` VARCHAR(8) NULL "
+            "DEFAULT NULL COMMENT 'NULL未探测/stock个股/etf基金/fpi外国发行人无Form4/none人工排除'",
+            _pool=pool,
+        )
+    except Exception as e:
+        if "Duplicate column" not in str(e):
+            logger.warning("ALTER TABLE holdings ADD asset_type 失败: %s", e)
+
 
 async def init_tables():
     """创建所有业务表并插入种子配置（幂等）。"""
@@ -314,6 +326,7 @@ async def init_tables():
             cost_price  DECIMAL(14,4) NOT NULL DEFAULT 0 COMMENT '成本价(原币种)',
             currency    VARCHAR(5)   NOT NULL DEFAULT 'USD' COMMENT 'USD/HKD',
             enabled     TINYINT(1)   DEFAULT 1 COMMENT '1=启用',
+            asset_type  VARCHAR(8)   NULL DEFAULT NULL COMMENT 'NULL未探测/stock个股/etf基金/fpi外国发行人无Form4/none人工排除',
             sort_order  INT          DEFAULT 0 COMMENT '排序',
             created_at  DATETIME     DEFAULT CURRENT_TIMESTAMP,
             updated_at  DATETIME     DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -321,6 +334,7 @@ async def init_tables():
         """,
         _pool=pool,
     )
+    await _alter_add_holdings_asset_type(pool)
 
     # ---- portfolio_ticks (组合市值采样) ----
     await execute(
@@ -988,6 +1002,41 @@ async def delete_holding(holding_id: int) -> int:
     return await execute("DELETE FROM holdings WHERE id = %s", (holding_id,))
 
 
+async def set_holding_asset_type(symbol: str, asset_type: str) -> int:
+    """EDGAR 探测回写资产分类（stock/etf/fpi/none）。@author yys"""
+    return await execute(
+        "UPDATE holdings SET asset_type = %s WHERE symbol = %s",
+        (asset_type, symbol))
+
+
+async def save_insider_tx(rows: list[dict]) -> int:
+    """批量写入 Form 4 交易行（INSERT IGNORE 撞 uk_tx 幂等；price/value 允许 NULL）。@author yys"""
+    if not rows:
+        return 0
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                "INSERT IGNORE INTO insider_tx (symbol, cik, accession, filed_date, "
+                "trade_date, reporter, title, action, tx_code, shares, price, value_usd) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                [(r["symbol"], r["cik"], r["accession"], r["filed_date"],
+                  r.get("trade_date"), r["reporter"], r.get("title") or "",
+                  r["action"], r.get("tx_code") or "", int(r["shares"]),
+                  None if r.get("price") is None else _safe_decimal(r["price"], 4),
+                  None if r.get("value_usd") is None else _safe_decimal(r["value_usd"], 2))
+                 for r in rows])
+            return cur.rowcount
+
+
+async def get_insider_tx(symbol: str, days: int = 90) -> list[dict]:
+    """近 N 天 Form 4 交易行（filed_date 升序）。@author yys"""
+    return await execute_dict(
+        "SELECT * FROM insider_tx WHERE symbol = %s AND filed_date >= "
+        "DATE_SUB(CURDATE(), INTERVAL %s DAY) ORDER BY filed_date, id",
+        (symbol, days))
+
+
 async def update_holding_names(naming: dict[str, str]) -> int:
     """回写行情接口返回的名称。
 
@@ -1490,6 +1539,31 @@ async def init_macro_tables():
             created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE KEY uq_name_asof (name, asof)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='宏观估值指标日频快照'
+        """,
+        _pool=pool,
+    )
+
+    # ---- insider_tx (SEC Form 4 内部人交易，EDGAR 官方源) ----
+    await execute(
+        """
+        CREATE TABLE IF NOT EXISTS insider_tx (
+            id          BIGINT AUTO_INCREMENT PRIMARY KEY,
+            symbol      VARCHAR(16)  NOT NULL COMMENT '持仓代码',
+            cik         VARCHAR(16)  NOT NULL COMMENT 'SEC CIK',
+            accession   VARCHAR(32)  NOT NULL COMMENT '申报编号(带连字符)',
+            filed_date  DATE NOT NULL COMMENT '申报日',
+            trade_date  DATE NULL COMMENT '成交日',
+            reporter    VARCHAR(128) NOT NULL COMMENT '申报人',
+            title       VARCHAR(128) NOT NULL DEFAULT '' COMMENT '职务',
+            action      CHAR(1) NOT NULL COMMENT 'A=acquire买入 D=dispose卖出',
+            tx_code     VARCHAR(8)  NOT NULL DEFAULT '' COMMENT '交易代码 P/S/G/A/F等原样保留',
+            shares      BIGINT NOT NULL COMMENT '股数',
+            price       DECIMAL(12,4) NULL COMMENT '成交价(缺失为NULL)',
+            value_usd   DECIMAL(16,2) NULL COMMENT '金额USD(=shares*price)',
+            created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE KEY uk_tx (accession, reporter, action, shares, price),
+            KEY idx_symbol_date (symbol, filed_date)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='SEC Form 4 内部人交易(EDGAR官方源)'
         """,
         _pool=pool,
     )
