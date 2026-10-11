@@ -151,6 +151,16 @@ table.holdings { width: 100%; border-collapse: collapse; }
 /* 已清仓分区：表头整体可点折叠 + 「成本近似」小标 */
 .closed-head { cursor: pointer; user-select: none; }
 .approx-tag { font-style: normal; font-size: 11px; color: var(--txt3); margin-left: 4px; }
+
+/* ---- K线弹层成交列表：方向色与 --up/--down 同源（红涨绿跌） @author yys ---- */
+.kl-trades { margin-top: 10px; border-top: 1px solid var(--bg); padding-top: 8px; }
+.kl-trades h4 { margin: 0 0 6px; font-size: 12px; color: var(--txt2); font-weight: 600; }
+.kl-trades table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.kl-trades td, .kl-trades th { padding: 3px 8px; text-align: left; }
+.kl-trades th { color: var(--txt2); font-weight: 500; }
+.kl-trades .t-side { font-weight: 600; }
+.kl-trades .t-buy { color: var(--up); }
+.kl-trades .t-sell { color: var(--down); }
 th.sortable { cursor: pointer; }
 th.sortable:hover { color: var(--txt); }
 .arrow { font-size: 9px; color: var(--accent); }
@@ -563,6 +573,7 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
     </div>
     <canvas id="klRsi"></canvas>
     <div class="kline-info" id="klInfo"></div>
+    <div class="kl-trades" id="klTrades" hidden></div>
   </div>
 </div>
 
@@ -859,8 +870,12 @@ function renderPositions(d) {
   const mlist = document.getElementById('mobileList');
   tbody.innerHTML = ''; mlist.innerHTML = '';
   if (!positions.length) {
-    tbody.innerHTML = '<tr><td colspan="9" class="empty">暂无持仓，点击右上角「编辑持仓」添加</td></tr>';
-    mlist.innerHTML = '<div class="empty">暂无持仓，点击右上角「编辑持仓」添加</div>';
+    // 空态区分：从未持仓 vs 曾持仓现已全部清仓（后者引导到已清仓分区）
+    const hadClosed = (d.closed || []).length > 0;
+    const emptyTxt = hadClosed ? '已全部清仓，展开下方「已清仓」分区查看'
+      : '暂无持仓，点击右上角「编辑持仓」添加';
+    tbody.innerHTML = `<tr><td colspan="9" class="empty">${emptyTxt}</td></tr>`;
+    mlist.innerHTML = `<div class="empty">${emptyTxt}</div>`;
     return;
   }
   positions.forEach(p => {
@@ -934,7 +949,7 @@ function renderClosed(d) {
         + (c.approx ? '<i class="approx-tag">成本近似</i>' : '');
     const tr = document.createElement('tr');
     tr.innerHTML = `<td><div>${esc(c.name || c.symbol)}${noRec ? '<span class="pill tag tag-stale">无成交记录</span>' : ''}</div><div class="sym"><span class="sym-link" data-sym="${esc(c.symbol)}" title="查看日K">${esc(c.symbol)}</span></div></td>
-      <td>${c.exit_date || '--'}</td>
+      <td>${esc(c.exit_date || '--')}</td>
       <td>${c.hold_days != null ? c.hold_days : '--'}</td>
       <td>${c.exit_avg != null ? fmt(c.exit_avg) : '--'}</td>
       <td class="${cls(c.realized_pnl)}">${pnlHtml}</td>
@@ -949,7 +964,7 @@ function renderClosed(d) {
       <div class="m-meta">
         <span><span class="sym-link" data-sym="${esc(c.symbol)}" title="查看日K">${esc(c.symbol)}</span></span>
         <span class="m-div"></span>
-        <span>${c.exit_date || '--'}${c.hold_days != null ? ' · ' + c.hold_days + '天' : ''} · 均价 ${c.exit_avg != null ? fmt(c.exit_avg) : '--'}</span>
+        <span>${esc(c.exit_date || '--')}${c.hold_days != null ? ' · ' + c.hold_days + '天' : ''} · 均价 ${c.exit_avg != null ? fmt(c.exit_avg) : '--'}</span>
         <span class="m-div"></span>
         <span>已实现 <b class="${cls(c.realized_pnl)}">${noRec ? '--' : sign(c.realized_pnl) + '$' + fmt(Math.abs(c.realized_pnl))}${c.approx ? '（成本近似）' : ''}</b></span>
       </div>`;
@@ -2287,6 +2302,9 @@ function klRender() {
   const rsi = d.rsi_series.slice(start, end);
   const macd = d.macd_series || { dif: [], dea: [], hist: [] };
   const kdj = d.kdj_series || { k: [], d: [], j: [] };
+  // 成交记录（后端 trades 数组）：K线标记 + 列表双用途；每次重绘覆盖，
+  // 切周期/重开弹层天然重建，无残留；标记索引由 klDrawMain 对窗口切片现算
+  KL.trades = d.trades || [];
   klDrawMain(bars, d.marks || {}, (() => {
     if (KL.tf !== 'day' || !d.overlays) return null;
     return {ma50_series: (d.overlays.ma50_series || []).slice(start, end),
@@ -2298,6 +2316,34 @@ function klRender() {
     { rsi, dif: macd.dif.slice(start, end), dea: macd.dea.slice(start, end),
       hist: macd.hist.slice(start, end),
       k: kdj.k.slice(start, end), d2: kdj.d.slice(start, end), j: kdj.j.slice(start, end) });
+  klRenderTrades();
+}
+
+/**
+ * 成交列表：每笔买卖 + 相对最新收盘的至今涨跌幅（trades 来自 /api/kline payload）。
+ * 无成交记录隐藏容器；末根收盘取当前周期全量 bars 尾根（分时=最新桶），null 安全。@author yys
+ */
+function klRenderTrades() {
+  const box = document.getElementById('klTrades');
+  if (!box) return;
+  const trades = KL.trades || [];
+  if (!trades.length) { box.hidden = true; return; }
+  box.hidden = false;
+  const d = KL.data[KL.tf];
+  const bars = (d && d.bars) || [];
+  const last = bars.length ? bars[bars.length - 1] : null;
+  const lastPx = last ? +last.close : null;
+  const rows = trades.map(t => {
+    const chg = (lastPx && +t.price) ? (lastPx - +t.price) / +t.price * 100 : null;
+    const sideCls = t.side === 'BUY' ? 't-buy' : 't-sell';
+    const sideTxt = t.side === 'BUY' ? '买入' : '卖出';
+    return `<tr><td class="t-side ${sideCls}">${sideTxt}</td>` +
+      `<td>${esc(t.date)}</td><td>${fmt(t.price)}</td><td>${fmt(t.quantity)}</td>` +
+      `<td class="${cls(chg)}">${chg == null ? '--' : sign(chg) + fmt(chg) + '%'}</td></tr>`;
+  }).join('');
+  box.innerHTML = `<h4>成交记录（${trades.length} 笔 · 至今按最新收盘）</h4>` +
+    `<table><thead><tr><th>方向</th><th>日期</th><th>价格</th><th>数量</th><th>至今涨跌</th></tr></thead>` +
+    `<tbody>${rows}</tbody></table>`;
 }
 
 /** 三块画布共用几何：左右留白 + 右侧价格轴宽 + 单根K线槽宽。@author yys */
@@ -2390,6 +2436,25 @@ function klDrawMain(bars, marks, ov) {
     ctx.fillStyle = color;
     ctx.fillText(name + ' ' + p.toFixed(2), W - pad.r + 4, y(p) - 8);
   });
+  // 买卖点标记：BUY 红▲画蜡烛 low 下方，SELL 绿▼画蜡烛 high 上方（红涨绿跌语义）。
+  // bars 为可见窗口切片：局部建 date→索引 映射，标记日期不在窗口（range 截尾/周月聚合/非交易日）则跳过
+  if (KL.trades && KL.trades.length) {
+    const tIdx = {};
+    bars.forEach((b, i) => { tIdx[b.date] = i; });
+    ctx.font = 'bold 10px ' + FONT; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    KL.trades.forEach(t => {
+      const i = tIdx[t.date];
+      if (i == null) return;
+      const b = bars[i];
+      if (t.side === 'BUY') {
+        ctx.fillStyle = UP_COLOR;
+        ctx.fillText('▲', x(i), y(+b.low) + 12);   // low 下方 12px：贴支撑买入位，避让底部日期带
+      } else {
+        ctx.fillStyle = DOWN_COLOR;
+        ctx.fillText('▼', x(i), y(+b.high) - 6);
+      }
+    });
+  }
   // 悬浮十字竖线（随 tipIdx 高亮当前桶）
   if (KL.tipIdx >= 0 && KL.tipIdx < bars.length) {
     const cx = x(KL.tipIdx);
