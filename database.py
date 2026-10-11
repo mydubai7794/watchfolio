@@ -361,6 +361,24 @@ async def init_tables():
         _pool=pool,
     )
 
+    # ---- holding_valuations (估值因子原始值，长桥日更 + EDGAR 周更增速) ----
+    await execute(
+        """
+        CREATE TABLE IF NOT EXISTS holding_valuations (
+          symbol         VARCHAR(16)   NOT NULL,
+          eps_ttm        DECIMAL(16,6) NULL,
+          bps            DECIMAL(16,6) NULL,
+          growth_pct     DECIMAL(10,4) NULL COMMENT '最近两个完整财年EPS同比%（原币）',
+          dividend_yield DECIMAL(8,4)  NULL,
+          updated_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                         ON UPDATE CURRENT_TIMESTAMP,
+          PRIMARY KEY (symbol)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+          COMMENT='估值因子原始值（长桥日更+EDGAR周更增速）'
+        """,
+        _pool=pool,
+    )
+
     # ---- portfolio_ticks (组合市值采样) ----
     await execute(
         """
@@ -1072,6 +1090,39 @@ async def get_insider_accessions(symbol: str, days: int = 120) -> set[str]:
         "filed_date >= DATE_SUB(CURDATE(), INTERVAL %s DAY)",
         (symbol, days))
     return {r["accession"] for r in rows}
+
+
+async def upsert_holding_valuation_static(symbol: str, eps_ttm, bps,
+                                          dividend_yield) -> int:
+    """日更 upsert（长桥 static_info 口径）：仅 eps/bps/dividend_yield 三列，
+    不触碰 growth_pct（周更节奏，防覆盖）。@author yys"""
+    return await execute(
+        "INSERT INTO holding_valuations (symbol, eps_ttm, bps, dividend_yield) "
+        "VALUES (%s,%s,%s,%s) ON DUPLICATE KEY UPDATE "
+        "eps_ttm=VALUES(eps_ttm), bps=VALUES(bps), "
+        "dividend_yield=VALUES(dividend_yield)",
+        (symbol,
+         None if eps_ttm is None else _safe_decimal(eps_ttm, 6),
+         None if bps is None else _safe_decimal(bps, 6),
+         None if dividend_yield is None else _safe_decimal(dividend_yield, 4)))
+
+
+async def upsert_holding_valuation_growth(symbol: str, growth_pct) -> int:
+    """周更 upsert（EDGAR companyconcept 增速）：仅 growth 列。@author yys"""
+    return await execute(
+        "INSERT INTO holding_valuations (symbol, growth_pct) VALUES (%s,%s) "
+        "ON DUPLICATE KEY UPDATE growth_pct=VALUES(growth_pct)",
+        (symbol,
+         None if growth_pct is None else _safe_decimal(growth_pct, 4)))
+
+
+async def get_valuations() -> dict[str, dict]:
+    """全表估值行 → {symbol: row}（≤20 行无过滤必要）。@author yys"""
+    rows = await execute_dict(
+        "SELECT symbol, eps_ttm, bps, growth_pct, dividend_yield, "
+        "DATE_FORMAT(updated_at, '%%Y-%%m-%%d %%H:%%i:%%s') updated_at "
+        "FROM holding_valuations")
+    return {r["symbol"]: r for r in rows}
 
 
 async def update_holding_names(naming: dict[str, str]) -> int:
