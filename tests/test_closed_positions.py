@@ -281,3 +281,30 @@ def test_kline_trades_payload(monkeypatch):
     d = client.get("/api/kline/QQQ?tf=day&range=1000").json()
     assert d["trades"] == [{"date": "2026-09-30", "side": "BUY",
                             "price": 100.0, "quantity": 10.0}]
+
+
+def test_kline_trades_email_date_fallback(monkeypatch):
+    """email_date 缺失时回退 created_at 归一日期（防只读 email_date 的回归）。"""
+    async def fake_bars(sym, limit=None):
+        return [{"date": date(2026, 10, 1), "open": 1, "high": 2, "low": 0.5,
+                 "close": 1.5, "volume": 10}]
+
+    async def fake_rule(sym):
+        return None
+
+    async def fake_holdings(enabled_only=True):
+        return []
+
+    async def fake_trades(sym):
+        return [{"symbol": "MU", "side": "SELL", "quantity": 5, "price": 90.0,
+                 "email_date": None,
+                 "created_at": datetime(2026, 10, 2, 15, 30)}]
+
+    monkeypatch.setattr(server.db, "get_daily_bars", fake_bars)
+    monkeypatch.setattr(server.db, "get_alert_rule", fake_rule)
+    monkeypatch.setattr(server.db, "get_holdings", fake_holdings)
+    monkeypatch.setattr(server.db, "get_trades_by_symbol", fake_trades)
+    server._KLINE_CACHE.clear()
+    client = _client(monkeypatch)
+    d = client.get("/api/kline/MU?tf=day&range=1000").json()
+    assert d["trades"][0]["date"] == "2026-10-02"

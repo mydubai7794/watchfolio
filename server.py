@@ -2449,8 +2449,9 @@ async def kline(symbol: str, request: Request, range: int = 120, tf: str = "day"
         # email_date 缺失回退 created_at，随 (symbol,tf) 60s 缓存一并落）
         try:
             _trows = await db.get_trades_by_symbol(symbol)
-        except Exception:
+        except Exception as e:
             _trows = []
+            logger.warning("kline trades 查询失败（降级空数组）: %s", e)
 
         def _tdate(r):
             d = r.get("email_date") or r.get("created_at")
