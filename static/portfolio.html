@@ -2942,6 +2942,8 @@ esAlert.addEventListener('overview', ev => {
       d.recent_trades = lastOverview.recent_trades;
     if (d.closed === undefined && lastOverview && lastOverview.closed)
       d.closed = lastOverview.closed;
+    if (d.context === undefined && lastOverview && lastOverview.context)
+      d.context = lastOverview.context;
     cashData = d.cash || cashData;
     renderOverview(d);
   } catch (e) { /* overview 事件解析失败不影响主流程 */ }
