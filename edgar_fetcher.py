@@ -23,6 +23,8 @@ SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
 ARCHIVES_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc}/{doc}"
 EDGAR_MIN_INTERVAL = 2.0          # 请求最小间隔（秒）
 EDGAR_BACKOFFS = (2.0, 4.0, 8.0)  # 429/503 退避序列
+# SEC 公平访问政策要求 UA 声明联系方式（名称 + email）；默认值仅最后兜底，
+# 生产 UA 经 sys_config.EDGAR_UA 配置（网络层热取，见 _resolve_ua）
 DEFAULT_UA = "QDII Portfolio Monitor"
 
 
@@ -45,12 +47,13 @@ def classify_asset_type(form_types: list[str]) -> str | None:
     """按申报类型集判定资产分类：20-F→fpi / 10-K,10-Q→stock / N系→etf。
     三类互斥（同一发行人不会同时提交），fpi 优先判定；都不含返回 None 下轮再试。@author yys"""
     s = set(form_types or [])
-    if any(f.startswith("20-F") for f in s):
+    if any((f or "").startswith("20-F") for f in s):
         return "fpi"
-    if any(f.startswith("10-K") or f.startswith("10-Q") for f in s):
-        return "stock"
-    if any(f.startswith("N-1A") or f.startswith("N-CSR") or f.startswith("NPORT")
+    if any((f or "").startswith("10-K") or (f or "").startswith("10-Q")
            for f in s):
+        return "stock"
+    if any((f or "").startswith("N-1A") or (f or "").startswith("N-CSR")
+           or (f or "").startswith("NPORT") for f in s):
         return "etf"
     return None
 
@@ -76,7 +79,7 @@ def parse_submissions_recent(text: str, form_filter: str | None = None) -> list[
 
 def form4_url(cik: int, accession: str, primary_doc: str) -> str:
     """Archives 原始 XML 地址（primary_doc 含 xsl 渲染前缀时取 basename）。@author yys"""
-    doc = primary_doc.split("/")[-1] or "primary_doc.xml"
+    doc = str(primary_doc or "").split("/")[-1] or "primary_doc.xml"
     return ARCHIVES_URL.format(cik=cik, acc=accession.replace("-", ""), doc=doc)
 
 

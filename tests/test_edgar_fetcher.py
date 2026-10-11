@@ -19,6 +19,8 @@ def test_classify_asset_type_priority():
     assert ef.classify_asset_type(["10-K", "4", "8-K"]) == "stock"
     assert ef.classify_asset_type(["10-Q/A", "4"]) == "stock"
     assert ef.classify_asset_type(["20-F", "6-K"]) == "fpi"          # fpi 优先于其它
+    assert ef.classify_asset_type(["20-F", "10-K"]) == "fpi"         # 混合申报 fpi 优先
+    assert ef.classify_asset_type(["20-F", None]) == "fpi"           # None 元素防御
     assert ef.classify_asset_type(["N-1A", "NPORT-PART"]) == "etf"
     assert ef.classify_asset_type(["N-CSR"]) == "etf"
     assert ef.classify_asset_type(["6-K", "8-K"]) is None            # 无法归类下轮再试
@@ -144,3 +146,5 @@ def test_form4_url_strips_xsl_prefix():
     assert ef.form4_url(1045810, "0001045810-26-000001",
                         "primary_doc.xml") == \
         "https://www.sec.gov/Archives/edgar/data/1045810/000104581026000001/primary_doc.xml"
+    assert ef.form4_url(1045810, "0001045810-26-000001",
+                        None).endswith("/primary_doc.xml")            # None 防御兜底
