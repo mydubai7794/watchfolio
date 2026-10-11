@@ -652,3 +652,5 @@ def test_fetch_static_info_success_and_failure(monkeypatch):
 
         monkeypatch.setattr(lp, "_sdk_call", fake_call_fail)
         assert asyncio.run(lp.fetch_static_info(["NVDA"])) == []
+        # 失败必须记账（漏记账会导致长桥健康状态漂移，批1审查 Minor-4）
+        assert lp.fail_streak >= 1 and lp.last_error

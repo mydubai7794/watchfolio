@@ -23,6 +23,7 @@ def test_upsert_valuation_static_and_get(monkeypatch):
         calls.append((sql, params))
 
     async def fake_dict(sql, params=None):
+        calls.append((sql, params))
         return [{"symbol": "NVDA", "eps_ttm": 8.0, "bps": 9.5,
                  "growth_pct": 66.67, "dividend_yield": 0.52,
                  "updated_at": "2026-10-11 16:00:00"}]
@@ -41,6 +42,11 @@ def test_upsert_valuation_static_and_get(monkeypatch):
     rows = asyncio.run(db.get_valuations())
     assert rows["NVDA"]["eps_ttm"] == 8.0
     assert rows["NVDA"]["growth_pct"] == 66.67
+    # 回归：execute_dict 无参数化不做 % 插值，DATE_FORMAT 必须 MySQL 单 %
+    #（%% 会输出字面量字符串，2026-10-11 批1审查 Important-1）
+    get_sql = calls[2][0]
+    assert "%%" not in get_sql
+    assert "DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s')" in get_sql
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +133,14 @@ def test_parse_eps_growth():
     assert valuation.parse_eps_growth(zero_base) is None
     assert valuation.parse_eps_growth("not json") is None
     assert valuation.parse_eps_growth(None) is None
+    # 合法 JSON 但结构异常（代理拦截页等）：顶层非 dict / val 非数值 → None
+    assert valuation.parse_eps_growth("[1,2]") is None
+    bad_val = json.dumps({"units": {"USD/shares": [
+        {"start": "2024-01-01", "end": "2024-12-31", "val": {"x": 1},
+         "form": "10-K", "fp": "FY", "filed": "2025-02-01"},
+        {"start": "2025-01-01", "end": "2025-12-31", "val": 2.0,
+         "form": "10-K", "fp": "FY", "filed": "2026-02-01"}]}})
+    assert valuation.parse_eps_growth(bad_val) is None
     # 同财年重复行取 filed 最大（后申报修正值优先；修正申报行取白名单内
     # 同财年后申报的 10-K 行——保守口径不含 10-K/A）
     corrected = json.dumps({"units": {"USD/shares": [

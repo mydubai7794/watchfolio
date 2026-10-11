@@ -1117,12 +1117,19 @@ async def upsert_holding_valuation_growth(symbol: str, growth_pct) -> int:
 
 
 async def get_valuations() -> dict[str, dict]:
-    """全表估值行 → {symbol: row}（≤20 行无过滤必要）。@author yys"""
+    """全表估值行 → {symbol: row}（≤20 行无过滤必要）。数值列 DECIMAL→float
+    归一（注入层与 JSON 序列化不做 Decimal 混算）。@author yys"""
     rows = await execute_dict(
         "SELECT symbol, eps_ttm, bps, growth_pct, dividend_yield, "
-        "DATE_FORMAT(updated_at, '%%Y-%%m-%%d %%H:%%i:%%s') updated_at "
+        "DATE_FORMAT(updated_at, '%Y-%m-%d %H:%i:%s') updated_at "
         "FROM holding_valuations")
-    return {r["symbol"]: r for r in rows}
+    out = {}
+    for r in rows:
+        for k in ("eps_ttm", "bps", "growth_pct", "dividend_yield"):
+            if r.get(k) is not None:
+                r[k] = float(r[k])
+        out[r["symbol"]] = r
+    return out
 
 
 async def update_holding_names(naming: dict[str, str]) -> int:

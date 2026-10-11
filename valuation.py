@@ -27,8 +27,8 @@ def normalize_static_info(infos) -> dict:
     Decimal→float；0/负值保留原值（ETF 噪声门控在上层）。@author yys"""
     out = {}
     for q in infos or []:
-        sym = str(getattr(q, "symbol", "")).replace(".US", "", 1)
-        if not sym:
+        sym = str(getattr(q, "symbol", None) or "").replace(".US", "", 1)
+        if not sym or sym == "None":
             continue
 
         def _f(name):
@@ -48,10 +48,12 @@ def parse_eps_growth(text) -> float | None:
 
     行过滤：form ∈ {10-K,20-F,40-F} 且 fp=FY（fp 过滤季度/累计值混入）；
     同财年多行（重复申报）取 filed 最大行；财年不足两个 / 基期 0 /
-    解析失败 → None。@author yys"""
+    解析失败（含合法 JSON 但结构异常，如代理拦截页）→ None。@author yys"""
     try:
         d = json.loads(text)
     except (json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(d, dict):
         return None
     units = d.get("units") or {}
     if not units:
@@ -66,7 +68,10 @@ def parse_eps_growth(text) -> float | None:
                 or r.get("val") is None):
             continue
         key = (r["start"][:4], r["end"][:4])
-        cand = (str(r.get("filed", "")), float(r["val"]))
+        try:
+            cand = (str(r.get("filed", "")), float(r["val"]))
+        except (TypeError, ValueError):
+            continue
         if key not in fy or cand[0] >= fy[key][0]:
             fy[key] = cand
     if len(fy) < 2:
