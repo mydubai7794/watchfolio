@@ -1655,6 +1655,24 @@ async def save_daily_bars(symbol: str, rows: list) -> int:
             return cur.rowcount
 
 
+async def update_daily_bars(symbol: str, rows: list) -> int:
+    """重叠行终值校正（merge_bars 判定的未终态 bar 整行覆盖 OHLCV）。
+
+    rows: [(date, open, high, low, close, volume)]；仅更新已有行。@author yys"""
+    if not rows:
+        return 0
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.cursor() as cur:
+            await cur.executemany(
+                "UPDATE daily_bars SET open=%s, high=%s, low=%s, close=%s, volume=%s "
+                "WHERE symbol=%s AND date=%s",
+                [(_safe_decimal(o, 6), _safe_decimal(h, 6), _safe_decimal(l, 6),
+                  _safe_decimal(c, 6), int(v or 0), symbol, d)
+                 for d, o, h, l, c, v in rows])
+            return cur.rowcount
+
+
 async def replace_daily_bars(symbol: str, rows: list) -> int:
     """整段重写（除权事件后覆盖旧复权数据；显式事务保证 DELETE+INSERT 原子）。@author yys"""
     if not rows:

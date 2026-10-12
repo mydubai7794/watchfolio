@@ -324,24 +324,38 @@ def lp_symbol(symbol: str) -> str:
     return symbol if symbol.endswith(".US") else f"{symbol}.US"
 
 
-def merge_bars(existing: dict[str, float], fetched: list[dict]) -> tuple[list, bool]:
-    """增量合并：返回 (新增行列表, 是否需要整段重拉)。
+MERGE_FIX_MIN = 0.0001  # 重叠行校正下限 0.01%（更低视为同值浮点噪声）
+
+
+def merge_bars(existing: dict[str, float], fetched: list[dict]) -> tuple[list, bool, list]:
+    """增量合并：返回 (新增行列表, 是否需要整段重拉, 待校正行列表)。
 
     existing: {date_str: close}；fetched: [{date, close,...}] 升序（open/
     high/low/volume 可缺省，纯逻辑用例只带 date/close）。重叠区间 close
-    偏差 >0.5% 判定除权/拆股 → 整段重拉。"""
+    偏差：>0.5% 判定除权/拆股 → 整段重拉；0.01%~0.5% 判定上次写入的是
+    未终态 bar（收盘后数小时内长桥管道未终态化，DRAM 2026-10-09 实例：
+    写入 close 56.965、终值 57.19 偏差 0.39%）→ 列入待校正行由调用方
+    UPDATE 修正；≤0.01% 视为同值。@author yys"""
     reload_needed = False
+    changed: list = []
     for b in fetched:
         d = str(b["date"])[:10]
         old = existing.get(d)
-        if old is not None and old > 0 and abs(float(b["close"]) - old) / old > 0.005:
-            reload_needed = True
+        if old is not None and old > 0:
+            dev = abs(float(b["close"]) - old) / old
+            if dev > 0.005:
+                reload_needed = True
+            elif dev > MERGE_FIX_MIN:
+                changed.append((b["date"], float(b.get("open") or 0),
+                                float(b.get("high") or 0),
+                                float(b.get("low") or 0),
+                                float(b["close"]), int(b.get("volume") or 0)))
     max_d = max(existing) if existing else None
     new_rows = [(b["date"], float(b.get("open") or 0), float(b.get("high") or 0),
                  float(b.get("low") or 0), float(b["close"]),
                  int(b.get("volume") or 0))
                 for b in fetched if max_d is None or str(b["date"])[:10] > max_d]
-    return new_rows, reload_needed
+    return new_rows, reload_needed, changed
 
 
 async def refresh_symbol(symbol: str) -> dict:
@@ -359,14 +373,20 @@ async def refresh_symbol(symbol: str) -> dict:
     fetched.sort(key=lambda b: b["date"])
     existing_rows = await db.get_daily_bars(symbol)
     existing = {str(r["date"])[:10]: float(r["close"]) for r in existing_rows}
-    new_rows, reload_needed = merge_bars(existing, fetched)
+    new_rows, reload_needed, changed = merge_bars(existing, fetched)
     if reload_needed:
         rows = [(b["date"], b["open"], b["high"], b["low"], b["close"], b["volume"])
                 for b in fetched]
         await db.replace_daily_bars(symbol, rows)
         logger.info("日K除权事件整段重拉: %s (%d 根)", symbol, len(rows))
-    elif new_rows:
-        await db.save_daily_bars(symbol, new_rows)
+    else:
+        if new_rows:
+            await db.save_daily_bars(symbol, new_rows)
+        if changed:
+            # 未终态行整行覆盖（OHLCV 全量校正，不只 close）@author yys
+            await db.update_daily_bars(symbol, changed)
+            logger.info("日K未终态行校正: %s %s", symbol,
+                        [str(r[0])[:10] for r in changed])
     bars = await db.get_daily_bars(symbol)
     INDICATORS[symbol] = compute_indicators(bars)
     if symbol == "VIX":

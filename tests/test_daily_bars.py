@@ -91,8 +91,9 @@ def test_rsi_flat_market():
 def test_merge_incremental_new_only():
     existing = {"2026-01-01": 10.0, "2026-01-02": 11.0}
     fetched = [{"date": "2026-01-02", "close": 11.0}, {"date": "2026-01-03", "close": 12.0}]
-    new_rows, reload_needed = dbar.merge_bars(existing, fetched)
+    new_rows, reload_needed, changed = dbar.merge_bars(existing, fetched)
     assert reload_needed is False
+    assert changed == []                       # 同值重叠行不触发校正
     assert [r[0] for r in new_rows] == ["2026-01-03"]
 
 
@@ -100,8 +101,30 @@ def test_merge_detects_adjustment_event():
     existing = {"2026-01-02": 11.0}
     fetched = [{"date": "2026-01-02", "close": 5.5},   # 复权因子跳变 >0.5%
                {"date": "2026-01-03", "close": 5.6}]
-    new_rows, reload_needed = dbar.merge_bars(existing, fetched)
+    new_rows, reload_needed, changed = dbar.merge_bars(existing, fetched)
     assert reload_needed is True
+
+
+def test_merge_updates_stale_bar():
+    """未终态 bar 校正：DRAM 2026-10-09 实例（写入 56.965、终值 57.19、
+    偏差 0.39% ∈ (0.01%, 0.5%)）→ changed 整行、不整段重拉、不进新增。"""
+    existing = {"2026-10-08": 56.93, "2026-10-09": 56.965}
+    fetched = [
+        {"date": "2026-10-08", "close": 56.93},
+        {"date": "2026-10-09", "close": 57.19, "open": 57.94, "high": 58.03,
+         "low": 56.775, "volume": 16813206},
+    ]
+    new_rows, reload_needed, changed = dbar.merge_bars(existing, fetched)
+    assert reload_needed is False
+    assert new_rows == []
+    assert len(changed) == 1
+    d, o, h, l, c, v = changed[0]
+    assert str(d)[:10] == "2026-10-09" and c == 57.19 and v == 16813206
+    # 浮点噪声防线：偏差 ≤0.01%（57.185→57.19 ≈ 0.0087%）不校正
+    existing2 = {"2026-10-09": 57.185}
+    _, _, changed2 = dbar.merge_bars(
+        existing2, [{"date": "2026-10-09", "close": 57.19}])
+    assert changed2 == []
 
 
 def test_symbols_need_us_suffix():
