@@ -2577,11 +2577,14 @@ async def portfolio_overview():
         data["recent_trades"] = await db.get_recent_trades(10)
     except Exception:
         data["recent_trades"] = []
-    # 已清仓周期列表（trade_records 回放推导；留痕数据随 60s 缓存 eventual
-    # 生效，不进 SSE 推送载荷——前端沿用 recent_trades 保活合并模式）
+    # 已清仓周期列表（trade_records 回放推导 + 人工钉值覆盖；留痕数据随
+    # 60s 缓存 eventual 生效，不进 SSE 推送载荷——前端沿用 recent_trades
+    # 保活合并模式）
     try:
         _trades, _holdings = await _get_closed_ctx()
-        data["closed"] = ledger.build_closed_positions(_trades, _holdings)
+        data["closed"] = ledger.build_closed_positions(
+            _trades, _holdings, pnl_overrides=await _get_closed_pnl_overrides(),
+            anchor_start=await _get_anchor_start())
     except Exception as e:
         data["closed"] = []
         logger.warning("closed 块构建失败（本轮降级空数组）: %s", e)
@@ -2667,6 +2670,54 @@ async def _get_closed_ctx() -> tuple[list[dict], list[dict]]:
     trades, holdings = await db.get_all_trades(), await db.get_holdings()
     _closed_ctx_cache.update(ts=now, trades=trades, holdings=holdings)
     return trades, holdings
+
+
+# 已清仓已实现盈亏人工钉值（sys_config JSON {symbol: pnl}，60s 缓存）：
+# 期初成本数据缺失（如 holdings 行已删的历史清仓票）回放失真时人工指定
+CLOSED_PNL_OVERRIDES_KEY = "closed_pnl_overrides"
+_closed_pnl_overrides_cache = {"ts": 0.0, "value": None}
+
+
+async def _get_closed_pnl_overrides() -> dict | None:
+    """读 sys_config closed_pnl_overrides → {symbol: 盈亏}；无配置/解析失败
+    返回 None（回放推导值原样保留）。@author yys"""
+    now = time.time()
+    if now - _closed_pnl_overrides_cache["ts"] < 60:
+        return _closed_pnl_overrides_cache["value"]
+    value = None
+    try:
+        raw = await db.get_config(CLOSED_PNL_OVERRIDES_KEY)
+        if raw:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                value = {str(k): float(v) for k, v in parsed.items()}
+    except Exception as e:
+        logger.warning("closed_pnl_overrides 读取/解析失败（本轮忽略）: %s", e)
+    _closed_pnl_overrides_cache.update(ts=now, value=value)
+    return value
+
+
+# 期初锚定周期建仓日（sys_config ISO 日期，60s 缓存）：上线前建仓的
+# 已清仓票 hold_days 起算点（真实 BUY 记录优先）
+ANCHOR_START_KEY = "anchor_start_date"
+_anchor_start_cache = {"ts": 0.0, "value": None}
+
+
+async def _get_anchor_start() -> date | None:
+    """读 sys_config anchor_start_date → date；无配置/解析失败返回 None
+    （期初周期 hold_days 保持 None，前端显示 --）。@author yys"""
+    now = time.time()
+    if now - _anchor_start_cache["ts"] < 60:
+        return _anchor_start_cache["value"]
+    value = None
+    try:
+        raw = await db.get_config(ANCHOR_START_KEY)
+        if raw:
+            value = date.fromisoformat(str(raw)[:10])
+    except Exception as e:
+        logger.warning("anchor_start_date 读取/解析失败（本轮忽略）: %s", e)
+    _anchor_start_cache.update(ts=now, value=value)
+    return value
 
 
 @app.get("/api/portfolio/nav")

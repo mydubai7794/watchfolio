@@ -84,13 +84,38 @@ def test_reentry_two_cycles():
 
 
 def test_anchor_initial_position():
-    """期初锚点：无买入记录直接卖5@100，cost=80 → q0=5，realized=100，approx。"""
+    """期初锚点：无买入记录直接卖5@100，cost=80 → q0=5，realized=100，approx。
+
+    期初买入日无成交记录 → hold_days 无从计算，输出 None（前端显示 --），
+    不再取首条记录日（=卖出日，恒 0 天，误导）。
+    """
     trades = [_tr("AMD", "SELL", 5, 100, datetime(2026, 1, 10))]
     rows = ledger.build_closed_positions(trades, [_h("AMD", 0, cost=80)])
     assert len(rows) == 1
     assert rows[0]["realized_pnl"] == 100.0          # 500 - 5×80
     assert rows[0]["realized_pct"] == 25.0
     assert rows[0]["approx"] is True
+    assert rows[0]["hold_days"] is None
+
+
+def test_anchor_cycle_addon_not_reset():
+    """期初周期内 BUY 加仓不重置周期：q0=4，SELL2 → BUY3 → SELL5 清仓。
+
+    realized = (200+600) − (4×80 + 3×50) = 330（期初成本与加仓成本都计入）；
+    hold_days=None（期初买入日未知）；exit_avg=800/7。
+    """
+    trades = [_tr("AMD", "SELL", 2, 100, datetime(2026, 1, 10)),
+              _tr("AMD", "BUY", 3, 50, datetime(2026, 1, 12)),
+              _tr("AMD", "SELL", 5, 120, datetime(2026, 1, 15))]
+    rows = ledger.build_closed_positions(trades, [_h("AMD", 0, cost=80)])
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["exit_date"] == "2026-01-15"
+    assert r["hold_days"] is None
+    assert r["exit_qty"] == 7.0
+    assert r["exit_avg"] == round(800 / 7, 4)
+    assert r["realized_pnl"] == 330.0
+    assert r["approx"] is True
 
 
 def test_anchor_negative_clamped():
@@ -126,6 +151,36 @@ def test_oversell_clamped_mid_cycle():
     assert r["realized_pnl"] == 800.0
     assert r["realized_pct"] == 80.0
     assert r["approx"] is True
+
+
+def test_anchor_start_dates_hold_days():
+    """anchor_start：期初锚定周期 hold_days 从人工配置建仓日（sys_config）
+    起算；不传时保持 None。买入 7-14 → 清仓 10-12 = 90 天。"""
+    trades = [_tr("AMD", "SELL", 5, 100, datetime(2026, 10, 12))]
+    rows = ledger.build_closed_positions(trades, [_h("AMD", 0, cost=80)])
+    assert rows[0]["hold_days"] is None               # 不传 → None
+    rows = ledger.build_closed_positions(trades, [_h("AMD", 0, cost=80)],
+                                         anchor_start=date(2026, 7, 14))
+    assert rows[0]["hold_days"] == 90
+
+
+def test_anchor_start_deleted_holdings_row():
+    """anchor_start 覆盖 holdings 行已删分支（03152 场景）：无 BUY 记录
+    直接 SELL 钳制闭合，hold_days 同样从配置建仓日起算。"""
+    trades = [_tr("03152", "SELL", 1, 1135.10, datetime(2026, 10, 7))]
+    rows = ledger.build_closed_positions(trades, [], anchor_start=date(2026, 7, 14))
+    assert len(rows) == 1
+    assert rows[0]["hold_days"] == 85                 # 10-07 − 07-14
+
+
+def test_anchor_start_not_override_real_buy():
+    """anchor_start 不覆盖真实买入日：完整周期（有 BUY 记录）hold_days
+    仍从首笔 BUY 起算。"""
+    trades = [_tr("MU", "BUY", 10, 100, datetime(2026, 9, 1)),
+              _tr("MU", "SELL", 10, 120, datetime(2026, 10, 1))]
+    rows = ledger.build_closed_positions(trades, [_h("MU", 0)],
+                                         anchor_start=date(2026, 7, 14))
+    assert rows[0]["hold_days"] == 30                 # 首笔 BUY 9-1 起算
 
 
 def test_dirty_quantity_rows_filtered():
@@ -205,6 +260,43 @@ def test_mixed_closed_and_manual_holding():
 
 
 # ---------------------------------------------------------------------------
+# 人工钉值覆盖（pnl_overrides）：期初成本缺失回放失真的人工修正
+# ---------------------------------------------------------------------------
+
+def test_pnl_override_applies():
+    """钉值生效：孤儿 symbol（holdings 行已删、期初成本缺失回放虚高）→
+    realized_pnl 覆盖为人工值、approx 清除、realized_pct 失效置 None。"""
+    trades = [_tr("03152", "SELL", 1, 1135.10, datetime(2026, 10, 7),
+                  name="A博时港元", market="HK")]
+    rows = ledger.build_closed_positions(trades, [],
+                                         pnl_overrides={"03152": -1.0})
+    assert len(rows) == 1
+    assert rows[0]["realized_pnl"] == -1.0
+    assert rows[0]["approx"] is False
+    assert rows[0]["realized_pct"] is None
+
+
+def test_pnl_override_missing_symbol_untouched():
+    """钉值字典不含该 symbol → 回放推导值原样保留。"""
+    trades = [_tr("MU", "BUY", 10, 100, datetime(2026, 1, 5)),
+              _tr("MU", "SELL", 10, 120, datetime(2026, 2, 10))]
+    rows = ledger.build_closed_positions(
+        trades, [_h("MU", 0)], pnl_overrides={"03152": -1.0})
+    assert rows[0]["realized_pnl"] == 200.0
+    assert rows[0]["approx"] is False
+    assert rows[0]["realized_pct"] == 20.0
+
+
+def test_pnl_override_placeholder_not_applied():
+    """占位行（no_records 无周期）不参与钉值覆盖。"""
+    rows = ledger.build_closed_positions(
+        [], [_h("F", 0, name="福特")], pnl_overrides={"F": -1.0})
+    assert len(rows) == 1
+    assert rows[0]["no_records"] is True
+    assert rows[0]["realized_pnl"] is None
+
+
+# ---------------------------------------------------------------------------
 # database 查询 SQL 形状（打桩 execute_dict，零连库）
 # ---------------------------------------------------------------------------
 
@@ -246,7 +338,12 @@ class TestTradeQueries:
 def _client(monkeypatch):
     async def fake_get_session(t):
         return {"username": "u", "expires": time.time() + 3600}
+
+    async def fake_get_config(key):
+        return None
+
     monkeypatch.setattr(server.db, "get_session", fake_get_session)
+    monkeypatch.setattr(server.db, "get_config", fake_get_config)
     c = TestClient(server.app)
     c.cookies.set("session_token", "tok")
     return c
@@ -255,6 +352,10 @@ def _client(monkeypatch):
 def _reset_closed_cache(monkeypatch):
     monkeypatch.setattr(server, "_closed_ctx_cache",
                         {"ts": 0.0, "trades": None, "holdings": None})
+    monkeypatch.setattr(server, "_closed_pnl_overrides_cache",
+                        {"ts": 0.0, "value": None})
+    monkeypatch.setattr(server, "_anchor_start_cache",
+                        {"ts": 0.0, "value": None})
 
 
 def test_overview_closed_block(monkeypatch):
@@ -294,6 +395,54 @@ def test_overview_closed_db_error_degrades(monkeypatch):
     r = client.get("/api/portfolio/overview")
     assert r.status_code == 200
     assert r.json().get("closed") == []
+
+
+def test_overview_closed_pnl_override(monkeypatch):
+    """sys_config closed_pnl_overrides JSON → closed 块人工钉值生效。"""
+    async def fake_trades():
+        return [_tr("03152", "SELL", 1, 1135.10, datetime(2026, 10, 7),
+                    name="A博时港元", market="HK")]
+
+    async def fake_holdings(enabled_only=False):
+        return []
+
+    async def fake_get_config(key):
+        return '{"03152": -1.0}' if key == "closed_pnl_overrides" else None
+
+    monkeypatch.setattr(server.db, "get_all_trades", fake_trades)
+    monkeypatch.setattr(server.db, "get_holdings", fake_holdings)
+    _reset_closed_cache(monkeypatch)
+    client = _client(monkeypatch)
+    monkeypatch.setattr(server.db, "get_config", fake_get_config)
+    r = client.get("/api/portfolio/overview")
+    assert r.status_code == 200
+    closed = r.json().get("closed")
+    assert closed and closed[0]["symbol"] == "03152"
+    assert closed[0]["realized_pnl"] == -1.0
+    assert closed[0]["approx"] is False
+
+
+def test_overview_closed_anchor_start(monkeypatch):
+    """sys_config anchor_start_date → closed 块期初周期 hold_days 生效。"""
+    async def fake_trades():
+        return [_tr("AMD", "SELL", 5, 100, datetime(2026, 10, 12))]
+
+    async def fake_holdings(enabled_only=False):
+        return [_h("AMD", 0, cost=80)]
+
+    async def fake_get_config(key):
+        return "2026-07-14" if key == "anchor_start_date" else None
+
+    monkeypatch.setattr(server.db, "get_all_trades", fake_trades)
+    monkeypatch.setattr(server.db, "get_holdings", fake_holdings)
+    _reset_closed_cache(monkeypatch)
+    client = _client(monkeypatch)
+    monkeypatch.setattr(server.db, "get_config", fake_get_config)
+    r = client.get("/api/portfolio/overview")
+    assert r.status_code == 200
+    closed = r.json().get("closed")
+    assert closed and closed[0]["symbol"] == "AMD"
+    assert closed[0]["hold_days"] == 90
 
 
 def test_kline_trades_payload(monkeypatch):

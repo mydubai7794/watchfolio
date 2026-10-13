@@ -151,6 +151,7 @@ table.holdings { width: 100%; border-collapse: collapse; }
 /* 已清仓分区：表头整体可点折叠 + 「成本近似」小标 */
 .closed-head { cursor: pointer; user-select: none; }
 .approx-tag { font-style: normal; font-size: 11px; color: var(--txt3); margin-left: 4px; }
+.closed-total { font-size: 12px; font-weight: 600; margin-left: 4px; }
 
 /* ---- K线弹层成交列表：方向色与 --up/--down 同源（红涨绿跌） @author yys ---- */
 /* td/th 规则带 .kline-modal 前缀：特异性 0-2-1 压过同源序靠后的 .modal th/td（0-1-1）
@@ -502,7 +503,7 @@ input:focus, select:focus { box-shadow: 0 0 0 2px rgba(42,108,240,.25); }
   <!-- 已清仓分区：qty==0 标的（周期回放推导，默认折叠） -->
   <section class="card pad" id="closedCard" hidden>
     <div class="card-head closed-head" id="closedHead">
-      <div class="card-title">已清仓 <span class="pill tag" id="closedCount">0</span></div>
+      <div class="card-title">已清仓 <span class="pill tag" id="closedCount">0</span> <span id="closedTotal"></span></div>
       <div class="card-note">卖出后视角 · 点击展开/收起</div>
     </div>
     <div class="table-wrap" id="closedBody" hidden>
@@ -989,6 +990,11 @@ function renderClosed(d) {
   if (!rows.length) { card.hidden = true; return; }
   card.hidden = false;
   document.getElementById('closedCount').textContent = rows.length;
+  const totalPnl = rows.filter(c => !c.no_records && c.realized_pnl != null)
+                       .reduce((s, c) => s + c.realized_pnl, 0);
+  const tEl = document.getElementById('closedTotal');
+  tEl.textContent = '共计 ' + sign(totalPnl) + '$' + fmt(Math.abs(totalPnl));
+  tEl.className = 'closed-total ' + cls(totalPnl);
   document.getElementById('closedBody').hidden = !closedOpen;
   const priceMap = {};
   (d.positions || []).forEach(p => { if (p.price) priceMap[p.symbol] = p.price; });
@@ -1001,8 +1007,7 @@ function renderClosed(d) {
     const postChg = (price && c.exit_avg) ? (price - c.exit_avg) / c.exit_avg * 100 : null;
     const pnlHtml = noRec ? '--'
       : sign(c.realized_pnl) + '$' + fmt(Math.abs(c.realized_pnl))
-        + ' <em class="' + cls(c.realized_pct) + '">(' + sign(c.realized_pct) + fmt(c.realized_pct) + '%)</em>'
-        + (c.approx ? '<i class="approx-tag">成本近似</i>' : '');
+        + ' <em class="' + cls(c.realized_pct) + '">(' + sign(c.realized_pct) + fmt(c.realized_pct) + '%)</em>';
     const tr = document.createElement('tr');
     tr.innerHTML = `<td><div>${esc(c.name || c.symbol)}${noRec ? '<span class="pill tag tag-stale">无成交记录</span>' : ''}</div><div class="sym"><span class="sym-link" data-sym="${esc(c.symbol)}" title="查看日K">${esc(c.symbol)}</span></div></td>
       <td>${esc(c.exit_date || '--')}</td>
@@ -1022,7 +1027,7 @@ function renderClosed(d) {
         <span class="m-div"></span>
         <span>${esc(c.exit_date || '--')}${c.hold_days != null ? ' · ' + c.hold_days + '天' : ''} · 均价 ${c.exit_avg != null ? fmt(c.exit_avg) : '--'}</span>
         <span class="m-div"></span>
-        <span>已实现 <b class="${cls(c.realized_pnl)}">${noRec ? '--' : sign(c.realized_pnl) + '$' + fmt(Math.abs(c.realized_pnl))}${c.approx ? '（成本近似）' : ''}</b></span>
+        <span>已实现 <b class="${cls(c.realized_pnl)}">${noRec ? '--' : sign(c.realized_pnl) + '$' + fmt(Math.abs(c.realized_pnl))}</b></span>
       </div>`;
     mlist.appendChild(mc);
   });
