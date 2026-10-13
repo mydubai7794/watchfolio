@@ -97,7 +97,59 @@ def test_fetch_cpi_yoy(monkeypatch):
     assert r["asof"] == "2026-09-01"
     assert r["value"] == round((331.0 / 320.5 - 1) * 100, 2)
     assert r["extra"]["year_ago"] == 320.5
-    assert r["extra"]["year_ago_asof"] == "2025-09-01"   # rows[-13] 精确锁定
+    assert r["extra"]["year_ago_asof"] == "2025-09-01"   # 日期对齐锁定
+
+
+# 2026-10-13 线上 bug 复刻：FRED CPIAUCSL 2025-10 行值缺失（真实序列），
+# 行索引口径取到 13 个月前（2025-07）算出 3.71%，日期对齐应为 3.35%
+CPI_GAP_TEXT = "\n".join([
+    "DATE,CPIAUCSL",
+    "2025-06-01,321.435",
+    "2025-07-01,322.169",
+    "2025-08-01,323.291",                # 基期（latest 年−1 同月，有效）
+    "2025-09-01,324.245",
+    "2025-10-01,",                       # 缺失月不占位（真实 bug 根因）
+    "2025-11-01,325.063",
+    "2025-12-01,326.031",
+    "2026-01-01,326.588",
+    "2026-02-01,327.460",
+    "2026-03-01,330.293",
+    "2026-04-01,332.407",
+    "2026-05-01,333.979",
+    "2026-06-01,332.568",
+    "2026-07-01,332.813",
+    "2026-08-01,334.131",
+])
+
+
+def test_fetch_cpi_yoy_month_gap_aligned(monkeypatch):
+    """中间月缺失时基期按日期对齐（2025-08）而非行索引（2025-07）。@author yys"""
+    async def fake_get(url, headers=None, allow_proxy=True):
+        return CPI_GAP_TEXT
+
+    monkeypatch.setattr(mf, "_get_text", fake_get)
+    r = asyncio.run(mf.fetch_cpi_yoy())
+    assert r is not None
+    assert r["extra"]["year_ago_asof"] == "2025-08-01"
+    assert r["extra"]["year_ago"] == 323.291
+    assert r["value"] == round((334.131 / 323.291 - 1) * 100, 2)   # 3.35 非 3.71
+
+
+def test_fetch_cpi_yoy_year_ago_missing(monkeypatch):
+    """基期月（latest 年−1 同月）本身无有效值 → None 降级不出错值。@author yys"""
+    text = "\n".join([
+        "DATE,CPIAUCSL",
+        "2025-08-01,",                     # 基期缺失
+        "2025-09-01,324.245",
+        "2026-01-01,326.588",
+        "2026-08-01,334.131",
+    ])
+
+    async def fake_get(url, headers=None, allow_proxy=True):
+        return text
+
+    monkeypatch.setattr(mf, "_get_text", fake_get)
+    assert asyncio.run(mf.fetch_cpi_yoy()) is None
 
 
 def test_fetch_cpi_yoy_insufficient_history(monkeypatch):

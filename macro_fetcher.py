@@ -174,18 +174,22 @@ async def fetch_fear_greed() -> dict | None:
 
 
 async def fetch_cpi_yoy() -> dict | None:
-    """CPI 同比 = CPIAUCSL 最新值 / 12 个月前值 − 1（FRED 月度，尾部 14 行）。@author yys"""
+    """CPI 同比 = CPIAUCSL 最新值 / 12 个月前值 − 1（FRED 月度，尾部 14 行）。
+    基期按日期对齐（latest 年−1 同月）而非行索引 rows[-13]：序列缺失月
+    不占位会让行索引错位到 13 个月前（2025-10 缺值实测 3.71% vs 正确
+    3.35%）；基期月无有效值返回 None 降级。@author yys"""
     rows = parse_fred_csv_tail(await _get_text(FRED_CSV_URL.format(sid="CPIAUCSL")) or "")
-    if len(rows) < 13:               # 最新 + 12 个月前
+    if not rows:
         return None
     latest_d, latest_v = rows[-1]
-    year_ago_d, year_ago_v = rows[-13]
-    if year_ago_v <= 0:
+    target = f"{int(latest_d[:4]) - 1}{latest_d[4:]}"   # 年−1 同月日期对齐
+    year_ago = next((v for d, v in rows if d == target), None)
+    if year_ago is None or year_ago <= 0:
         return None
     return {"name": "cpi_yoy", "asof": latest_d,
-            "value": round((latest_v / year_ago_v - 1.0) * 100.0, 2),
-            "extra": {"latest": latest_v, "year_ago": year_ago_v,
-                      "year_ago_asof": year_ago_d}}
+            "value": round((latest_v / year_ago - 1.0) * 100.0, 2),
+            "extra": {"latest": latest_v, "year_ago": year_ago,
+                      "year_ago_asof": target}}
 
 
 async def fetch_credit_spread() -> dict | None:

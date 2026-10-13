@@ -2896,6 +2896,11 @@ async def _build_agent_context() -> dict:
                     v_dy = v.get("dividend_yield")
                     dy_pct = round(v_dy / v_price * 100, 2) \
                         if v_dy and v_price and v_price > 0 else None
+                    if v_reason == "no_data":
+                        # 口径统一：无个股估值数据的行（长桥 0 值噪声，多为
+                        # asset_type 未探测的 ETF）股息率一并置空，杜绝
+                        # no_data+股息率混用对外（2026-10-13 修复）。@author yys
+                        dy_pct = None
                     f["valuation"] = {
                         "pe_ttm": pe, "pb": pb, "peg": peg,
                         "eps_ttm": v_eps, "bps": v_bps,

@@ -221,7 +221,7 @@ facts only：全部来自服务端数据库（日K/宏观表/EDGAR/长桥估值�
 |------|------|------|
 | `rsi14` | number\|null | 14 日 RSI（日K收盘口径，[0,100]） |
 | `spy_rel_20d_pct` | number\|null | 近 20 日相对 SPY 超额收益（百分点：个股20日% − SPY20日%） |
-| `asset_type` | string\|null | `stock` 美股个股 / `etf` ETF / `fpi` 外国私募发行人（20-F 申报，无 Form 4）/ `null` 未分类 |
+| `asset_type` | string\|null | `stock` 美股个股 / `etf` ETF / `fpi` 外国私募发行人（20-F 申报，无 Form 4）/ `none` 人工排除（SEC 同名实体错配红线，如 `F`，无 EDGAR 数据）/ `null` 未分类（EDGAR 探测中） |
 | `insider_90d` | object\|null | 近 90 天内部人交易聚合（SEC Form 4，EDGAR 官方源），**只计公开市场交易**：买入=P 码、卖出=S 码；RSU 授予(A)/行权(M)/赠与(G)/税务代扣(F) 等非主动交易**不计入** `buys`/`sells`/`net_*`，仅计入 `tx_count`。`net_value_usd<0` = 净卖出。`fpi` 标的恒为 `null` |
 | `insider_note` | string | 仅 `fpi`：`"fpi_no_form4"`（外企无 Form 4 申报义务） |
 | `valuation` | object | 估值因子块，见下表 |

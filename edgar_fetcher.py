@@ -36,10 +36,14 @@ DEFAULT_UA = "QDII Portfolio Monitor"
 # 代号，见项目 AGENTS.md）非同一实体，SEC 内幕数据不适用 → 首轮标记 none
 # （人工排除语义，阻断每日重试与错配数据落库）
 _EDGAR_EXCLUDE = {"F"}
-# company_tickers.json 仅含个股类发行人，ETF 无映射；QQQ 例外补充经官方
-# 接口实证的信任 CIK（Invesco QQQ Trust, Series 1，NPORT-P 申报、无 10-K/Q），
+# company_tickers.json 仅含个股类发行人，ETF 无映射；例外补充经官方接口
+# 实证的信任 CIK（2026-10-13 NPORT-P seriesName 逐一验证）：
+# QQQ=Invesco QQQ Trust Series 1 / QQQM=Invesco ETF Trust II /
+# SMH=VanEck ETF Trust（seriesName VanEck Semiconductor ETF）/
+# VGT、XLV=Vanguard World Fund（sector 系列均挂此信托），
 # 其余 ETF 保持未探测态每日重试
-_CIK_OVERRIDES = {"QQQ": 1067839}
+_CIK_OVERRIDES = {"QQQ": 1067839, "QQQM": 1378872, "SMH": 1137360,
+                  "VGT": 52848, "XLV": 52848}
 
 
 def parse_ticker_map(text: str) -> dict[str, int]:

@@ -188,7 +188,7 @@ def test_agent_context_valuation_injection(monkeypatch):
                      "updated_at": "2026-10-11 16:00:00"},
             # 长桥完全无数据标的：0 落库形态 → no_data（批2审查 Important-1）
             "DRAM": {"eps_ttm": 0.0, "bps": 0.0, "growth_pct": None,
-                     "dividend_yield": 0.0,
+                     "dividend_yield": 1.3155,
                      "updated_at": "2026-10-11 16:00:00"},
             # eps/bps 有效但现价缺失：估值倍数 null、reason 不变（注入瞬态契约）
             "GOOGL": {"eps_ttm": 6.0, "bps": 20.0, "growth_pct": 10.0,
@@ -202,7 +202,8 @@ def test_agent_context_valuation_injection(monkeypatch):
     monkeypatch.setattr(server, "_pf_ctx",
                         {"holdings": [], "quotes": {
                             "NVDA": {"price": 160.0},
-                            "BABA": {"price": 140.0}},
+                            "BABA": {"price": 140.0},
+                            "DRAM": {"price": 300.0}},
                          "cash_usd": 0.0})
     ctx = asyncio.run(server._build_agent_context())
     # NVDA：pe=160/8=20、pb=160/9.5≈16.84、peg=20/66.67≈0.30（PEG=P/E÷增速百分数）
@@ -233,10 +234,13 @@ def test_agent_context_valuation_injection(monkeypatch):
     assert v_baba["dividend_yield"] == pytest.approx(0.74, abs=0.01)
     # fpi 分支 insider 注记不受 valuation 块影响
     assert ctx["factors"]["BABA"]["insider_note"] == "fpi_no_form4"
-    # DRAM：长桥 0 落库（非 None）→ no_data 而非 no_growth（Important-1 锚）
+    # DRAM：长桥 0 落库（非 None）→ no_data 而非 no_growth（Important-1 锚）；
+    # dy>0 且有现价也一并置空——无个股估值数据的行不输出股息率（口径统一，
+    # 2026-10-13 修复：VGT/QQQM/SMH 曾以 no_data+股息率混用对外）
     v_dram = ctx["factors"]["DRAM"]["valuation"]
     assert v_dram["pe_ttm"] is None and v_dram["pb"] is None
     assert v_dram["reason"] == "no_data"
+    assert v_dram["dividend_yield"] is None
     # GOOGL：eps/bps/growth 有效但无现价 → 倍数全 null、reason=None、键恒在
     v_g = ctx["factors"]["GOOGL"]["valuation"]
     assert v_g["pe_ttm"] is None and v_g["pb"] is None and v_g["peg"] is None

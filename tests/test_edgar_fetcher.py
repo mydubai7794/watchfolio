@@ -27,6 +27,15 @@ def test_classify_asset_type_priority():
     assert ef.classify_asset_type([]) is None
 
 
+def test_cik_overrides_cover_verified_etfs():
+    """四只无 ticker 映射 ETF 的信任 CIK（2026-10-13 NPORT-P seriesName
+    逐一实证）：QQQM=Invesco ETF Trust II / SMH=VanEck ETF Trust /
+    VGT、XLV=Vanguard World Fund；探测链 cik = tmap or _CIK_OVERRIDES。
+    @author yys"""
+    assert ef._CIK_OVERRIDES == {"QQQ": 1067839, "QQQM": 1378872,
+                                 "SMH": 1137360, "VGT": 52848, "XLV": 52848}
+
+
 SUBMISSIONS_JSON = json.dumps({
     "cik": 1045810, "name": "NVIDIA CORP",
     "filings": {"recent": {
