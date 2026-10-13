@@ -89,6 +89,59 @@ CHIEF_MARKETING = """
 致富证券研究部温馨提示：投资涉及风险，证券价格可升亦可跌。
 """
 
+# ---------------------------------------------------------------------------
+# 众安证券成交通知样例（2026-10-12 线上实测邮件正文，_strip_html 提取形态）
+# ---------------------------------------------------------------------------
+
+ZA_SELL_FULL = """
+股票卖出成交
+ 你好 dubai ：
+ 你的股票卖出订单已完全成交。
+ 卖出股票： QQQ ( 纳指100 ETF )
+ 委托数量： 1 股
+ 成交详情：
+ 1 股 @ USD 747.6700
+ 请登入 ZA Bank App 查阅订单详情。
+"""
+
+ZA_SELL_FRACTION = """
+股票卖出成交
+ 你好 dubai ：
+ 你的股票卖出订单已完全成交。
+ 卖出股票： NVDA ( 英伟达 )
+ 委托数量： 0.2706 股
+ 成交详情：
+ 0.2706 股 @ USD 227.2700
+ 请登入 ZA Bank App 查阅订单详情。
+"""
+
+ZA_SELL_SUBMITTED = """
+你好 dubai：
+你的股票卖出订单已提交。
+卖出股票： NVDA (英伟达)
+委托数量：0.2706 股
+委托状态：已提交
+委托时间：2026-10-12 21:54:38
+你可于 ZA Bank App 查看最新的订单详情。
+"""
+
+ZA_BUY_NOTE_NO_PRICE = """
+发出成交单
+ 你好 dubai ：
+ 你的买入成交单已发出。
+ 买入股票： NVDA ( 英伟达 )
+ 成交数量： 0.0012 股
+ 请登入众安银行 App 查阅及下载成交单。
+"""
+
+ZA_FUND_SUBSCRIBE = """
+认购成功通知
+ 你好 dubai ：
+ 你已于 2026-10-12 18:01:21 成功 定投 认购 HKD 1,100.00 邓普顿智选亚太股票入息基金 HKD (A Dis) 。
+ 认购金额：
+ HKD 1,100.00
+"""
+
 
 @pytest.fixture(autouse=True)
 def _stub_chief_fetch(monkeypatch):
@@ -97,6 +150,15 @@ def _stub_chief_fetch(monkeypatch):
     需要致富邮件的用例在测试体内再次 monkeypatch.setattr 覆盖即可
     （后设者优先）。"""
     monkeypatch.setattr(et, "fetch_chief_emails", lambda days=1: [])
+
+
+@pytest.fixture(autouse=True)
+def _stub_za_fetch(monkeypatch):
+    """默认桩掉众安邮件拉取（poll_once 三源之一），保证全部用例离线。
+
+    需要众安邮件的用例在测试体内再次 monkeypatch.setattr 覆盖即可
+    （后设者优先）。"""
+    monkeypatch.setattr(et, "fetch_za_emails", lambda days=1: [])
 
 
 @pytest.fixture(autouse=True)
@@ -348,6 +410,57 @@ class TestParseChiefTrade:
     def test_empty_text(self):
         assert et.parse_chief_trade("") is None
         assert et.parse_chief_trade(None) is None
+
+
+class TestParseZaTrade:
+    """众安证券「完全成交」终态邮件解析：已提交/无价格版式自然挡。"""
+
+    def test_real_sample_sell(self):
+        """线上实测样例：卖出 QQQ 1股 @USD747.67，trade_no 空（邮件无编号）。"""
+        t = et.parse_za_trade(ZA_SELL_FULL)
+        assert t == {
+            "trade_no": "", "side": "SELL", "symbol": "QQQ",
+            "name": "纳指100 ETF", "market": "US", "quantity": 1.0,
+            "price": 747.67, "currency": "USD",
+        }
+
+    def test_fractional_shares(self):
+        """碎股卖出：0.2706 股 @USD227.27。"""
+        t = et.parse_za_trade(ZA_SELL_FRACTION)
+        assert t is not None
+        assert t["symbol"] == "NVDA" and t["side"] == "SELL"
+        assert t["quantity"] == 0.2706 and t["price"] == 227.27
+
+    def test_submitted_not_final_skipped(self):
+        """「已提交」中间态邮件（无终态句无成交价）→ None，等终态覆盖。"""
+        assert et.parse_za_trade(ZA_SELL_SUBMITTED) is None
+
+    def test_buy_note_without_price_skipped(self):
+        """买入「成交单已可供查阅」版式（无委托数量/无价格）→ None。"""
+        assert et.parse_za_trade(ZA_BUY_NOTE_NO_PRICE) is None
+
+    def test_bank_notice_skipped(self):
+        """同发件人 ZA Bank 银行通知（基金定投认购）→ None。"""
+        assert et.parse_za_trade(ZA_FUND_SUBSCRIBE) is None
+
+    def test_traditional_chinese_side(self):
+        """繁体買入/賣出句式兼容。"""
+        text = ZA_SELL_FULL.replace("卖出订单", "賣出訂單").replace("卖出股票", "賣出股票")
+        t = et.parse_za_trade(text)
+        assert t is not None and t["side"] == "SELL" and t["symbol"] == "QQQ"
+
+    def test_thousand_separator(self):
+        """千分位数量/价格：1,000 股 @ USD 7,476.70。"""
+        text = (ZA_SELL_FULL
+                .replace("委托数量： 1 股", "委托数量： 1,000 股")
+                .replace("1 股 @ USD 747.6700", "1,000 股 @ USD 7,476.70"))
+        t = et.parse_za_trade(text)
+        assert t is not None
+        assert t["quantity"] == 1000.0 and t["price"] == 7476.70
+
+    def test_empty_text(self):
+        assert et.parse_za_trade("") is None
+        assert et.parse_za_trade(None) is None
 
 
 class TestApplyTrade:
@@ -619,6 +732,53 @@ class TestPollOnceChief:
         results = asyncio.run(et.poll_once(days=1))
         assert len(results) == 1 and results[0]["status"] == "applied"  # HSBC 照常应用
         assert calls["config"] == []                                    # 但水位不推进
+
+
+class TestPollOnceZa:
+    """poll_once 三源（HSBC + 致富 + 众安）拉取/失败语义。"""
+
+    def test_za_end_to_end(self, monkeypatch):
+        """众安完全成交邮件 → 解析 → 应用：trade_no 空、USD 现金入账 747.67。"""
+        calls = _patch_db(monkeypatch, holdings=[_holding(
+            symbol="QQQ", name="纳指100 ETF", market="US", quantity=1.0,
+            cost_price=719.88, currency="USD")])
+        monkeypatch.setattr(et, "fetch_hsbc_emails", lambda days=1: [])
+        monkeypatch.setattr(et, "fetch_chief_emails", lambda days=1: [])
+        monkeypatch.setattr(et, "fetch_za_emails",
+                            lambda days=1: [{"message_id": "<m1@za>",
+                                             "date": None, "text": ZA_SELL_FULL}])
+        results = asyncio.run(et.poll_once(days=1))
+        assert len(results) == 1 and results[0]["status"] == "applied"
+        assert calls["insert"][0]["symbol"] == "QQQ"
+        assert calls["insert"][0]["trade_no"] == ""       # 众安邮件无交易编号
+        assert calls["update"][0][3] == 0.0               # 持仓 1 → 0
+        assert calls["deduct"] == [("USD", -747.67)]      # 卖出 → 现金入账
+        assert len(calls["config"]) == 1                  # 三源成功 → 水位推进
+
+    def test_za_submitted_skipped(self, monkeypatch):
+        """众安「已提交」非终态邮件 → 跳过不触库；水位照常推进。"""
+        calls = _patch_db(monkeypatch, holdings=[])
+        monkeypatch.setattr(et, "fetch_hsbc_emails", lambda days=1: [])
+        monkeypatch.setattr(et, "fetch_chief_emails", lambda days=1: [])
+        monkeypatch.setattr(et, "fetch_za_emails",
+                            lambda days=1: [{"message_id": "<m2@za>", "date": None,
+                                             "text": ZA_SELL_SUBMITTED}])
+        assert asyncio.run(et.poll_once(days=1)) == []
+        assert calls["insert"] == []
+        assert len(calls["config"]) == 1
+
+    def test_za_fetch_failure_keeps_waterline(self, monkeypatch):
+        """众安拉取失败（其余源正常）→ 水位不推进（防众安漏账放大）。"""
+        calls = _patch_db(monkeypatch, holdings=[])
+        monkeypatch.setattr(et, "fetch_hsbc_emails", lambda days=1: [])
+        monkeypatch.setattr(et, "fetch_chief_emails", lambda days=1: [])
+
+        def boom(days=1):
+            raise RuntimeError("imap down")
+
+        monkeypatch.setattr(et, "fetch_za_emails", boom)
+        assert asyncio.run(et.poll_once(days=1)) == []
+        assert calls["config"] == []
 
 
 class TestComputeBacktrackDays:

@@ -1,15 +1,19 @@
 """券商成交邮件 → 解析 → 幂等落交易表 → 自动更新持仓与现金。
 
 链路：QQ 邮箱 IMAP 拉取成交通知邮件（回溯窗口按上次成功轮询时刻自适应放大，
-停机多久补多久，宁多勿漏）→ parse_hsbc_trade / parse_chief_trade 解析关键字段
-（纯函数，繁简/全半角冒号空格差异容错）→ apply_trade 幂等编排：先插
+停机多久补多久，宁多勿漏）→ parse_hsbc_trade / parse_chief_trade / parse_za_trade
+解析关键字段（纯函数，繁简/全半角冒号空格差异容错）→ apply_trade 幂等编排：先插
 trade_records（幂等锁）再更新 holdings 数量与 cash_accounts 余额。
 
-支持两类成交邮件：
+支持三类成交邮件：
 - HSBC（HSBC@notification.hsbc.com.hk）：只处理「全部執行」，部分執行等终态邮件；
 - 致富证券（donotreply@chiefgroup.com.hk，同发件人有营销邮件，靠解析门槛判别）：
   「订单成交及部份成交通知」，只处理待成交数量=0 的终态邮件，
-  数量取该邮件已成交数量（订单累计终态，同 HSBC 口径）。
+  数量取该邮件已成交数量（订单累计终态，同 HSBC 口径）；
+- 众安证券（notification@service.bank.za.group，同发件人还有 ZA Bank 银行通知
+  邮件：换汇/定投/月结单等，靠解析门槛判别）：「完全成交」终态邮件，
+  「已提交」中间态与「成交单已可供查阅」（无价格）版式自然挡；
+  邮件无交易编号，幂等仅靠 message_id。
 """
 import asyncio
 import email
@@ -38,6 +42,8 @@ IMAP_USER = os.getenv("QDII_IMAP_USER", "")
 IMAP_PASSWORD = os.getenv("QDII_IMAP_PASSWORD", "")
 HSBC_SENDER = "HSBC@notification.hsbc.com.hk"
 CHIEF_SENDER = "donotreply@chiefgroup.com.hk"
+# 众安证券成交通知与 ZA Bank 银行通知同发件域（fetch_za_notice_emails 同源）
+ZA_SENDER = "notification@service.bank.za.group"
 
 POLL_INTERVAL_SEC = 1800  # 轮询间隔 30 分钟
 FIRST_DELAY_SEC = 60      # 启动后首跑延迟
@@ -239,6 +245,78 @@ def parse_chief_trade(text: str) -> dict | None:
     }
 
 # ---------------------------------------------------------------------------
+# 众安证券成交通知解析（纯函数）
+# ---------------------------------------------------------------------------
+# 版式（text/html 剥标签后，全角冒号、字段两侧带空格）：
+# 「你的股票卖出订单已完全成交。/ 卖出股票： QQQ ( 纳指100 ETF ) /
+# 委托数量： 1 股 / 成交详情： 1 股 @ USD 747.6700」。终态门控=「已完全成交」；
+# 「已提交」版式无成交详情、买入「成交单已可供查阅」版式无委托数量与价格，
+# 字段门槛自然挡；同发件人的 ZA Bank 银行通知（换汇/定投/月结单）无股票
+# 字段同样被挡。邮件无交易编号 → trade_no 空串（幂等仅靠 message_id）。
+
+_ZA_DONE_RE = re.compile(r"你的股票\s*([買买]入|[賣卖]出)\s*[订訂][单單]已完全成交")
+_ZA_SYM_RE = re.compile(
+    r"([買买]入|[賣卖]出)股票\s*[:：]\s*([A-Za-z0-9.\-]+)\s*[（(]\s*([^()（）]+?)\s*[)）]")
+_ZA_QTY_RE = re.compile(r"委[托託][数數]量\s*[:：]\s*([\d,]+(?:\.\d+)?)\s*股")
+_ZA_PRICE_RE = re.compile(r"股\s*@\s*([A-Z]{3})\s*([\d,]+(?:\.\d+)?)")
+
+
+def parse_za_trade(text: str) -> dict | None:
+    """解析众安证券成交邮件正文 → 交易 dict；非「已完全成交」终态或字段不全返回 None。
+
+    终态门控（与 HSBC「全部執行」/致富「待成交=0」同款）：只处理
+    「你的股票买入/卖出订单已完全成交」；「已提交」等中间态邮件跳过等终态
+    邮件覆盖。全文先 NFKC 归一化（全角符号/数字容错）。
+
+    返回 {trade_no(""), side(BUY/SELL), symbol, name, market, quantity,
+    price, currency}；众安邮件无成交金额行，现金动账由 apply_trade 按
+    qty×price 计算。
+    """
+    if not text:
+        return None
+    text = unicodedata.normalize("NFKC", text).replace("\u00a0", " ")
+
+    # 终态门控：你的股票买入/卖出订单已完全成交（已提交等中间态在此被挡）
+    dm = _ZA_DONE_RE.search(text)
+    if not dm:
+        return None
+    side = "SELL" if "出" in dm.group(1) else "BUY"
+
+    # 标的：「卖出股票： QQQ ( 纳指100 ETF )」→ symbol + name
+    sm = _ZA_SYM_RE.search(text)
+    if not sm or not sm.group(3).strip():
+        return None
+    symbol = sm.group(2).strip()
+    name = sm.group(3).strip()
+
+    qm = _ZA_QTY_RE.search(text)
+    if not qm:
+        return None
+    quantity = float(qm.group(1).replace(",", ""))
+    if quantity <= 0:
+        return None
+
+    # 成交价：「1 股 @ USD 747.6700」——「股 @」锚点避开邮件头部样式噪音
+    pm = _ZA_PRICE_RE.search(text)
+    if not pm:
+        return None
+    price = float(pm.group(2).replace(",", ""))
+    if price <= 0:
+        return None
+
+    market = "HK" if symbol.isdigit() else "US"
+    return {
+        "trade_no": "",
+        "side": side,
+        "symbol": symbol,
+        "name": name,
+        "market": market,
+        "quantity": quantity,
+        "price": price,
+        "currency": pm.group(1),
+    }
+
+# ---------------------------------------------------------------------------
 # 邮件拉取（imaplib 标准库，同步；调用方用 asyncio.to_thread 包装）
 # ---------------------------------------------------------------------------
 
@@ -351,6 +429,15 @@ def fetch_chief_emails(days: int = 1) -> list[dict]:
     同发件人包含营销/研究邮件，多拉的由 parse_chief_trade 解析门槛挡掉。
     """
     return _fetch_sender_emails(CHIEF_SENDER, days, "致富")
+
+
+def fetch_za_emails(days: int = 1) -> list[dict]:
+    """拉取最近 N 天众安证券邮件 → [{message_id, date, text}]。
+
+    同发件人包含 ZA Bank 银行通知邮件（换汇/定投/月结单等），多拉的由
+    parse_za_trade 解析门槛挡掉（无终态句/无成交价字段）。
+    """
+    return _fetch_sender_emails(ZA_SENDER, days, "众安")
 
 
 def fetch_za_notice_emails(days: int = 30) -> list[dict]:
@@ -533,7 +620,7 @@ def _compute_backtrack_days(last_poll: str | None, default_days: int = 1) -> int
 
 
 async def poll_once(days: int = 1) -> list[dict]:
-    """单轮处理（HSBC + 致富双源）：自适应回溯拉邮件 → 逐封解析 → 幂等应用。
+    """单轮处理（HSBC + 致富 + 众安三源）：自适应回溯拉邮件 → 逐封解析 → 幂等应用。
 
     回溯天数 = max(days, (now - 上次成功轮询).days + 1)，修复停机超 1 天
     成交邮件永久漏账的问题。仅当全部源整轮无异常完成（即使 0 封新邮件）才把
@@ -553,10 +640,11 @@ async def poll_once(days: int = 1) -> list[dict]:
         last_poll = None
     backtrack_days = _compute_backtrack_days(last_poll, days)
 
-    # 双源拉取：任一失败即标记，整轮结束不推进水位（防漏账放大）
+    # 三源拉取：任一失败即标记，整轮结束不推进水位（防漏账放大）
     fetch_failed = False
     hsbc_mails: list[dict] = []
     chief_mails: list[dict] = []
+    za_mails: list[dict] = []
     try:
         hsbc_mails = await asyncio.to_thread(fetch_hsbc_emails, backtrack_days)
     except Exception as e:
@@ -567,6 +655,11 @@ async def poll_once(days: int = 1) -> list[dict]:
     except Exception as e:
         fetch_failed = True
         logger.error("本轮致富邮件拉取失败，保持轮询水位不推进: %s", e)
+    try:
+        za_mails = await asyncio.to_thread(fetch_za_emails, backtrack_days)
+    except Exception as e:
+        fetch_failed = True
+        logger.error("本轮众安邮件拉取失败，保持轮询水位不推进: %s", e)
 
     results: list[dict] = []
     for mail in hsbc_mails:
@@ -591,6 +684,18 @@ async def poll_once(days: int = 1) -> list[dict]:
         trade["email_date"] = mail.get("date")
         result = await apply_trade(trade)
         logger.info("致富交易处理: %s", result)
+        results.append(result)
+
+    for mail in za_mails:
+        trade = parse_za_trade(mail.get("text", ""))
+        if trade is None:
+            logger.info("众安邮件未识别为完全成交交易(忽略): %s",
+                        mail.get("message_id", ""))
+            continue
+        trade["message_id"] = mail.get("message_id", "")
+        trade["email_date"] = mail.get("date")
+        result = await apply_trade(trade)
+        logger.info("众安交易处理: %s", result)
         results.append(result)
 
     # 整轮无异常完成才推进水位（回溯窗口随时间自动收敛回 1 天）
