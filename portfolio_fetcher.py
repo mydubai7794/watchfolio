@@ -76,8 +76,10 @@ TWELVEDATA_BATCH = 8   # 单次兜底批量上限（对齐免费 8 credits/min �
 # Yahoo v8 chart 当日分时（5m K 线含盘前盘后）：range=5d 拉取后解析层只取最后一个
 # UTC 自然日——盘中即当日实时分时、闭市即上一交易时段全程；不用 range=1d 是因为
 # 实测 Yahoo 期货/美元指数在每日美东凌晨存在 1d 空窗 bug（BZ=F 返回 200 但 0 点，
-# 同刻 5d 有数）；旧 5d 日线 spark（YAHOO_CHART_URL）仅保留给 USDHKD fx_spark
-YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=5d"
+# 同刻 5d 有数）；旧日线 spark（YAHOO_CHART_URL）仅保留给 USDHKD fx_spark，
+# 窗口 10 日历日：任意星期回望恒含 ≥5 个交易日（5d 周初回望仅 3~4 个交易日，
+# 日线点数 <5 触发前端画线门槛被隐藏，2026-10-13 实证）
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{sym}?interval=1d&range=10d"
 YAHOO_DAY_CHART_URL = ("https://query1.finance.yahoo.com/v8/finance/chart/{sym}"
                        "?interval=5m&range=5d&includePrePost=true")
 YAHOO_HEADERS = {
@@ -90,7 +92,7 @@ YAHOO_PANEL_SYMBOLS = {"USDHKD": "HKD=X"}
 # 实际仅 US30Y/US10Y 与指数四项（VIX/DJI/NDX/SPX）由 server 沿用 backfill 节奏
 # 刷新主价（长桥不可用时兜底；响应内当日 5m 分时顺带落库），其余映射仅作
 # 标的全集 DAY_MINUTE_KEYS 的构成
-YAHOO_DAY_SYMBOLS = {"QQQ": "QQQ", "SPY": "SPY", "SOXX": "SOXX",
+YAHOO_DAY_SYMBOLS = {"SOXX": "SOXX",
                      "BZ": "BZ=F", "GC": "GC=F", "DXY": "DX-Y.NYB",
                      "US30Y": "^TYX", "US10Y": "^TNX", "VIX": "^VIX",
                      "DJI": "^DJI", "NDX": "^NDX", "SPX": "^GSPC",
@@ -345,16 +347,21 @@ def parse_sina_diniw(raw: str) -> dict:
 
 
 def parse_yahoo_chart(raw: str) -> dict:
-    """解析 Yahoo v8 chart 响应（^TYX/^TNX/^VIX）：meta 现价/昨收 + adjclose 近5日 spark。
+    """解析 Yahoo v8 chart 响应（^TYX/^TNX/^VIX）：meta 现价/昨收 + adjclose 日线 spark。
 
-    spark 过滤 None 后取末尾 ≤60 点；非法 JSON/结构缺失返回 {}。
+    spark 为 [YYYY-MM-DD, 收盘] 对（日期取 bar 时间戳 UTC 日，供前端悬浮显示；
+    仅 USDHKD fx_spark 消费），过滤 None 后取末尾 ≤60 点；非法 JSON/结构缺失
+    返回 {}。
     """
     try:
         r = json.loads(raw)["chart"]["result"][0]
         meta = r["meta"]
         pre = float(meta.get("chartPreviousClose") or 0)
         price = float(meta["regularMarketPrice"])
-        spark = [v for v in r["indicators"]["adjclose"][0]["adjclose"] if v]
+        ts_list = r.get("timestamp") or []
+        closes = (r["indicators"].get("adjclose") or [{}])[0].get("adjclose") or []
+        spark = [[datetime.fromtimestamp(t, tz=timezone.utc).strftime("%Y-%m-%d"), float(v)]
+                 for t, v in zip(ts_list, closes) if v]
         return {"price": price, "pre_close": pre,
                 "change_pct": (price - pre) / pre * 100 if pre > 0 else 0.0,
                 "spark": spark[-60:]}
@@ -1147,7 +1154,8 @@ async def fetch_fund_nav(proxy_urls: list[str] | None = None) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# 市场参考看板（QQQ/SPY/SOXX/HSI/BZ/GC/DXY/US30Y/US10Y/VIX/DJI/NDX/SPX/USDCNH + 当日分时 spark）
+# 市场参考看板（DJI/NDX/SPX/SOXX/HSI/BZ/GC/DXY/US30Y/US10Y/VIX/USDCNH + 当日分时 spark）
+# 纳指/标普行情由 NDX/SPX 指数项覆盖，不再单列 QQQ/SPY ETF 项（同质冗余）
 # ---------------------------------------------------------------------------
 
 MARKET_PANEL = [  # (key, 腾讯代码(空=冷备/回落价 或 Yahoo 主价), 展示名, 币种, 分时口径标记)
@@ -1157,8 +1165,6 @@ MARKET_PANEL = [  # (key, 腾讯代码(空=冷备/回落价 或 Yahoo 主价), �
     ("DJI", "", "道琼斯指数", "", "yahoo_day"),           # 主价长桥 .DJI.US 实时（Yahoo ^DJI 兜底）
     ("NDX", "", "纳指100指数", "", "yahoo_day"),          # 主价长桥 .NDX.US 实时（Yahoo ^NDX 兜底）
     ("SPX", "", "标普500指数", "", "yahoo_day"),          # 主价长桥 .SPX.US 实时（Yahoo ^GSPC 兜底）
-    ("QQQ", "usQQQ", "QQQ", "USD", "yahoo_day"),          # ETF 主价腾讯混排（真指数见上方三项）
-    ("SPY", "usSPY", "SPY", "USD", "yahoo_day"),          # ETF 主价腾讯混排
     ("SOXX", "usSOXX", "费城半导体", "USD", "yahoo_day"),  # 主价腾讯混排
     ("HSI", "hkHSI", "恒生指数", "HKD", "tencent"),   # 主价腾讯混排
     ("BZ", "hf_OIL", "布伦特原油", "USD", "yahoo_day"),   # 主价腾讯 hf_ 混排(新浪兜底)
@@ -1340,10 +1346,11 @@ async def fetch_market_panel(proxy_urls: list[str] | None = None,
     return panel
 
 
-async def fetch_fx_spark(proxy_urls: list[str] | None = None) -> list[float]:
-    """抓 USD/HKD 近 5 日日线走势（Yahoo HKD=X，走代理池）：仅取 spark 字段。
+async def fetch_fx_spark(proxy_urls: list[str] | None = None) -> list[list]:
+    """抓 USD/HKD 日线走势（Yahoo HKD=X，走代理池）：仅取 spark 字段。
 
+    窗口 10 日历日恒含 ≥5 个交易日（前端画线门槛），尾部截取保持近一周口径；
     供 server _fund_nav_loop 随汇率刷新低频拉取；chart 失败返回空数组（不致命）。
     """
     q = await _fetch_yahoo_chart(YAHOO_PANEL_SYMBOLS["USDHKD"], proxy_urls)
-    return (q.get("spark") or [])[-60:]
+    return (q.get("spark") or [])[-8:]

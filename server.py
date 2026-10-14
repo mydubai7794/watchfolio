@@ -309,8 +309,8 @@ global_index_cache: dict = {}
 portfolio_cache: dict = {"ok": False, "positions": [], "summary": {}, "errors": []}
 fund_nav_cache: dict | None = None   # {"nav","prev_nav","nav_date","nav_change_pct"}
 fx_state: dict = {"rate": 7.80, "fallback": True, "time": ""}
-fx_spark: list[float] = []           # USD/HKD 近5日走势（Yahoo HKD=X，随汇率刷新一并拉取）
-market_cache: list[dict] = []        # 市场参考看板缓存（QQQ/SPY/SOXX/HSI/BZ/GC/DXY/US30Y/US10Y/VIX/DJI/NDX/SPX/USDCNH，
+fx_spark: list = []                  # USD/HKD 近一周日线走势 [[日期, 收盘]，Yahoo HKD=X，随汇率刷新一并拉取）
+market_cache: list[dict] = []        # 市场参考看板缓存（DJI/NDX/SPX/SOXX/HSI/BZ/GC/DXY/US30Y/US10Y/VIX/USDCNH，
                                      # spark 为 market_ticks 当日分时累积，闭市回退上一时段全程）
 
 # 一场口径状态机（模块级，进程生命周期内持久；重启后冷启动自愈，09:30 开盘刷新基准）。
@@ -428,7 +428,10 @@ def _live_overview_payload() -> dict | None:
     if denom > 0:
         summary["day_pnl_pct"] = summary["day_pnl"] / denom * 100
     data = dict(portfolio_cache)
-    data["positions"] = positions
+    # SSE 载荷同样过滤陈旧清仓行（前端 overview 推送直进当日贡献图；映射由
+    # _sse_overview_loop 每轮经 60s 节流刷新写入 _closed_exit_ctx）
+    data["positions"] = _mask_stale_closed_pnl(
+        positions, _closed_exit_ctx["mapping"])
     data["summary"] = summary
     data["fetch_time"] = datetime.now().strftime("%H:%M:%S")
     data["fund"] = fund_nav_cache
@@ -455,6 +458,7 @@ async def _sse_overview_loop(interval: float = 2.0):
         if not clients:
             continue
         try:
+            await _get_closed_exit_mapping()   # 60s 节流：刷新当日贡献清仓过滤映射
             data = _live_overview_payload()
             if data:
                 await _broadcast("overview", data)
@@ -2588,6 +2592,10 @@ async def portfolio_overview():
     except Exception as e:
         data["closed"] = []
         logger.warning("closed 块构建失败（本轮降级空数组）: %s", e)
+    # 当日贡献出图口径：清仓超过 1 个交易日的标的 today_pnl 置 null（清仓
+    # 当日/次交易日保留），过滤映射复用 closed 上下文（60s eventual）
+    data["positions"] = _mask_stale_closed_pnl(
+        data.get("positions") or [], await _get_closed_exit_mapping())
     # 决策上下文（facts only，agent 接口同源；60s 缓存，缺数逐项 null）
     data["context"] = await _build_agent_context()
     return data
@@ -2670,6 +2678,63 @@ async def _get_closed_ctx() -> tuple[list[dict], list[dict]]:
     trades, holdings = await db.get_all_trades(), await db.get_holdings()
     _closed_ctx_cache.update(ts=now, trades=trades, holdings=holdings)
     return trades, holdings
+
+
+# 各 symbol 最近清仓日映射缓存（60s：当日贡献陈旧清仓行过滤用；
+# exit_date 不受人工钉值/锚点起点影响，回放无需 overrides）
+_closed_exit_ctx = {"ts": 0.0, "mapping": {}}
+
+
+async def _get_closed_exit_mapping() -> dict[str, str]:
+    """{symbol: 最近周期 exit_date}（build_closed_positions 倒序取首个；
+    60s 节流 + 异常降级返回旧值/空映射，不炸调用循环）。@author yys"""
+    now = time.time()
+    if _closed_exit_ctx["mapping"] and now - _closed_exit_ctx["ts"] < 60:
+        return _closed_exit_ctx["mapping"]
+    try:
+        trades, holdings = await _get_closed_ctx()
+        mapping: dict[str, str] = {}
+        for r in ledger.build_closed_positions(trades, holdings):
+            if r.get("exit_date") and r["symbol"] not in mapping:
+                mapping[r["symbol"]] = r["exit_date"]
+        _closed_exit_ctx.update(ts=now, mapping=mapping)
+    except Exception as e:
+        logger.warning("清仓日映射构建失败（沿用旧值）: %s", e)
+    return _closed_exit_ctx["mapping"]
+
+
+def _mask_stale_closed_pnl(positions: list[dict], exit_by_sym: dict[str, str],
+                           now_et: datetime | None = None) -> list[dict]:
+    """当日贡献口径：清仓超过 1 个交易日的标的 today_pnl 置 null。
+
+    qty==0 行的 today_pnl 恒为 0（数量归零），对当日盈亏总和无影响，但会以
+    $0 空行挂在分析看板「当日贡献」图中——清仓当日/次交易日保留（用户刚
+    卖出的过渡展示），更早的清仓行置 null 出图。判定 cutoff = 当前一场
+    交易日（trading_session_key，周末自动回退）的前一个工作日：exit_date
+    >= cutoff 保留；qty==0 且无 exit_date（无成交记录的占位清仓行）一并
+    出图。返回浅拷贝行，不改入参（portfolio_cache 行只读共享）。
+    @author yys"""
+    if not positions:
+        return positions
+    if now_et is None:
+        now_et = datetime.now(pf.ET_TZ)
+    k = pf.trading_session_key(now_et) - timedelta(days=1)
+    while k.weekday() >= 5:   # 跳过周末（假日不识别：假日次日提前一天排除，可接受近似）
+        k -= timedelta(days=1)
+    cutoff = k.isoformat()
+    out: list[dict] = []
+    for p in positions:
+        if (p.get("quantity") or 0) > 1e-9 or p.get("today_pnl") is None:
+            out.append(p)   # 在仓行 / 已无数据的 stale 行原样保留
+            continue
+        ex = exit_by_sym.get(p.get("symbol"))
+        if ex and ex >= cutoff:
+            out.append(p)
+        else:
+            q = dict(p)
+            q["today_pnl"] = None
+            out.append(q)
+    return out
 
 
 # 已清仓已实现盈亏人工钉值（sys_config JSON {symbol: pnl}，60s 缓存）：

@@ -304,13 +304,17 @@ class TestMarketPanelParsers:
         assert pf.parse_sina_diniw("") == {}
 
     def test_parse_yahoo_chart(self):
-        """Yahoo v8 chart：meta 现价/昨收 + adjclose 过滤空值后作近5日 spark。"""
+        """Yahoo v8 chart：meta 现价/昨收 + adjclose 过滤空值后作日线 spark
+        （带日期：[YYYY-MM-DD, 收盘]，日频悬浮显示日期用）。"""
         raw = json.dumps({"chart": {"result": [{"meta": {"regularMarketPrice": 5.599,
             "chartPreviousClose": 5.639},
-            "indicators": {"adjclose": [{"adjclose": [5.60, 5.61, None, 5.599]}]}}]}, "error": None})
+            "timestamp": [1759968000, 1760054400, 1760140800, 1760313600],
+            "indicators": {"adjclose": [{"adjclose": [5.60, 5.61, None, 5.599]}]}}]},
+            "error": None})
         q = pf.parse_yahoo_chart(raw)
         assert q["price"] == 5.599 and q["pre_close"] == 5.639
-        assert q["spark"] == [5.60, 5.61, 5.599]
+        assert q["spark"] == [["2025-10-09", 5.60], ["2025-10-10", 5.61],
+                              ["2025-10-13", 5.599]]
         assert abs(q["change_pct"] - (5.599 - 5.639) / 5.639 * 100) < 1e-9
 
     def test_parse_yahoo_chart_bad(self):
@@ -1112,16 +1116,19 @@ class TestMarketPanelYahooSpark:
 
     def test_market_panel_spark_marks(self):
         """MARKET_PANEL spark_source 口径：第 5 位仅作历史主源标记（现行分时统一
-        读库组装，不再单独请求分时接口）；USDCNH 已作为第 11 项加入看板。"""
+        读库组装，不再单独请求分时接口）；QQQ/SPY 已移除（纳指/标普由 NDX/SPX
+        指数项覆盖，同质冗余）。"""
         src = {key: s for key, _, _, _, s in pf.MARKET_PANEL}
-        assert len(pf.MARKET_PANEL) == 14 and "USDCNH" in src
+        assert len(pf.MARKET_PANEL) == 12 and "USDCNH" in src
+        assert "QQQ" not in src and "SPY" not in src
         assert src["HSI"] == "tencent"
-        assert src["QQQ"] == src["SPY"] == src["SOXX"] == "yahoo_day"
+        assert src["SOXX"] == "yahoo_day"
         assert src["BZ"] == src["GC"] == src["DXY"] == "yahoo_day"
         assert src["US30Y"] == src["US10Y"] == src["VIX"] == src["USDCNH"] == "yahoo_day"
         assert "yahoo" not in set(src.values())
-        # 主价快照存库/读 spark 标的全集：10 个 Yahoo 项 + HSI
+        # 主价快照存库/读 spark 标的全集：11 个 Yahoo 项 + HSI
         assert set(pf.DAY_MINUTE_KEYS) == set(pf.YAHOO_DAY_SYMBOLS) | {"HSI"}
+        assert len(pf.YAHOO_DAY_SYMBOLS) == 11
 
     def test_parse_yahoo_day_chart(self):
         """Yahoo 5d/5m 解析：meta 主价/昨收 + None 收盘点跳过 + epoch→UTC naive
@@ -1203,10 +1210,10 @@ class TestMarketPanelYahooSpark:
         panel = asyncio.run(pf.fetch_market_panel(
             proxy_urls=["p1"],
             yahoo_day={"US30Y": {"price": 5.603, "pre_close": 5.5, "change_pct": 1.87}},
-            spark_map={"QQQ": [1.0, 2.0, 3.0, 4.0, 5.0]}))
+            spark_map={"NDX": [1.0, 2.0, 3.0, 4.0, 5.0]}))
         got = {row["key"]: row for row in panel}
         # spark 注入：传入项取库内序列，未传项为空数组
-        assert got["QQQ"]["spark"] == [1.0, 2.0, 3.0, 4.0, 5.0]
+        assert got["NDX"]["spark"] == [1.0, 2.0, 3.0, 4.0, 5.0]
         assert got["BZ"]["spark"] == [] and got["USDCNH"]["spark"] == []
         # 主价分工：BZ/GC=新浪 hf 兜底、DXY=Yahoo 补拉主价、USDCNH=fx_susdcnh
         assert got["BZ"]["price"] == 66.10
@@ -1255,14 +1262,16 @@ class TestMarketPanelYahooSpark:
         assert got["VIX"]["price"] is None
 
     def test_fetch_fx_spark(self, monkeypatch):
-        """fetch_fx_spark：Yahoo HKD=X 仅取 spark 字段，代理清单透传。"""
+        """fetch_fx_spark：Yahoo HKD=X 仅取 spark 字段（日线 [日期, 收盘] 对），
+        代理清单透传。"""
         async def fake_ok(symbol, proxy_urls=None):
             assert symbol == "HKD=X" and proxy_urls == ["p1"]
             return {"price": 7.8, "pre_close": 7.8, "change_pct": 0.0,
-                    "spark": [7.81, 7.82, 7.80]}
+                    "spark": [["2026-10-10", 7.81], ["2026-10-13", 7.80]]}
 
         monkeypatch.setattr(pf, "_fetch_yahoo_chart", fake_ok)
-        assert asyncio.run(pf.fetch_fx_spark(proxy_urls=["p1"])) == [7.81, 7.82, 7.80]
+        assert asyncio.run(pf.fetch_fx_spark(proxy_urls=["p1"])) == \
+            [["2026-10-10", 7.81], ["2026-10-13", 7.80]]
 
     def test_fetch_fx_spark_fail(self, monkeypatch):
         """chart 失败（空 dict）→ 返回空数组，不抛异常。"""
@@ -1271,6 +1280,13 @@ class TestMarketPanelYahooSpark:
 
         monkeypatch.setattr(pf, "_fetch_yahoo_chart", fake_fail)
         assert asyncio.run(pf.fetch_fx_spark()) == []
+
+    def test_fx_spark_chart_window_gte_10d(self):
+        """fx_spark 图表窗口 ≥10 日历日：任意星期回望恒含 ≥5 个交易日，
+        否则周末+假日叠加时日线点数 <5 触发前端画线门槛被隐藏
+        （2026-10-13 实证 range=5d 仅 4 点 → USD/HKD 卡片无折线）。"""
+        assert "range=10d" in pf.YAHOO_CHART_URL
+        assert "interval=1d" in pf.YAHOO_CHART_URL
 
 
 class TestH24AliasDerive:

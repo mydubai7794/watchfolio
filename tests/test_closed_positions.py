@@ -10,6 +10,7 @@ from datetime import date, datetime
 
 import database as db
 import ledger
+import portfolio_fetcher as pf
 import server
 from fastapi.testclient import TestClient
 
@@ -352,6 +353,8 @@ def _client(monkeypatch):
 def _reset_closed_cache(monkeypatch):
     monkeypatch.setattr(server, "_closed_ctx_cache",
                         {"ts": 0.0, "trades": None, "holdings": None})
+    monkeypatch.setattr(server, "_closed_exit_ctx",
+                        {"ts": 0.0, "mapping": {}})
     monkeypatch.setattr(server, "_closed_pnl_overrides_cache",
                         {"ts": 0.0, "value": None})
     monkeypatch.setattr(server, "_anchor_start_cache",
@@ -498,3 +501,73 @@ def test_kline_trades_email_date_fallback(monkeypatch):
     client = _client(monkeypatch)
     d = client.get("/api/kline/MU?tf=day&range=1000").json()
     assert d["trades"][0]["date"] == "2026-10-02"
+
+
+# ---------------------------------------------------------------------------
+# 当日贡献出图口径：清仓超过 1 个交易日的 today_pnl 置 null
+# （_mask_stale_closed_pnl 纯函数 + overview 端点接线）
+# ---------------------------------------------------------------------------
+
+def _pos(sym, qty, today=0.0):
+    """构造 positions 形状行（mask 只消费 symbol/quantity/today_pnl）。"""
+    return {"symbol": sym, "quantity": qty, "today_pnl": today}
+
+
+def test_mask_stale_closed_pnl_weekday(monkeypatch):
+    """工作日周三盘中（cutoff=周二）：在仓行/清仓当日/次交易日保留，
+    更早清仓与无成交占位行 today_pnl 置 None；stale 行原样；入参不被修改。"""
+    wed = datetime(2026, 10, 14, 12, 0, tzinfo=pf.ET_TZ)   # 周三 regular
+    rows = [_pos("QQQ", 10, 30.0),     # 在仓：不动
+            _pos("MU", 0),             # 清仓当日（exit=周三）
+            _pos("AMD", 0),            # 次交易日（exit=周二）
+            _pos("LITE", 0),           # 陈旧（exit=上周五）
+            _pos("F", 0),              # qty=0 无成交占位：出图
+            {"symbol": "SKHY", "quantity": 0, "today_pnl": None}]  # stale 原样
+    out = server._mask_stale_closed_pnl(
+        rows, {"MU": "2026-10-14", "AMD": "2026-10-13", "LITE": "2026-10-09"},
+        now_et=wed)
+    assert [p["today_pnl"] for p in out] == [30.0, 0.0, 0.0, None, None, None]
+    assert rows[3]["today_pnl"] == 0.0   # 浅拷贝：入参行不被置 null
+
+
+def test_mask_stale_closed_pnl_weekend(monkeypatch):
+    """周六（场=周五，cutoff=周四）：周五/周四清仓保留，周三及更早出图
+    （周四清仓到周六恰经 1 个完整交易日，不大于 1 仍保留）。"""
+    sat = datetime(2026, 10, 17, 12, 0, tzinfo=pf.ET_TZ)
+    out = server._mask_stale_closed_pnl(
+        [_pos("A", 0), _pos("B", 0), _pos("C", 0)],
+        {"A": "2026-10-16", "B": "2026-10-15", "C": "2026-10-14"}, now_et=sat)
+    assert [p["today_pnl"] for p in out] == [0.0, 0.0, None]
+
+
+def test_mask_stale_closed_pnl_monday_pre(monkeypatch):
+    """周一盘前 08:00（场=周五，cutoff=周四）：周五清仓保留（仍属周五场），
+    上周三出图；空映射时 qty=0 行全出图（冷启动/映射失败降级不误杀在仓）。"""
+    mon_pre = datetime(2026, 10, 12, 8, 0, tzinfo=pf.ET_TZ)
+    out = server._mask_stale_closed_pnl(
+        [_pos("A", 0), _pos("B", 0)],
+        {"A": "2026-10-09", "B": "2026-10-07"}, now_et=mon_pre)
+    assert [p["today_pnl"] for p in out] == [0.0, None]
+    empty = server._mask_stale_closed_pnl([_pos("A", 0)], {}, now_et=mon_pre)
+    assert empty[0]["today_pnl"] is None   # qty=0 无映射：保守出图
+
+
+def test_overview_masks_stale_closed_today_pnl(monkeypatch):
+    """overview 端点接线：陈旧清仓行（exit=2026-02-10）today_pnl 置 null。"""
+    async def fake_trades():
+        return [_tr("MU", "BUY", 10, 100, datetime(2026, 2, 1)),
+                _tr("MU", "SELL", 10, 120, datetime(2026, 2, 10))]
+
+    async def fake_holdings(enabled_only=False):
+        return [_h("MU", 0)]
+
+    monkeypatch.setattr(server.db, "get_all_trades", fake_trades)
+    monkeypatch.setattr(server.db, "get_holdings", fake_holdings)
+    _reset_closed_cache(monkeypatch)
+    monkeypatch.setattr(server, "portfolio_cache", {
+        "ok": True, "session": "regular", "positions": [_pos("MU", 0)],
+        "summary": {"total_value": 0.0}, "cash": [], "errors": []})
+    client = _client(monkeypatch)
+    r = client.get("/api/portfolio/overview")
+    assert r.status_code == 200
+    assert r.json()["positions"][0]["today_pnl"] is None
