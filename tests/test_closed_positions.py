@@ -514,35 +514,36 @@ def _pos(sym, qty, today=0.0):
 
 
 def test_mask_stale_closed_pnl_weekday(monkeypatch):
-    """工作日周三盘中（cutoff=周二）：在仓行/清仓当日/次交易日保留，
-    更早清仓与无成交占位行 today_pnl 置 None；stale 行原样；入参不被修改。"""
+    """工作日周三盘中（cutoff=周三场）：在仓行/清仓当日保留，次交易日起
+    today_pnl 置 None；stale 行原样；入参不被修改。"""
     wed = datetime(2026, 10, 14, 12, 0, tzinfo=pf.ET_TZ)   # 周三 regular
     rows = [_pos("QQQ", 10, 30.0),     # 在仓：不动
             _pos("MU", 0),             # 清仓当日（exit=周三）
-            _pos("AMD", 0),            # 次交易日（exit=周二）
+            _pos("AMD", 0),            # 次交易日（exit=周二）：出图
             _pos("LITE", 0),           # 陈旧（exit=上周五）
             _pos("F", 0),              # qty=0 无成交占位：出图
             {"symbol": "SKHY", "quantity": 0, "today_pnl": None}]  # stale 原样
     out = server._mask_stale_closed_pnl(
         rows, {"MU": "2026-10-14", "AMD": "2026-10-13", "LITE": "2026-10-09"},
         now_et=wed)
-    assert [p["today_pnl"] for p in out] == [30.0, 0.0, 0.0, None, None, None]
+    assert [p["today_pnl"] for p in out] == [30.0, 0.0, None, None, None, None]
     assert rows[3]["today_pnl"] == 0.0   # 浅拷贝：入参行不被置 null
 
 
 def test_mask_stale_closed_pnl_weekend(monkeypatch):
-    """周六（场=周五，cutoff=周四）：周五/周四清仓保留，周三及更早出图
-    （周四清仓到周六恰经 1 个完整交易日，不大于 1 仍保留）。"""
+    """周六（场=周五，cutoff=周五）：周五清仓保留（周末仍属周五场），
+    周四及更早出图。"""
     sat = datetime(2026, 10, 17, 12, 0, tzinfo=pf.ET_TZ)
     out = server._mask_stale_closed_pnl(
         [_pos("A", 0), _pos("B", 0), _pos("C", 0)],
         {"A": "2026-10-16", "B": "2026-10-15", "C": "2026-10-14"}, now_et=sat)
-    assert [p["today_pnl"] for p in out] == [0.0, 0.0, None]
+    assert [p["today_pnl"] for p in out] == [0.0, None, None]
 
 
 def test_mask_stale_closed_pnl_monday_pre(monkeypatch):
-    """周一盘前 08:00（场=周五，cutoff=周四）：周五清仓保留（仍属周五场），
-    上周三出图；空映射时 qty=0 行全出图（冷启动/映射失败降级不误杀在仓）。"""
+    """周一盘前 08:00（场=周五，cutoff=周五）：周五清仓保留（仍属周五场，
+    即清仓当日），上周三出图；空映射时 qty=0 行全出图（冷启动/映射失败
+    降级不误杀在仓）。"""
     mon_pre = datetime(2026, 10, 12, 8, 0, tzinfo=pf.ET_TZ)
     out = server._mask_stale_closed_pnl(
         [_pos("A", 0), _pos("B", 0)],

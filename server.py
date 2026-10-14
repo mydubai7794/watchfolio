@@ -2592,8 +2592,8 @@ async def portfolio_overview():
     except Exception as e:
         data["closed"] = []
         logger.warning("closed 块构建失败（本轮降级空数组）: %s", e)
-    # 当日贡献出图口径：清仓超过 1 个交易日的标的 today_pnl 置 null（清仓
-    # 当日/次交易日保留），过滤映射复用 closed 上下文（60s eventual）
+    # 当日贡献出图口径：非清仓当日的标的 today_pnl 置 null（仅清仓当日
+    # 保留），过滤映射复用 closed 上下文（60s eventual）
     data["positions"] = _mask_stale_closed_pnl(
         data.get("positions") or [], await _get_closed_exit_mapping())
     # 决策上下文（facts only，agent 接口同源；60s 缓存，缺数逐项 null）
@@ -2705,23 +2705,21 @@ async def _get_closed_exit_mapping() -> dict[str, str]:
 
 def _mask_stale_closed_pnl(positions: list[dict], exit_by_sym: dict[str, str],
                            now_et: datetime | None = None) -> list[dict]:
-    """当日贡献口径：清仓超过 1 个交易日的标的 today_pnl 置 null。
+    """当日贡献口径：非清仓当日（exit_date < 当前一场交易日）的标的
+    today_pnl 置 null。
 
     qty==0 行的 today_pnl 恒为 0（数量归零），对当日盈亏总和无影响，但会以
-    $0 空行挂在分析看板「当日贡献」图中——清仓当日/次交易日保留（用户刚
-    卖出的过渡展示），更早的清仓行置 null 出图。判定 cutoff = 当前一场
-    交易日（trading_session_key，周末自动回退）的前一个工作日：exit_date
-    >= cutoff 保留；qty==0 且无 exit_date（无成交记录的占位清仓行）一并
-    出图。返回浅拷贝行，不改入参（portfolio_cache 行只读共享）。
+    $0 空行挂在分析看板「当日贡献」图中——仅清仓当日保留（当日场图尚有
+    过渡意义），次一交易日起置 null 出图。cutoff = 当前一场交易日
+    （trading_session_key，凌晨/周末自动归属上一场）：exit_date >= cutoff
+    保留；qty==0 且无 exit_date（无成交记录的占位清仓行）一并出图。
+    返回浅拷贝行，不改入参（portfolio_cache 行只读共享）。
     @author yys"""
     if not positions:
         return positions
     if now_et is None:
         now_et = datetime.now(pf.ET_TZ)
-    k = pf.trading_session_key(now_et) - timedelta(days=1)
-    while k.weekday() >= 5:   # 跳过周末（假日不识别：假日次日提前一天排除，可接受近似）
-        k -= timedelta(days=1)
-    cutoff = k.isoformat()
+    cutoff = pf.trading_session_key(now_et).isoformat()
     out: list[dict] = []
     for p in positions:
         if (p.get("quantity") or 0) > 1e-9 or p.get("today_pnl") is None:
